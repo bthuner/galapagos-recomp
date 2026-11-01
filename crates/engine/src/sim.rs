@@ -14,7 +14,12 @@
 //! buffering.
 //!
 //! Object ids are 1-based list indices, the camera included.
+//!
+//! After both passes, Mendel takes his turn (`creature.rs`): objects first,
+//! then the creature, as in `Game_Tick` @ 0x41bc50. He reads the world as
+//! the objects left it and posts his touch events for the *next* tick.
 
+use crate::creature::Creature;
 use crate::world::WorldMesh;
 use galapagos_formats::logic::{Actions, LogicView, PortalAction};
 use galapagos_formats::worlds::{Object, Section, WorldObject};
@@ -34,6 +39,19 @@ pub struct HostEvent {
 pub const EV_MUSIC: u32 = 1; // a = Smacker file 1..10, 0 = stop
 pub const EV_SECTION: u32 = 2; // a = section, b = level (time screen)
 pub const EV_SOUND: u32 = 3; // a = section sound index, b = object id
+pub const EV_CAMERA_SNAP: u32 = 4; // a teleporter of kind 2 asks the camera to jump
+
+/// What a portal or save pad asks of Mendel; the creature picks these up
+/// on its tick (`Game_RequestTeleport` @ 0x41c690 queues them the same way).
+#[derive(Clone, Copy, Debug)]
+pub enum Request {
+    /// `Game_SpawnCreature` @ 0x41c590: appear at `at` facing `heading`.
+    Spawn { at: [f32; 3], heading: i32 },
+    /// Portal kinds 1, 2 and 7.
+    Teleport { at: [f32; 3], heading: i32, snap: bool },
+    /// `Save` trigger (`0x41ce90`): the respawn point after a death.
+    SavePoint { at: [f32; 3] },
+}
 
 struct Runtime {
     obj: Option<WorldObject>,
@@ -69,6 +87,13 @@ pub struct Sim {
     pub events: Vec<HostEvent>,
     /// Vertex range touched since the host last uploaded (first, end).
     pub dirty: Option<(u32, u32)>,
+    /// Mendel, once the host gave us his body and brain.
+    pub creature: Option<Creature>,
+    /// Portal requests waiting for the creature's tick.
+    pub requests: Vec<Request>,
+    /// The Space bar is held: every `STel` object counts as clicked, the
+    /// original's "skip the introduction" key (`STel` Update @ 0x41af10).
+    pub skip_held: bool,
 }
 
 impl Sim {
@@ -110,7 +135,19 @@ impl Sim {
                 }
             })
             .collect();
-        Sim { objs, picked: None, next_pick: None, rng: Cell::new(1), tick: 0, wake_all: false, events: Vec::new(), dirty: None }
+        Sim {
+            objs,
+            picked: None,
+            next_pick: None,
+            rng: Cell::new(1),
+            tick: 0,
+            wake_all: false,
+            events: Vec::new(),
+            dirty: None,
+            creature: None,
+            requests: Vec::new(),
+            skip_held: false,
+        }
     }
 
     /// The CRT `rand()` the original links (MSVC LCG, 15-bit output).
@@ -178,7 +215,63 @@ impl Sim {
             let a = sm.resolve(pending);
             self.apply(i, a, mesh);
         }
+
+        // Mendel moves through the world the objects just left.
+        if let Some(mut c) = self.creature.take() {
+            c.tick(self, mesh);
+            self.creature = Some(c);
+        }
         self.tick += 1;
+    }
+
+    // ——— What the creature may see and touch ———
+
+    /// Current position and rotation (1024ths) of object list index `i`.
+    pub(crate) fn pose(&self, i: usize) -> ([i32; 3], [i32; 3]) {
+        self.objs.get(i).map_or(([0; 3], [0; 3]), |o| (o.pos, o.rot))
+    }
+
+    /// Moves object `i` (used to glue `MEnc` to Mendel).
+    pub(crate) fn set_pose(&mut self, i: usize, pos: [i32; 3], rot: [i32; 3], mesh: &mut WorldMesh) {
+        let Some(o) = self.objs.get_mut(i) else { return };
+        o.pos = pos;
+        o.rot = rot;
+        if let Some(d) = o.draw {
+            write_transform(&mut mesh.transforms[d * 16..d * 16 + 16], pos, rot);
+        }
+    }
+
+    /// Flags of polygon `p` of object `i` in its current appearance frame
+    /// (0 if it has none): the collision classes of docs/re/objects.md §3.
+    pub(crate) fn frame_flags(&self, i: usize, p: usize) -> u32 {
+        let Some(o) = self.objs.get(i) else { return 0 };
+        let Some(state) = o.obj.as_ref().and_then(|w| w.appearance.as_ref()).and_then(|s| s.get(o.appearance)) else {
+            return 0;
+        };
+        let frame = *o.poly_frame.get(p).unwrap_or(&0);
+        state.polygons.get(p).and_then(|f| f.get(frame).or(f.first())).map_or(0, |f| f.flags)
+    }
+
+    /// `WorldObject_PostEvent` @ 0x4232f0: OR `bits` into the object's
+    /// events and forward them up the folder chain, so a folder "feels"
+    /// Mendel touching any of its descendants.
+    pub(crate) fn post_event(&mut self, i: usize, bits: u32) {
+        let mut at = Some(i);
+        let mut guard = 0;
+        while let Some(k) = at {
+            let Some(o) = self.objs.get_mut(k) else { break };
+            o.events |= bits;
+            let parent = o.obj.as_ref().map_or(-1, |w| w.folder);
+            at = (parent >= 1).then(|| parent as usize - 1);
+            guard += 1;
+            if guard > self.objs.len() {
+                break; // a malformed cycle; none on the CD
+            }
+        }
+    }
+
+    pub(crate) fn mark_dirty(&mut self, first: u32, end: u32) {
+        mark(&mut self.dirty, first, end);
     }
 
     fn apply(&mut self, i: usize, a: Actions, mesh: &mut WorldMesh) {
@@ -217,10 +310,27 @@ impl Sim {
             }
             b"Voic" => self.events.push(HostEvent { kind: EV_MUSIC, a: p.shorts[0] as i32, b: 0 }),
             b"Tele" | b"Strt" | b"STel" => {
-                if let PortalAction::ChangeSection { section, level } = p.portal() {
-                    self.events.push(HostEvent { kind: EV_SECTION, a: section as i32, b: level as i32 });
+                let o = self.objs[i].pos;
+                let at = |off: [i32; 3]| [(o[0] + off[0]) as f32, (o[1] + off[1]) as f32, (o[2] + off[2]) as f32];
+                match p.portal() {
+                    PortalAction::ChangeSection { section, level } => {
+                        self.events.push(HostEvent { kind: EV_SECTION, a: section as i32, b: level as i32 })
+                    }
+                    // inferred: `mode` is ignored; the offset is always
+                    // relative to the portal, which fits every pad on the CD.
+                    PortalAction::Spawn { offset, heading, .. } => self.requests.push(Request::Spawn { at: at(offset), heading }),
+                    PortalAction::Teleport { offset, heading, snap_camera, .. } => {
+                        self.requests.push(Request::Teleport { at: at(offset), heading, snap: snap_camera })
+                    }
+                    // Kinds 5/6 only make Mendel react (an animation).
+                    PortalAction::ReactOnly | PortalAction::Other(_) => {}
                 }
-                // Spawn and teleport need Mendel: next milestone.
+            }
+            b"Save" => {
+                if p.shorts[0] != 0 {
+                    let o = self.objs[i].pos;
+                    self.requests.push(Request::SavePoint { at: o.map(|c| c as f32) });
+                }
             }
             _ => {}
         }
@@ -354,7 +464,8 @@ struct View<'a> {
 
 impl LogicView for View<'_> {
     fn clicked(&self) -> bool {
-        self.sim.picked == Some(self.i as u16 + 1)
+        let skip = self.sim.skip_held && self.sim.objs[self.i].obj.as_ref().is_some_and(|w| &w.kind == b"STel");
+        skip || self.sim.picked == Some(self.i as u16 + 1)
     }
     fn ticks(&self) -> u16 {
         self.sim.objs[self.i].ticks
@@ -383,9 +494,9 @@ impl LogicView for View<'_> {
 // Rotations are in 1024ths of a turn. The axis order is not yet confirmed
 // from the exe (0x402370); we use Z·Y·X, the usual choice of the period.
 
-type M = [f32; 12]; // 3×3 rotation (row-major) + translation
+pub(crate) type M = [f32; 12]; // 3×3 rotation (row-major) + translation
 
-fn transform(pos: [i32; 3], rot: [i32; 3]) -> M {
+pub(crate) fn transform(pos: [i32; 3], rot: [i32; 3]) -> M {
     let a = rot.map(|r| r as f32 * core::f32::consts::TAU / 1024.0);
     let (sx, cx) = a[0].sin_cos();
     let (sy, cy) = a[1].sin_cos();
@@ -399,11 +510,22 @@ fn transform(pos: [i32; 3], rot: [i32; 3]) -> M {
     ]
 }
 
-fn apply(m: &M, v: [f32; 3]) -> [f32; 3] {
+pub(crate) fn apply(m: &M, v: [f32; 3]) -> [f32; 3] {
     [
         m[0] * v[0] + m[1] * v[1] + m[2] * v[2] + m[9],
         m[3] * v[0] + m[4] * v[1] + m[5] * v[2] + m[10],
         m[6] * v[0] + m[7] * v[1] + m[8] * v[2] + m[11],
+    ]
+}
+
+/// The inverse of [`apply`]: world point → object-local (the rotation is
+/// orthonormal, so its inverse is its transpose).
+pub(crate) fn unapply(m: &M, v: [f32; 3]) -> [f32; 3] {
+    let d = [v[0] - m[9], v[1] - m[10], v[2] - m[11]];
+    [
+        m[0] * d[0] + m[3] * d[1] + m[6] * d[2],
+        m[1] * d[0] + m[4] * d[1] + m[7] * d[2],
+        m[2] * d[0] + m[5] * d[1] + m[8] * d[2],
     ]
 }
 

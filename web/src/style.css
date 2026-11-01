@@ -120,7 +120,7 @@ body::before {
   aspect-ratio: 4 / 3;
   background: #000;
 }
-.log { color: var(--mute); font-size: 0.8rem; }
+.log { color: var(--mute); font-size: 0.8rem; white-space: pre-wrap; max-width: 100%; }
 
 .screen { position: relative; }
 .start {

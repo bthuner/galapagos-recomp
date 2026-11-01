@@ -78,12 +78,39 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
         return [...new Uint32Array(wasm.memory.buffer, wasm.sim_dirty_ptr(), 2)];
       },
       wakeAll: (on) => wasm.sim_set_wake_all(on ? 1 : 0),
+      // The original's Space key: while held, every 'STel' object counts as
+      // clicked (section 0 uses one to skip the introduction).
+      holdSkip: (on) => wasm.sim_hold_skip(on ? 1 : 0),
       click: (o, d) => wasm.sim_click(o[0], o[1], o[2], d[0], d[1], d[2]),
       // { position: [x, y, z], state } of object `id` (1-based).
       object(id) {
         const [x, y, z, state] = new Int32Array(wasm.memory.buffer, wasm.sim_object_info(id), 4);
         return { position: [x, y, z], state };
       },
+    },
+
+    // Mendel (see crates/engine/src/creature.rs). His posed mesh is rebuilt
+    // in world space every tick, in the world's 7-float vertex layout.
+    creature: {
+      // A fresh view each call: memory may have grown, and the vertex
+      // count changes (0 while he is absent or blinking).
+      vertices: () => new Float32Array(wasm.memory.buffer, wasm.creature_vertices_ptr(), wasm.creature_vertex_count() * 7),
+      state() {
+        const s = new Float32Array(wasm.memory.buffer, wasm.creature_state(), 16);
+        return {
+          mode: ["absent", "appearing", "alive", "vanishing"][s[0]],
+          position: [s[1], s[2], s[3]],
+          heading: s[4], // 1024ths of a turn; forward = (cos, 0, sin)
+          ground: s[5] ? { object: s[5], polygon: s[6] } : null,
+          eyes: { left: s[7], right: s[8] },
+          actuators: { posture: s[9], speed: s[10], turn: s[11] },
+          walked: s[12], touches: s[13], deaths: s[14], generations: s[15],
+        };
+      },
+      // Chase-camera collision: clear fraction of the segment from → eye.
+      clearance: (f, e) => wasm.creature_camera_clearance(f[0], f[1], f[2], e[0], e[1], e[2]),
+      // Right click: a ray against his mesh. Returns "left", "right" or null.
+      touch: (o, d) => [null, "left", "right"][wasm.creature_touch_ray(o[0], o[1], o[2], d[0], d[1], d[2])],
     },
 
     // Smacker movies. The engine takes ownership of the uploaded bytes.

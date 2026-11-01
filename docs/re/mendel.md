@@ -182,6 +182,9 @@ At full speed straight ahead: about 39 units/tick; spinning: up to about
 * airborne: ballistic, `vel += up * g >> 10`, `pos += vel >> 8`, spin.
 * gravity `g` per tick: `-7` normally, `+7` under affliction 12, `-2`
   under 10, `0` under 11 (inferred: anti/low/zero gravity zones).
+  Airborne the constants are `0x700`/`0x200` added as `up * g >> 10` to a
+  velocity kept in 1/256 units: the same **7 units/tick²** in both modes
+  (verified in the listing at `0x4180d9` and `0x41814e`).
 
 `CreatureMover_CollideAndTouch` @ `0x418450` (slot 9), every tick:
 
@@ -324,11 +327,13 @@ repeat n3c times: Actuator_Step(act3c, 0, 256); Actuator_Step(act40, 0, |2*act3c
 
 So turning only happens while walking. An **actuator** (`Actuator_ctor`
 @ `0x42aa00(rate, shift=3, start)`: act38 = (13, 256), others = (20, 128))
-is a slew-limited servo in 16.16 fixed point (`Actuator_Step` @ `0x42aa50`):
+is a slew-limited servo in 16.16 fixed point (`Actuator_Step` @ `0x42aa50`).
+The constructor stores `rate << 16` (checked in the listing), so the speed
+limit is `rate` whole units per tick: 13 for posture, 20 for speed/turn.
 
 ```text
 step(bias, dt):                                   # dt = 256 is one tick
-  vmax = rate*dt >> 8;  vel = (vel << 8) / last_dt * dt >> 8;  last_dt = dt
+  vmax = (rate << 16)*dt >> 8;  vel = (vel << 8) / last_dt * dt >> 8;  last_dt = dt
   prev = value
   if target > pos:  acc = vel < vmax  ? (vmax - (vel < 1 ? 4*vel : vel)) >> shift : 0
   if target < pos:  acc = vel > -vmax ? (vel < 0 ? -(vmax + vel) : -4*vel - vmax) >> shift : 0
@@ -450,6 +455,35 @@ Creature_HandleSurfaceEvents()   pain, death, sounds
 simulation states (`CreatureMover_Step` blends previous/current transforms
 with it). **The simulation rate itself was not found**: the only fixed
 delay seen is a 17 ms busy-wait in a palette fade. Open question.
+
+## 8. What the runtime port verified (crates/engine/src/creature.rs)
+
+Running Mendel in the live section-0 simulation confirmed or corrected:
+
+* **Model origin**: the posed feet end exactly at `y = 41 + stance*166/256`
+  (41 / 124 / 221 measured at stances 0 / 128 / 255): the origin floats
+  `height` above the ground. Model axes after the load transform are
+  forward `+x`, down `+y`, left `+z` (hull point 0, `z = +450`, drives the
+  *left* input). Verified.
+* **Hull points**: the `y` of the `x,z,y` triples must be *up* (inferred):
+  with `y` down, points 0..3 would sit under the floor and touch forever.
+* **One-sided polygons** (inferred, consistent with every floor checked):
+  `(v1-v0) x (v2-v0)` points to the solid side's front. The section-0
+  `Strt` (#57) spawns Mendel exactly on the *ceiling plane* of the birth
+  tube #54 (offset `(-387, -922, 0)`, Y down); only back-face culling lets
+  him fall *into* the tube. Verified at runtime.
+* **The intro is a ride**: after the spawn, capsule #3 docks around the
+  tube (its floor polygons become solid with appearance 3+), and its
+  1,992-frame motion path carries Mendel, rolling, to the main area. A
+  surface-attached mover is required (he keeps his position *and*
+  orientation in the platform's frame). Verified at runtime: he arrives
+  after ~130 s.
+* **Touch wakes folders**: dropped on platform #77 (folder #75), his event
+  1 switches the sleeping upper-level folder #145 back on within 20 ticks.
+  Verified (test `mendel_wakes_the_world_in_section0`).
+* **Pads repeat**: portal #83 in state 3 requests a teleport *every tick*
+  until it feels Mendel; the port ignores requests whose destination is
+  within 1,500 units (inferred), otherwise he could never land.
 
 ## Open questions
 

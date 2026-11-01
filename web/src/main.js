@@ -40,7 +40,8 @@ async function boot(files) {
   await playMovie(engine, await bytesOf(files["0"]), $("screen"), audio, { scanlines });
 
   // The worlds, alive: the 24 Hz object simulation runs; clicks reach the
-  // state machines. Mendel is not in yet.
+  // state machines; Mendel is spawned by the section's start portal and
+  // walks, senses and learns on his own (crates/engine/src/creature.rs).
   $("screen").parentElement.hidden = true;
   $("world").hidden = false;
   const worlds = engine.openWorlds(await bytesOf(files.worlds));
@@ -64,17 +65,51 @@ async function boot(files) {
       if (!n) return;
       for (const ev of engine.sim.tick(n)) {
         if (ev.kind === 1) music(ev.a);
+        if (ev.kind === 4) view.snap(); // a teleporter asked for a camera cut
         if (ev.kind === 2) {
           status(`A dimensional gate opened: section ${current} → ${ev.a} (time screen of level ${ev.b}).`);
           setTimeout(() => show(ev.a), 0);
         }
       }
+      mendelWatch();
     },
     onPick(origin, dir) {
       const id = engine.sim.click(origin, dir);
       status(id ? `Clicked object #${id}.` : "Nothing clickable there.");
     },
+    // Right click: touch Mendel. He feels it like bumping into something
+    // on that side for 4 ticks, and his brain decides what to do with it.
+    onTouch(origin, dir) {
+      const side = engine.creature.touch(origin, dir);
+      status(side ? `You touched Mendel's ${side} side.` : "Right-click Mendel to touch him.");
+    },
+    onFollowChange: (on) => ($("follow-mendel").checked = on),
+    clearance: engine.creature.clearance,
   });
+  // Follow Mendel by default as soon as he appears, unless the user turned
+  // the chase camera off in this section.
+  let mendelSeen = false, followDeclined = false;
+  const mendelWatch = () => {
+    const c = engine.creature.state();
+    const here = c.mode !== "absent";
+    if (here && !mendelSeen && !followDeclined) view.follow(true, engine.creature.state);
+    mendelSeen = here;
+  };
+  $("follow").hidden = false;
+  $("follow-mendel").onchange = (e) => {
+    followDeclined = !e.target.checked;
+    view.follow(e.target.checked, engine.creature.state);
+  };
+  // Space: the original's "skip" key (held = every STel object clicked).
+  // Captured here so it doesn't also stop the music like other keys do.
+  const skip = (down) => (e) => {
+    if (e.code !== "Space" || e.repeat) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    engine.sim.holdSkip(down);
+  };
+  addEventListener("keydown", skip(true), { capture: true });
+  addEventListener("keyup", skip(false), { capture: true });
   const picker = $("sections");
   picker.hidden = false;
   $("wake").hidden = false;
@@ -84,12 +119,14 @@ async function boot(files) {
   const show = (i) => {
     current = i;
     const w = worlds.build(i);
-    view.load({ ...w, takeDirty: engine.sim.takeDirty });
+    view.load({ ...w, takeDirty: engine.sim.takeDirty, creatureVertices: engine.creature.vertices });
+    mendelSeen = false;
     engine.sim.wakeAll($("wake-all").checked);
     picker.querySelectorAll("button").forEach((b, j) => b.classList.toggle("is-on", j === i));
     summary =
       `Section ${i}: ${w.objects} objects, ${w.vertices.length / 21} triangles, ${w.textureCount} textures, simulated at ${hz} Hz. ` +
-      "Drag to orbit, wheel to zoom, right-drag to pan, click objects to trigger them.";
+      "Drag to orbit, wheel to zoom, shift- or middle-drag to pan. Click objects to trigger them, " +
+      "right-click Mendel to touch him, hold Space to skip the introduction.";
     status("");
   };
   for (let i = 0; i < worlds.sectionCount; i++) {

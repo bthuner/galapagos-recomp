@@ -8,9 +8,11 @@
 //! fills the buffer, then passes `(ptr, len)` to an `*_open` function, which
 //! takes ownership. JavaScript must not touch or free that buffer afterwards.
 
+mod creature;
 mod sim;
 mod world;
 
+use galapagos_formats::creature::{overlay_for_age, Brain, CreatureBody};
 use galapagos_formats::smacker::{Smacker, YScale};
 use galapagos_formats::worlds::Archive;
 use std::cell::RefCell;
@@ -194,10 +196,28 @@ pub extern "C" fn world_build(i: usize) -> i32 {
         let Ok(section) = archive.world(i) else { return -1 };
         let mesh = world::WorldMesh::build(&section);
         let n = (mesh.vertices.len() / world::FLOATS_PER_VERTEX) as i32;
-        worlds.sim = Some(sim::Sim::new(&section, &mesh));
+        let mut sim = sim::Sim::new(&section, &mesh);
+        // Mendel carries his brain from section to section; the first time,
+        // it comes from the CD (see `default_brain`).
+        let brain = worlds.sim.take().and_then(|s| s.creature).map(|c| c.brain).or_else(|| default_brain(&archive));
+        let body = CreatureBody::parse(&worlds.data, archive.header.creature as usize).ok();
+        if let (Some(body), Some(brain)) = (body, brain) {
+            sim.creature = Some(creature::Creature::new(&section, &mesh, body, brain));
+        }
+        worlds.sim = Some(sim);
         worlds.mesh = Some(mesh);
         n
     })
+}
+
+/// The age preference slider decides which pre-trained brain a new game
+/// starts with (`0x4171ad`). We pick the middle of the slider, level 3.
+/// (not in the original: the preferences dialog, so the age is fixed)
+pub const DEFAULT_AGE: u8 = 128;
+
+fn default_brain(archive: &Archive) -> Option<Brain> {
+    let i = overlay_for_age(DEFAULT_AGE)?;
+    Brain::parse(archive.data, archive.header.creature_overlays[i] as usize).ok()
 }
 
 fn with_mesh<T>(f: impl FnOnce(&world::WorldMesh) -> T, default: T) -> T {
@@ -360,4 +380,102 @@ pub extern "C" fn sim_set_wake_all(on: u32) {
             sim.wake_all = on != 0;
         }
     });
+}
+
+/// Hold (1) or release (0) the "skip" key: Space in the original, which
+/// makes every `STel` object count as clicked (section 0: skip the intro).
+#[no_mangle]
+pub extern "C" fn sim_hold_skip(on: u32) {
+    with_sim_mut(|sim| sim.skip_held = on != 0);
+}
+
+fn with_sim_mut(f: impl FnOnce(&mut sim::Sim)) {
+    WORLDS.with(|w| {
+        if let Some(sim) = w.borrow_mut().as_mut().and_then(|w| w.sim.as_mut()) {
+            f(sim);
+        }
+    });
+}
+
+// ——— Mendel ——————————————————————————————————————————————————————————
+//
+// His posed mesh is rebuilt every tick in world space (same 7-float vertex
+// layout as the world, texture layers 16..19), so the renderer draws it
+// with an identity model matrix.
+
+fn with_creature<T>(f: impl FnOnce(&creature::Creature) -> T, default: T) -> T {
+    WORLDS.with(|w| w.borrow().as_ref().and_then(|w| w.sim.as_ref()).and_then(|s| s.creature.as_ref()).map_or(default, f))
+}
+
+#[no_mangle]
+pub extern "C" fn creature_vertices_ptr() -> *const f32 {
+    with_creature(|c| c.vertices.as_ptr(), core::ptr::null())
+}
+
+/// Number of vertices at [`creature_vertices_ptr`] (0 while he is absent).
+#[no_mangle]
+pub extern "C" fn creature_vertex_count() -> u32 {
+    with_creature(|c| (c.vertices.len() / world::FLOATS_PER_VERTEX) as u32, 0)
+}
+
+thread_local! {
+    static CREATURE_STATE: std::cell::Cell<[f32; 16]> = const { std::cell::Cell::new([0.0; 16]) };
+}
+
+/// Sixteen f32 describing Mendel, for the camera and the HUD:
+///
+/// ```text
+/// 0 mode (0 absent, 1 appearing, 2 alive, 3 vanishing)   1..3 x, y, z
+/// 4 heading (1024ths)   5 ground object id (0 = airborne)   6 ground polygon
+/// 7 left eye/touch   8 right   9 posture   10 speed   11 turn  (actuators, 0..256)
+/// 12 distance walked   13 touch events posted   14 deaths   15 generations evolved
+/// ```
+#[no_mangle]
+pub extern "C" fn creature_state() -> *const f32 {
+    let s = with_creature(
+        |c| {
+            let mode = match c.mode {
+                creature::Mode::Absent => 0.0,
+                creature::Mode::Appearing(_) => 1.0,
+                creature::Mode::Alive => 2.0,
+                creature::Mode::Vanishing(..) => 3.0,
+            };
+            let (gobj, gpoly) = c.ground().map_or((0.0, 0.0), |(o, p)| (o as f32 + 1.0, p as f32));
+            let [a0, a1, a2] = c.outputs().map(|v| v as f32);
+            [
+                mode, c.pos[0], c.pos[1], c.pos[2], c.heading() as f32, gobj, gpoly, c.left as f32, c.right as f32, a0, a1, a2,
+                c.stats.walked, c.stats.touches_posted as f32, c.stats.deaths as f32, c.stats.evolutions as f32,
+            ]
+        },
+        [0.0; 16],
+    );
+    CREATURE_STATE.with(|c| c.set(s));
+    CREATURE_STATE.with(|c| c.as_ptr() as *const f32)
+}
+
+/// Right click: ray against Mendel. Returns 1 if his left side was touched,
+/// 2 for the right, 0 for a miss. A touch is felt for 4 ticks.
+#[no_mangle]
+pub extern "C" fn creature_touch_ray(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32, dz: f32) -> u32 {
+    let mut out = 0;
+    with_sim_mut(|sim| {
+        if let Some(c) = sim.creature.as_mut() {
+            if let Some(left) = c.pick([ox, oy, oz], [dx, dy, dz]) {
+                c.touch(left);
+                out = if left { 1 } else { 2 };
+            }
+        }
+    });
+    out
+}
+
+/// Chase-camera collision: the clear fraction (0..1) of the segment from
+/// `(fx, fy, fz)` to the eye `(ex, ey, ez)` (see `Creature::camera_clearance`).
+#[no_mangle]
+pub extern "C" fn creature_camera_clearance(fx: f32, fy: f32, fz: f32, ex: f32, ey: f32, ez: f32) -> f32 {
+    WORLDS.with(|w| {
+        let guard = w.borrow();
+        let Some(sim) = guard.as_ref().and_then(|w| w.sim.as_ref()) else { return 1.0 };
+        sim.creature.as_ref().map_or(1.0, |c| c.camera_clearance(sim, [fx, fy, fz], [ex, ey, ez]))
+    })
 }
