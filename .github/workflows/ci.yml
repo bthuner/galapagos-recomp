@@ -1,0 +1,16 @@
+name: CI
+
+# Game data isn't available in CI, so real-data tests skip themselves here;
+# this still catches compile errors, unit-test failures and WASM build breaks.
+on: pull_request
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - run: cargo test --workspace
+      - run: ./tools/build.sh
