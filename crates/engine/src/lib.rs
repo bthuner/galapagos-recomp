@@ -169,6 +169,13 @@ struct Worlds {
     /// Sound banks, indexed by `sound::BANK_*`: the current section's,
     /// Mendel's and the predators' (the last two live in the global block).
     banks: [sound::Bank; 3],
+    /// Preferences (see `game_new`, `sound_set_quality`).
+    age: u8,
+    quality: u8,
+    /// The section on screen, and a brain waiting for the next build
+    /// (a new game or an imported `.mnd`).
+    section: usize,
+    pending_brain: Option<Brain>,
 }
 
 thread_local! {
@@ -182,7 +189,8 @@ pub extern "C" fn worlds_open(ptr: *mut u8, len: usize) -> i32 {
     let (n, creature, predator) = match Archive::parse(&data) {
         Ok(a) => {
             let bank = |off: u32| {
-                SoundSet::parse(&data, off as usize).map_or_else(|_| sound::Bank::empty(), |s| sound::Bank::decode(&data, &s))
+                SoundSet::parse(&data, off as usize)
+                    .map_or_else(|_| sound::Bank::empty(), |s| sound::Bank::decode(&data, &s, sound::BEST_QUALITY))
             };
             (a.sections.len() as i32, bank(a.header.creature_sounds), bank(a.header.predator_sounds))
         }
@@ -190,7 +198,17 @@ pub extern "C" fn worlds_open(ptr: *mut u8, len: usize) -> i32 {
     };
     WORLDS.with(|w| {
         let banks = [sound::Bank::empty(), creature, predator];
-        *w.borrow_mut() = Some(Worlds { data, mesh: None, sim: None, events: Vec::new(), banks })
+        *w.borrow_mut() = Some(Worlds {
+            data,
+            mesh: None,
+            sim: None,
+            events: Vec::new(),
+            banks,
+            age: DEFAULT_AGE,
+            quality: sound::BEST_QUALITY,
+            section: 0,
+            pending_brain: None,
+        })
     });
     n
 }
@@ -206,11 +224,13 @@ pub extern "C" fn world_build(i: usize) -> i32 {
         let Ok(section) = archive.world(i) else { return -1 };
         let mesh = world::WorldMesh::build(&section);
         let n = (mesh.vertices.len() / world::FLOATS_PER_VERTEX) as i32;
-        worlds.banks[sound::BANK_WORLD as usize] = sound::Bank::decode(&worlds.data, &section.sounds);
+        worlds.banks[sound::BANK_WORLD as usize] = sound::Bank::decode(&worlds.data, &section.sounds, worlds.quality);
+        worlds.section = i;
         let mut sim = sim::Sim::new(&section, &mesh);
         // Mendel carries his brain from section to section; the first time,
-        // it comes from the CD (see `default_brain`).
-        let brain = worlds.sim.take().and_then(|s| s.creature).map(|c| c.brain).or_else(|| default_brain(&archive));
+        // it comes from the CD for the age preference (see `brain_for_age`).
+        let carried = worlds.sim.take().and_then(|s| s.creature).map(|c| c.brain);
+        let brain = worlds.pending_brain.take().or(carried).or_else(|| brain_for_age(&archive, worlds.age));
         let body = CreatureBody::parse(&worlds.data, archive.header.creature as usize).ok();
         if let (Some(body), Some(brain)) = (body, brain) {
             sim.creature = Some(creature::Creature::new(&section, &mesh, body, brain));
@@ -221,14 +241,20 @@ pub extern "C" fn world_build(i: usize) -> i32 {
     })
 }
 
-/// The age preference slider decides which pre-trained brain a new game
-/// starts with (`0x4171ad`). We pick the middle of the slider, level 3.
-/// (not in the original: the preferences dialog, so the age is fixed)
+/// The Preferences "New Mendel Age" slider (0..=255) decides which brain a
+/// new game starts with (`0x4171ad`): Newborn, 1, 2, 4 or 7 hours. We start
+/// in the middle, "2 hours" (level 3).
 pub const DEFAULT_AGE: u8 = 128;
 
-fn default_brain(archive: &Archive) -> Option<Brain> {
-    let i = overlay_for_age(DEFAULT_AGE)?;
-    Brain::parse(archive.data, archive.header.creature_overlays[i] as usize).ok()
+/// `Game_LoadCreatureBrainForSection` @ 0x41ced0: level 1 is a newborn
+/// (random genome), levels 2..5 load a pre-trained brain from the CD.
+fn brain_for_age(archive: &Archive, age: u8) -> Option<Brain> {
+    let overlay = |i: usize| Brain::parse(archive.data, archive.header.creature_overlays[i] as usize).ok();
+    match overlay_for_age(age) {
+        Some(i) => overlay(i),
+        // inferred seed: any LCG start makes a different newborn.
+        None => overlay(1).map(|t| Brain::newborn(&t, 0x4d656e64)),
+    }
 }
 
 fn with_mesh<T>(f: impl FnOnce(&world::WorldMesh) -> T, default: T) -> T {
@@ -528,4 +554,128 @@ pub extern "C" fn world_emitter(id: u32, n: u32) -> *const i32 {
         EMITTER.with(|s| s.set(v));
     });
     EMITTER.with(|s| s.as_ptr() as *const i32)
+}
+
+// ——— Menus: new game, brains, pictures, preferences ———————————————————
+
+/// File ▸ New: forget the current game and prepare a fresh brain for
+/// `age` (0..=255, the Preferences slider). The next `world_build(0)`
+/// starts the new game. Returns 0, or -1 if no archive is open.
+#[no_mangle]
+pub extern "C" fn game_new(age: u32) -> i32 {
+    WORLDS.with(|w| {
+        let mut guard = w.borrow_mut();
+        let Some(worlds) = guard.as_mut() else { return -1 };
+        let Ok(archive) = Archive::parse(&worlds.data) else { return -1 };
+        worlds.age = age.min(255) as u8;
+        worlds.pending_brain = brain_for_age(&archive, worlds.age);
+        worlds.sim = None; // nothing carries over
+        0
+    })
+}
+
+/// The section currently built (after a load, the saved one).
+#[no_mangle]
+pub extern "C" fn world_section() -> u32 {
+    WORLDS.with(|w| w.borrow().as_ref().map_or(0, |w| w.section as u32))
+}
+
+/// Vertex count of the current section's buffers, without rebuilding.
+#[no_mangle]
+pub extern "C" fn world_current_vertex_count() -> i32 {
+    with_mesh(|m| (m.vertices.len() / world::FLOATS_PER_VERTEX) as i32, -1)
+}
+
+thread_local! {
+    static BRAIN_OUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// File ▸ Export Mendel NERM: serialise his current brain as a `.mnd`
+/// (28,242 bytes). Returns the length; bytes at [`brain_export_ptr`].
+#[no_mangle]
+pub extern "C" fn brain_export() -> u32 {
+    let bytes = WORLDS.with(|w| {
+        let guard = w.borrow();
+        guard.as_ref().and_then(|w| w.sim.as_ref()?.creature.as_ref()).map(|c| c.brain.to_bytes())
+    });
+    BRAIN_OUT.with(|b| {
+        *b.borrow_mut() = bytes.unwrap_or_default();
+        b.borrow().len() as u32
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn brain_export_ptr() -> *const u8 {
+    BRAIN_OUT.with(|b| b.borrow().as_ptr())
+}
+
+/// File ▸ Import Mendel NERM: replace his brain with a `.mnd` (takes the
+/// buffer). Body, position and the world are untouched, as in the original.
+/// Returns 0, or -1 if the bytes aren't a brain.
+#[no_mangle]
+pub extern "C" fn brain_import(ptr: *mut u8, len: usize) -> i32 {
+    let data = unsafe { take(ptr, len) };
+    let Ok(brain) = Brain::parse(&data, 0) else { return -1 };
+    WORLDS.with(|w| {
+        let mut guard = w.borrow_mut();
+        let Some(worlds) = guard.as_mut() else { return -1 };
+        match worlds.sim.as_mut().and_then(|s| s.creature.as_mut()) {
+            Some(c) => c.brain = brain,
+            None => worlds.pending_brain = Some(brain),
+        }
+        0
+    })
+}
+
+thread_local! {
+    static PICTURE: RefCell<(Vec<u8>, [u32; 3])> = const { RefCell::new((Vec::new(), [0; 3])) };
+}
+
+/// UI picture `i` of the archive (time screens, title strips) as opaque
+/// RGBA. Returns a pointer to three u32: width, height, pointer to pixels.
+#[no_mangle]
+pub extern "C" fn picture_info(i: u32) -> *const u32 {
+    WORLDS.with(|w| {
+        let guard = w.borrow();
+        let pic = guard.as_ref().and_then(|w| Archive::parse(&w.data).ok()?.picture(i as usize).ok().map(|p| {
+            let rgba: Vec<u8> = p.pixels.iter().flat_map(|&c| {
+                let [r, g, b] = p.palette[c as usize];
+                [r, g, b, 255]
+            }).collect();
+            (rgba, p.width as u32, p.height as u32)
+        }));
+        PICTURE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            match pic {
+                Some((rgba, wd, ht)) => {
+                    slot.0 = rgba;
+                    slot.1 = [wd, ht, slot.0.as_ptr() as u32];
+                }
+                None => slot.1 = [0; 3],
+            }
+        });
+    });
+    PICTURE.with(|slot| slot.borrow().1.as_ptr())
+}
+
+/// How many UI pictures the archive holds (39 on the retail CD).
+#[no_mangle]
+pub extern "C" fn picture_count() -> u32 {
+    WORLDS.with(|w| w.borrow().as_ref().and_then(|w| Archive::parse(&w.data).ok()).map_or(0, |a| a.header.picture_offsets.len() as u32))
+}
+
+/// Preferences ▸ Sound ▸ Fidelity: which stored copy to play (1 = 8-bit
+/// 11 kHz … 4 = CD quality). Re-decodes all three banks.
+#[no_mangle]
+pub extern "C" fn sound_set_quality(q: u32) {
+    WORLDS.with(|w| {
+        let mut guard = w.borrow_mut();
+        let Some(worlds) = guard.as_mut() else { return };
+        let Ok(archive) = Archive::parse(&worlds.data) else { return };
+        worlds.quality = q.clamp(1, 4) as u8;
+        let set = |off: u32| SoundSet::parse(&worlds.data, off as usize).ok();
+        let decode = |s: Option<SoundSet>| s.map_or_else(sound::Bank::empty, |s| sound::Bank::decode(&worlds.data, &s, worlds.quality));
+        let world = archive.world(worlds.section).ok().map(|s| s.sounds);
+        worlds.banks = [decode(world), decode(set(archive.header.creature_sounds)), decode(set(archive.header.predator_sounds))];
+    });
 }

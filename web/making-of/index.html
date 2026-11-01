@@ -484,6 +484,26 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           silence. Choosing which sound plays uses the game's random generator, not his brain's, so a sound can never
           change how he behaves.
         </p>
+        <h3>Menus, rebuilt from resource tables</h3>
+        <p>
+          Windows programs keep their menus, dialogs and strings in a <em>resource section</em>, a small filesystem
+          inside the <code>.exe</code>. Decoding it gives the game's whole interface, word for word: a File menu (New,
+          Open, Import and Export Mendel NERM, Quit), a Preferences dialog with Resolution, View Size (Full to Petite),
+          Brightness (Darkest to Lightest), Volume, Fidelity (Low to CD Quality) and a "New Mendel Age" slider labelled
+          Newborn, 1, 2, 4 and 7 hours.
+        </p>
+        <p>
+          That slider explained the five brains on the CD: the slider position picks one, and "Newborn" gets a random
+          genome instead. Our pause menu (Esc) keeps the original structure and wording, and every preference does
+          what it said in 1997. Fidelity even switches between the four stored copies of each sound, so "Low"
+          gives you the authentic 8-bit, 11 kHz crunch.
+        </p>
+        <p>
+          The menu's title is the chrome GALAPAGOS strip from the game's own archive. The more elaborate splash and
+          dialog banners live inside <code>galapagos.exe</code>, which is itself packed inside the installer, so the
+          browser can't reach them yet. Brains export as genuine <code>.mnd</code> files (28,242 bytes, like the
+          originals), so a Mendel raised here can be shared.
+        </p>
       </section>
 
       <section id="journal" class="chapter">
@@ -500,6 +520,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> The worlds come alive: a 24 Hz port of the object simulation, with motion paths, appearance changes, music, gates and click picking. Discovered that folders put most of a world to sleep until Mendel arrives.</li>
           <li><time>2026‑11‑02</time> Mendel is alive: born on the birth tube's ceiling, carried by the intro capsule, walking with his real NERM brain, waking folders with his footsteps, and feeling right-clicks.</li>
           <li><time>2026‑11‑02</time> Sound: world emitters with 3-D panning, Mendel's five cues, the best of four stored qualities. Found that emitter sound numbers are 1-based by counting empty slots.</li>
+          <li><time>2026‑11‑02</time> Menus from the exe's resource tables: pause menu, Preferences with the original options (all working, including 8-bit Fidelity), new game by age, .mnd import/export.</li>
         </ol>
       </section>
 
