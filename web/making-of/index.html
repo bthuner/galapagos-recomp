@@ -159,19 +159,59 @@ pos = first_stream_with_valid_crc(overlay)
       <section id="worlds" class="chapter">
         <span class="num">04</span>
         <h2>Inside the worlds</h2>
+        <p class="big">
+          126 MB, no magic number, no compression, no checksum. Just a raw dump of C++ objects, each class reading
+          its own fields in order.
+        </p>
+        <h3>Finding the loader the decompiler missed</h3>
         <p>
-          The 126 MB archive opens with a table that is easy to read once you know the game ships "five worlds":
+          The string <code>"Worlds"</code> has three references. One is the CD check from chapter 03. The other two
+          sit in code Ghidra never turned into a function, because it's only reached through a C++ <em>vtable</em>,
+          a table of method pointers that static analysis can't follow. A raw disassembly listing fills the gap:
+          the game opens the file exactly once, wraps it in a 4 KB buffered stream, and from then on every loader
+          just seeks and reads. On a 2× CD-ROM a seek costs about 100 ms, so you open the file once and stay inside it.
         </p>
         <figure class="hex" id="hex-worlds">
-          <figcaption>The first 36 bytes of <code>worlds</code>. Hover a field.</figcaption>
+          <figcaption>The header. Hover a field. What looked like one 32-bit count is really two 16-bit values.</figcaption>
         </figure>
+        <h3>Clues that it was made on a Mac</h3>
+        <p>The game is a Windows/x86 build, but the data gives away where it was authored:</p>
+        <ul class="strings">
+          <li><code>f9 f9 ed ed f6 f6</code><span>QuickDraw <code>RGBColor</code>: three 16-bit channels with the byte doubled; the engine keeps the high byte</span></li>
+          <li><code>0x2b110000</code><span>a Mac <code>Fixed</code> 16.16 sample rate: 11025.0 Hz, with a "base note" of 60 = middle C</span></li>
+          <li><code>cnEM</code><span>the FourCC <code>'MEnc'</code> written little-endian, so it reads backwards in a hex dump</span></li>
+        </ul>
+        <h3>What's in it</h3>
+        <table class="files">
+          <thead><tr><th>Block</th><th>Format</th><th>What we found</th></tr></thead>
+          <tbody>
+            <tr><td>pictures</td><td>palette + 8-bit pixels</td><td>39 UI screens, e.g. the "LEVEL / TOTAL" time score with Mendel in chrome</td></tr>
+            <tr><td>font</td><td>570×11 strip</td><td>95 ASCII glyphs, 6 px wide</td></tr>
+            <tr><td>sound sets</td><td>PCM, 4 copies</td><td>each sample stored at 8-bit 11 kHz, 16-bit 11/22/44 kHz, one copy per "Fidelity" setting</td></tr>
+            <tr><td>8 world sections</td><td>see below</td><td>environment, palette, textures, sounds, objects</td></tr>
+          </tbody>
+        </table>
         <p>
-          A count (8), then eight absolute offsets into the file, in ascending order. Sections average 14 MB.
-          Before the first section sits a 70 MB global block, which itself begins with an offset table.
-          Each section opens with a number — 999999, 75000, 110000, 60000 — that smells like a timer or
-          budget, followed by runs of doubled bytes (<code>f9 f9 ed ed f6 f6</code>).
+          Each world carries a 256-colour palette and 22–38 textures of 128×128 pixels. The engine caps it at 40,
+          which explains the assert string <em>"Not a vaild texture index"</em>. Between palette and textures sits
+          a 256 KB block that looked like textures but isn't: it's a 32 × 32 × 256 <strong>lighting lookup
+          table</strong>. In 256-colour mode you can't multiply a colour by a light level, so the software renderer
+          looks up "palette entry <em>c</em> at brightness <em>l</em>" instead.
         </p>
-        <p class="wip">Work in progress: tracing the loader functions in the executable to name every structure.</p>
+        <p>
+          Then come the objects, each tagged with a FourCC that picks its C++ class: <code>Objt</code>,
+          <code>Tele</code>, <code>Save</code> (the save pads from the manual), <code>Pred</code> (predators),
+          <code>Cmra</code> (camera paths), <code>Voic</code>… Every record starts with seven absolute "block end"
+          offsets. That design means a reader can skip any block it doesn't understand, which is what lets us parse
+          all eight sections end to end long before we understand everything in them.
+        </p>
+        <p>
+          Meshes are refreshingly simple: a list of polygons as vertex indices, then 16-bit integer vertices
+          relative to the object's position. There are no texture coordinates on disk. The engine appears to stretch
+          each texture across a polygon's first vertices, plus a per-frame offset, so a polygon can scroll its
+          texture. That's how animated surfaces like lava and water work.
+        </p>
+        <p class="wip">Still unknown: the Mendel creature record, the opcodes of the clickable-object state machines, and why there are 8 sections when the box says 5 worlds.</p>
       </section>
 
       <section id="smacker" class="chapter">
@@ -263,6 +303,7 @@ wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></c
           <li><time>2026‑11‑01</time> Unpacked the Wise installer, recovered <code>galapagos.exe</code> and <code>smackw32.dll</code>. Repository scaffolded: Rust workspace, ISO reader, OPFS cache, WebAssembly boot.</li>
           <li><time>2026‑11‑01</time> Smacker decoder in Rust: the Anark intro now plays in the browser, synced to its audio; files 1–10 turn out to be the soundtrack. Found and fixed a classic bug: a <code>display: grid</code> rule overrode the <code>hidden</code> attribute.</li>
           <li><time>2026‑11‑01</time> Interlaced intro: smooth line doubling by default, original scanlines as an option, and no more moiré from pixelated scaling.</li>
+          <li><time>2026‑11‑01</time> The <code>worlds</code> archive decoded down to meshes: header, UI pictures, font, sound sets, palettes, textures, a lighting lookup table, and 16 object classes. All 8 sections parse end to end.</li>
         </ol>
       </section>
 

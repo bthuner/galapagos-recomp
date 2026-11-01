@@ -127,6 +127,7 @@ figcaption { font-size: 0.85rem; color: var(--mute); margin-top: 0.8rem; }
 .hex__grid { display: grid; grid-template-columns: repeat(12, auto); gap: 0.3rem 0.6rem; justify-content: start; }
 .hex__b { padding: 0.15rem 0.2rem; border-radius: 3px; cursor: default; transition: background 0.2s; }
 .hex__b[data-f="count"] { box-shadow: inset 0 -2px var(--ink); }
+.hex__b[data-f="default"] { box-shadow: inset 0 -2px var(--mute); }
 .hex__b[data-f^="off"] { box-shadow: inset 0 -2px var(--teal); }
 .hex__b.is-hot { background: var(--lime); }
 .hex__info { margin-top: 1rem; min-height: 1.6em; font: 0.85rem var(--sans); }
