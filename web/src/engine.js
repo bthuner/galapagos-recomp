@@ -30,6 +30,29 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
       return n;
     },
 
+    // The worlds archive. The engine adopts the bytes; sections are built
+    // into render buffers on demand.
+    openWorlds(bytes) {
+      const n = wasm.worlds_open(...upload(bytes));
+      if (n < 0) throw new Error("Not a Galapagos worlds archive");
+      return {
+        sectionCount: n,
+        build(i) {
+          const verts = wasm.world_build(i);
+          if (verts < 0) throw new Error(`Section ${i} failed to parse`);
+          const textureCount = wasm.world_texture_count();
+          const mem = wasm.memory.buffer;
+          return {
+            vertices: new Float32Array(mem, wasm.world_vertices_ptr(), verts * 7).slice(),
+            textureCount,
+            textures: new Uint8Array(mem, wasm.world_textures_ptr(), textureCount * 128 * 128 * 4).slice(),
+            bounds: [...new Float32Array(mem, wasm.world_bounds_ptr(), 6)],
+            objects: wasm.world_object_count(),
+          };
+        },
+      };
+    },
+
     // Smacker movies. The engine takes ownership of the uploaded bytes.
     openMovie(bytes) {
       if (wasm.movie_open(...upload(bytes)) !== 0) throw new Error("Not a Smacker file");

@@ -8,6 +8,8 @@
 //! fills the buffer, then passes `(ptr, len)` to an `*_open` function, which
 //! takes ownership. JavaScript must not touch or free that buffer afterwards.
 
+mod world;
+
 use galapagos_formats::smacker::{Smacker, YScale};
 use galapagos_formats::worlds::Archive;
 use std::cell::RefCell;
@@ -146,4 +148,79 @@ pub extern "C" fn movie_frame_ptr() -> *const u8 {
 #[no_mangle]
 pub extern "C" fn movie_close() {
     MOVIE.with(|m| *m.borrow_mut() = None);
+}
+
+// ——— Worlds ——————————————————————————————————————————————————————————
+//
+// The 126 MB archive is adopted once; a section is parsed and flattened into
+// GPU buffers on request (see world.rs). Parsing is fast because the format
+// is plain offsets into the same bytes: nothing is decompressed.
+
+struct Worlds {
+    data: Vec<u8>,
+    mesh: Option<world::WorldMesh>,
+}
+
+thread_local! {
+    static WORLDS: RefCell<Option<Worlds>> = const { RefCell::new(None) };
+}
+
+/// Adopt the `worlds` file. Returns the section count, or -1 if malformed.
+#[no_mangle]
+pub extern "C" fn worlds_open(ptr: *mut u8, len: usize) -> i32 {
+    let data = unsafe { take(ptr, len) };
+    let n = match Archive::parse(&data) {
+        Ok(a) => a.sections.len() as i32,
+        Err(_) => return -1,
+    };
+    WORLDS.with(|w| *w.borrow_mut() = Some(Worlds { data, mesh: None }));
+    n
+}
+
+/// Build render buffers for section `i`. Returns the number of vertices
+/// (7 floats each, see world.rs), or -1 on a parse error.
+#[no_mangle]
+pub extern "C" fn world_build(i: usize) -> i32 {
+    WORLDS.with(|w| {
+        let mut guard = w.borrow_mut();
+        let Some(worlds) = guard.as_mut() else { return -1 };
+        let Ok(archive) = Archive::parse(&worlds.data) else { return -1 };
+        let Ok(section) = archive.world(i) else { return -1 };
+        let mesh = world::WorldMesh::build(&section);
+        let n = (mesh.vertices.len() / world::FLOATS_PER_VERTEX) as i32;
+        worlds.mesh = Some(mesh);
+        n
+    })
+}
+
+fn with_mesh<T>(f: impl FnOnce(&world::WorldMesh) -> T, default: T) -> T {
+    WORLDS.with(|w| w.borrow().as_ref().and_then(|w| w.mesh.as_ref()).map_or(default, f))
+}
+
+#[no_mangle]
+pub extern "C" fn world_vertices_ptr() -> *const f32 {
+    with_mesh(|m| m.vertices.as_ptr(), core::ptr::null())
+}
+
+/// Number of 128×128 RGBA texture layers at [`world_textures_ptr`].
+#[no_mangle]
+pub extern "C" fn world_texture_count() -> u32 {
+    with_mesh(|m| m.texture_count, 0)
+}
+
+#[no_mangle]
+pub extern "C" fn world_textures_ptr() -> *const u8 {
+    with_mesh(|m| m.textures.as_ptr(), core::ptr::null())
+}
+
+/// Six f32: min x, y, z, max x, y, z.
+#[no_mangle]
+pub extern "C" fn world_bounds_ptr() -> *const f32 {
+    with_mesh(|m| m.bounds.as_ptr(), core::ptr::null())
+}
+
+/// How many objects with geometry the current section contains.
+#[no_mangle]
+pub extern "C" fn world_object_count() -> u32 {
+    with_mesh(|m| m.objects_drawn, 0)
 }

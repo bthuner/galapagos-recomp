@@ -1,6 +1,7 @@
 import { loadCached, importIso, forget } from "./disc.js";
 import { loadEngine } from "./engine.js";
 import { playMovie } from "./movie.js";
+import { createWorldView } from "./world-view.js";
 
 const $ = (id) => document.getElementById(id);
 const log = (msg) => ($("log").textContent += msg + "\n");
@@ -38,9 +39,28 @@ async function boot(files) {
   scanlineToggle();
   await playMovie(engine, await bytesOf(files["0"]), $("screen"), audio, { scanlines });
 
-  const worlds = await bytesOf(files.worlds);
-  log(`worlds: ${(worlds.length / 1e6).toFixed(1)} MB, ${engine.worldsSectionCount(worlds)} sections`);
-  log("The worlds themselves are still being reverse engineered. Meanwhile, the soundtrack:");
+  // The worlds: no game logic yet, but we can already walk around them.
+  $("screen").parentElement.hidden = true;
+  $("world").hidden = false;
+  const worlds = engine.openWorlds(await bytesOf(files.worlds));
+  const view = createWorldView($("world"));
+  const picker = $("sections");
+  picker.hidden = false;
+  const show = (i) => {
+    const w = worlds.build(i);
+    view.load(w);
+    picker.querySelectorAll("button").forEach((b, j) => b.classList.toggle("is-on", j === i));
+    $("log").textContent =
+      `Section ${i}: ${w.objects} objects, ${w.vertices.length / 21} triangles, ${w.textureCount} textures. ` +
+      "Drag to orbit, wheel to zoom, right-drag to pan.";
+  };
+  for (let i = 0; i < worlds.sectionCount; i++) {
+    const b = document.createElement("button");
+    b.textContent = `World ${i}`;
+    b.onclick = () => show(i);
+    picker.append(b);
+  }
+  show(1);
   jukebox(engine, files, audio);
 }
 
