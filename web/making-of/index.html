@@ -29,6 +29,8 @@
         <li><a href="#installer">The installer</a></li>
         <li><a href="#exe">The executable</a></li>
         <li><a href="#worlds">The worlds</a></li>
+        <li><a href="#machines">The machines</a></li>
+        <li><a href="#mendel">Mendel's mind</a></li>
         <li><a href="#smacker">The films</a></li>
         <li><a href="#architecture">The new engine</a></li>
         <li><a href="#journal">Journal</a></li>
@@ -214,8 +216,93 @@ pos = first_stream_with_valid_crc(overlay)
         <p class="wip">Still unknown: the Mendel creature record, the opcodes of the clickable-object state machines, and why there are 8 sections when the box says 5 worlds.</p>
       </section>
 
-      <section id="smacker" class="chapter">
+      <section id="machines" class="chapter">
         <span class="num">05</span>
+        <h2>The machines: 2,089 little state machines</h2>
+        <p class="big">
+          Every bridge, fan, door and gate in Galapagos is a tiny program: a state machine stored next to its mesh.
+        </p>
+        <p>
+          Each object carries seven blocks. Once all seven were decoded, every one of the 2,089 objects in the eight
+          sections parsed <em>exactly</em> to its recorded block boundaries. That's the best evidence a format has
+          been understood. It also showed there's no class-specific data at all: a teleporter and a bridge differ only
+          in the C++ method called when their state machine fires.
+        </p>
+        <h3>States, transitions, conditions</h3>
+        <p>
+          A state has entry actions: switch the appearance (which textures show), start a motion path, morph the
+          vertices, play a sound, trigger the class behaviour, or jump to another state. Transitions are
+          <em>OR-ed groups of AND-ed conditions</em>, drawn from 23 opcodes:
+        </p>
+        <ul class="strings">
+          <li><code>clicked</code><span>a ray from the camera hit one of my polygons this tick</span></li>
+          <li><code>ticks_in_state ≥ n</code><span>timers: "after 2 seconds, close the door"</span></li>
+          <li><code>event: touched</code><span>Mendel is standing on me (the event bubbles up to parent objects)</span></li>
+          <li><code>object N in state S</code><span>wiring: "the bridge extends when the switch is on"</span></li>
+          <li><code>rand() % 100 &lt; p</code><span>a little unpredictability, for predators</span></li>
+        </ul>
+        <p>
+          Each tick runs in two passes: first every machine looks at the world and decides, then all decisions are
+          applied together. Nothing sees another object's change until the next tick. It's the same trick as
+          double buffering, and it makes the simulation independent of object order.
+        </p>
+        <h3>Motion, picking, and the camera</h3>
+        <p>
+          Platforms move along keyframed paths (position, rotation, step count), expanded into one pose per tick by
+          integer interpolation. A full turn is 1024 units, the classic fixed-point circle. Clicking casts a
+          25,000-unit ray from the camera, and the polygon's current appearance frame decides whether it can be
+          picked. The same flag bits mark ground (bit 8) and hazards (bit 30). The camera is attached to the
+          <em>floor</em>: every polygon has a camera key, and when Mendel steps onto it, that key's position and
+          one of 33 motion styles take over. That's where the game's sweeping, cinematic camera comes from.
+        </p>
+        <h3>Why 8 sections when the box says 5 worlds</h3>
+        <p>
+          The gates answer it. The route is 0 → 1 → 2 → 3 → 4 → 5 → back to 2 → 6 → 7. Section 2 is a hub: the only one
+          with all five save pads, and the only one with two exits.
+        </p>
+      </section>
+
+      <section id="mendel" class="chapter">
+        <span class="num">06</span>
+        <h2>Mendel's mind</h2>
+        <p class="big">
+          The box promised "the first game character with a mind of his own". The code shows that this was not
+          marketing.
+        </p>
+        <h3>A body with no skeleton</h3>
+        <p>
+          Mendel is 105 vertices: a 34-polygon shell and two leg sets with 128 keyframes each. There are no bones
+          and no inverse kinematics. One leg part holds the two legs on one side; the engine mirrors it for the
+          other side and plays it half a cycle later. Turning is done like a tank, by running one side's cycle
+          backwards. Two leg sets, a low and a high stance, are blended by the brain's <em>posture</em> output.
+          He is the only model in the game with real texture coordinates on disk.
+        </p>
+        <h3>Senses: six rays and two feelers</h3>
+        <p>
+          Each "eye" casts three infrared rays (high, middle, and low to detect ledges) and reports how close the
+          nearest hit is. Two feelers at the front override sight on contact. Right-clicking Mendel's left or right
+          side holds that side's input at maximum for four ticks. To his brain, your touch feels exactly like
+          bumping into a wall on that side.
+        </p>
+        <h3>NERM, decoded</h3>
+        <p>
+          The brain is three controllers: posture, speed and turn. Each is a 10-state Markov chain whose transition
+          probabilities depend on the input, through a genome interpolated over nine knots. The controller's output
+          is the average state over 200 random steps. Thirty genomes compete per controller. While Mendel moves,
+          a cost accumulates (getting too close to things, turning toward light, and above all pain). Every 65,536
+          ticks the best 15 genomes are kept and the worst 15 are rebuilt from them with mutations. It's a
+          (15+15) genetic algorithm running live inside a 1997 game.
+        </p>
+        <p>
+          There is no "neurosis" variable. When Mendel is hurt again and again, pain inflates the cost of whatever
+          genome was active, and evolution steers away from it. The cagey behaviour the manual describes is emergent.
+          A saved brain (<code>.mnd</code>) is exactly one 28,242-byte genome set. Our writer reproduces the five
+          brains shipped on the CD (one per "age" in the preferences) byte for byte.
+        </p>
+      </section>
+
+      <section id="smacker" class="chapter">
+        <span class="num">07</span>
         <h2>The films, and the music hiding in them</h2>
         <p>
           Files <code>0</code>–<code>10</code> are Smacker, RAD Game Tools' video codec, which shipped in thousands of
@@ -268,7 +355,7 @@ pos = first_stream_with_valid_crc(overlay)
       </section>
 
       <section id="architecture" class="chapter">
-        <span class="num">06</span>
+        <span class="num">08</span>
         <h2>The new engine</h2>
         <div class="arch">
           <div class="arch__box"><b>Your CD image</b><small>File.slice() · ISO 9660 in JS</small></div>
@@ -319,7 +406,7 @@ wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></c
       </section>
 
       <section id="journal" class="chapter">
-        <span class="num">07</span>
+        <span class="num">09</span>
         <h2>Journal</h2>
         <ol class="journal">
           <li><time>2026‑11‑01</time> Unpacked the Wise installer, recovered <code>galapagos.exe</code> and <code>smackw32.dll</code>. Repository scaffolded: Rust workspace, ISO reader, OPFS cache, WebAssembly boot.</li>
@@ -328,6 +415,7 @@ wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></c
           <li><time>2026‑11‑01</time> The <code>worlds</code> archive decoded down to meshes: header, UI pictures, font, sound sets, palettes, textures, a lighting lookup table, and 16 object classes. All 8 sections parse end to end.</li>
           <li><time>2026‑11‑01</time> First light: a WebGL2 viewer renders all eight worlds with their textures. The axis is Y-down.</li>
           <li><time>2026‑11‑01</time> Compared against gameplay footage: fixed the texture origin (v1, not v0), brightened lighting, added distance fade.</li>
+          <li><time>2026‑11‑01</time> Two research tracks in parallel: the object state machines (all 2,089 objects parse exactly; gate table explains the 8 sections) and Mendel (body, walk cycle, senses, and the NERM brain, verified byte for byte against the CD's five brains).</li>
         </ol>
       </section>
 

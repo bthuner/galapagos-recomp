@@ -435,17 +435,21 @@ fn read_appearance(c: &mut Cursor) -> Result<Vec<AppearanceState>, OutOfBounds> 
 /// ```text
 /// u32 fourcc
 /// u32 block_end[7]        absolute offsets, see below
-/// i16 folder              group index, -1 = none
-/// u32 flags               (passed to 0x42ce50; meaning unknown)
+/// i16 folder              parent object id (1-based list index), -1 = none
+/// u32 flags               low u16 = initial state (StateMachine_SetInitialState @ 0x42ce50)
 /// i32 position[3]         world position
 /// u16 has_mesh   + Mesh                      -> ends at block_end[1]
 /// u16 has_states + state machine (0x42d580)  -> ends at block_end[2]
-/// u16 flag + unknown block (+0xbc object)    -> ends at block_end[3]
+/// u16 flag + vertex-morph ShapeAnim (+0xbc)  -> ends at block_end[3]
 /// u16 has_appearance + appearance            -> ends at block_end[4]
-/// u16 flag + unknown block (0x42b9e0)        -> ends at block_end[5]
-/// u16 flag + unknown block (0x428cf0)        -> ends at block_end[6]
-/// u16 flag + unknown block (0x40a0d0) + subclass data -> ends at block_end[0]
+/// u16 flag + SoundEmitters (0x42b9e0)        -> ends at block_end[5]
+/// u16 flag + MotionPaths (0x428cf0)          -> ends at block_end[6]
+/// u16 flag + ObjectParams (0x40a0d0)         -> ends at block_end[0]
 /// ```
+///
+/// The state machine, shape animation, sounds, motion paths and params are
+/// decoded by [`crate::logic`] into [`WorldObject::logic`]; no class appends
+/// bytes after the params.
 #[derive(Debug, Clone)]
 pub struct WorldObject {
     /// FourCC in reading order, e.g. `*b"Objt"`.
@@ -453,12 +457,20 @@ pub struct WorldObject {
     /// File range of the whole record.
     pub range: Range<usize>,
     pub block_end: [u32; 7],
+    /// Parent object: 1-based index into the section's object list (the
+    /// object registry id, `ObjectRegistry_GetObject` @ 0x4282b0), usually a
+    /// `'Fldr'`; `-1` = top level. Events posted to an object bubble up to
+    /// its parents, and a disabled folder skips the update of its subtree.
     pub folder: i16,
+    /// Low `u16` = initial state of the state machine; the high half is 0
+    /// on the CD. See [`WorldObject::initial_state`].
     pub flags: u32,
     pub position: [i32; 3],
     pub mesh: Option<Mesh>,
     /// Appearance states; state 0 is the initial look.
     pub appearance: Option<Vec<AppearanceState>>,
+    /// Behaviour: state machine, morphs, sounds, motion paths, class params.
+    pub logic: crate::logic::ObjectLogic,
 }
 
 impl WorldObject {
@@ -467,15 +479,29 @@ impl WorldObject {
         let first = self.appearance.as_ref()?.first()?;
         first.polygons.get(p)?.first().map(|f| f.texture)
     }
+
+    /// State the object starts in (queued on load, so its entry actions run
+    /// on the first tick).
+    pub fn initial_state(&self) -> u16 {
+        self.flags as u16
+    }
 }
 
-/// One camera key: 20 bytes. Field meanings are not confirmed yet; the three
-/// `i32`s look like a world position.
+/// One camera key: 20 bytes. Keys are **per polygon**: path `i` of the
+/// camera record belongs to object `i` of the section and holds one key per
+/// mesh polygon (verified: 689 non-empty paths, each with exactly
+/// `polygon_count` keys). When Mendel stands on polygon `p` of object `i`,
+/// `Camera_Update` @ 0x412d50 switches to `paths[i][p]` if its `a` is set.
 #[derive(Debug, Clone, Copy)]
 pub struct CameraKey {
+    /// 1 = this polygon defines a camera; 0 = keep the current one.
     pub a: u8,
+    /// Camera style: index into [`Section::camera_styles`] (0..32).
     pub b: u8,
+    /// Camera position: absolute world position, or an offset from the
+    /// reference chosen by the style's `mode`.
     pub position: [i32; 3],
+    /// Camera orientation, 1024ths of a turn (inferred).
     pub c: [u16; 3],
 }
 
@@ -565,6 +591,7 @@ impl Object {
             position,
             mesh,
             appearance,
+            logic: crate::logic::ObjectLogic::read(data, &block_end)?,
         }))
     }
 }
@@ -583,8 +610,10 @@ pub struct Section<'a> {
     pub color_ramps: Vec<[u16; 6]>,
     pub sounds: SoundSet,
     pub objects: Vec<Object>,
-    /// Creature and camera per-world data (0x4177d0, 0x414060), not decoded.
+    /// 468 bytes = the camera style table (`Camera_ReadStyles` @ 0x414060).
     pub trailer: Range<usize>,
+    /// The 33 camera styles referenced by [`CameraKey::b`].
+    pub camera_styles: Vec<crate::logic::CameraStyle>,
 }
 
 impl<'a> Section<'a> {
@@ -618,7 +647,8 @@ impl<'a> Section<'a> {
             return Err(Error::Malformed("objects overrun the section", c.pos));
         }
         let trailer = c.pos..range.end;
-        Ok(Self { range, environment, palette, shade_table, textures, color_ramps, sounds, objects, trailer })
+        let camera_styles = crate::logic::CameraStyle::read_table(data, trailer.start)?;
+        Ok(Self { range, environment, palette, shade_table, textures, color_ramps, sounds, objects, trailer, camera_styles })
     }
 
     /// Converts texture `i` to RGB using the section palette.

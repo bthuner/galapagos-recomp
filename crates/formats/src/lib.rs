@@ -5,5 +5,7 @@
 //! and inside the browser as WebAssembly.
 
 pub mod bytes;
+pub mod creature;
+pub mod logic;
 pub mod smacker;
 pub mod worlds;
