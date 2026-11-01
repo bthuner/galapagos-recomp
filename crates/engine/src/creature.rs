@@ -409,7 +409,27 @@ pub struct Creature {
     pub vertices: Vec<f32>,
     /// Teaching/debug counters.
     pub stats: Stats,
+
+    /// Sound cue inputs gathered during the tick: flags of every polygon an
+    /// eye ray hit, and how long he had been falling if he landed.
+    seen_flags: u32,
+    landed_after: u32,
+    /// Per-cue silence timers (ticks), see [`SOUND_CUES`].
+    cue_quiet: [u16; 5],
 }
+
+/// Mendel's five sound cues (`Creature_ReadSoundCues` @ 0x417ab0, played by
+/// `Creature_HandleSurfaceEvents` @ 0x419550): the 1-based sounds of the
+/// creature bank one cue picks from, and its silence after playing as
+/// `(min, random extra)` ticks. Order: landing, agitated, saw a hazard,
+/// saw a `0x180000`-class surface, strong left/right asymmetry.
+const SOUND_CUES: [(&[i16], u16, u16); 5] =
+    [(&[5], 5, 0), (&[1, 2], 5, 32), (&[3, 4], 20, 32), (&[6, 7], 20, 32), (&[8, 9, 10, 11], 20, 32)];
+/// "Landing" means after more than this many airborne ticks.
+const LANDING_AIR_TICKS: u32 = 5;
+/// inferred: the threshold of the asymmetry cue is not in the spec; this is
+/// "one eye sees something close, the other almost nothing".
+const ASYMMETRY: i32 = 192;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Stats {
@@ -492,6 +512,9 @@ impl Creature {
             safe_point: None,
             vertices: Vec::new(),
             stats: Stats::default(),
+            seen_flags: 0,
+            landed_after: 0,
+            cue_quiet: [0; 5],
         };
         c.act[0] = Actuator::new(13, stance);
         c
@@ -586,7 +609,7 @@ impl Creature {
                     self.mode = Mode::Vanishing(VANISH_TICKS, After::Teleport(at, heading));
                     self.stats.teleports += 1;
                     if snap {
-                        sim.events.push(sim::HostEvent { kind: sim::EV_CAMERA_SNAP, a: 0, b: 0 });
+                        sim.events.push(sim::HostEvent { kind: sim::EV_CAMERA_SNAP, a: 0, b: 0, c: 0 });
                     }
                 }
             }
@@ -634,6 +657,37 @@ impl Creature {
         self.apply_motor_outputs();
         self.accumulate_cost();
         self.surface_events();
+        self.sound_cues(sim);
+    }
+
+    /// Plays the cues whose trigger happened this tick, each respecting its
+    /// silence timer. The agitated cue needs afflictions, which aren't
+    /// ported, so it never fires yet.
+    fn sound_cues(&mut self, sim: &mut Sim) {
+        for q in &mut self.cue_quiet {
+            *q = q.saturating_sub(1);
+        }
+        let triggered = [
+            self.landed_after > LANDING_AIR_TICKS,
+            false,
+            self.seen_flags & 0x4000_0000 != 0,
+            self.seen_flags & 0x18_0000 != 0,
+            (self.left - self.right).abs() >= ASYMMETRY,
+        ];
+        self.landed_after = 0;
+        self.seen_flags = 0;
+        for (k, &fire) in triggered.iter().enumerate() {
+            if !fire || self.cue_quiet[k] > 0 {
+                continue;
+            }
+            let (sounds, quiet, extra) = SOUND_CUES[k];
+            // The sound system's own randomness (the CRT rand), not the
+            // brain's LCG: choosing a sound must not change his behaviour.
+            let pick = sounds[sim.rand() as usize % sounds.len()];
+            let jitter = if extra > 0 { (sim.rand() % extra as u32) as u16 } else { 0 };
+            self.cue_quiet[k] = quiet + jitter;
+            sim.events.push(sim::HostEvent { kind: sim::EV_CREATURE_SOUND, a: pick as i32 - 1, b: 0, c: 0 });
+        }
     }
 
     /// Collects every polygon near Mendel, transformed by its object's
@@ -894,6 +948,7 @@ impl Creature {
                 self.align(h.normal);
                 self.pos = add(foot, scale(self.up, self.height as f32));
                 self.ground = Some(self.contact(sim, &h));
+                self.landed_after = self.air_ticks;
                 self.air_ticks = 0;
                 return;
             }
@@ -917,7 +972,7 @@ impl Creature {
         }
     }
 
-    fn eye(&self, near: &Near, angle: i32, range: i32) -> i32 {
+    fn eye(&mut self, near: &Near, angle: i32, range: i32) -> i32 {
         let dir = self.dir(angle);
         let value = |dist: f32| (256 - (dist as i32 - 656) * 256 / (range - 450)).clamp(0, 256);
         let reach = (range + 206) as f32;
@@ -927,6 +982,7 @@ impl Creature {
         for lift in [150.0, 0.0] {
             if let Some(h) = near.cast(add(self.pos, scale(self.up, lift)), dir, reach, is_seen) {
                 best = best.max(value(h.dist));
+                self.seen_flags |= h.flags;
             }
         }
         // The low ray (`Creature_CastIrLedgeRay` @ 0x4191f0) reports drops.
@@ -1268,5 +1324,30 @@ mod tests {
         let t = Tri { a: [0.0; 3], e1: [10.0, 0.0, 0.0], e2: [0.0, 0.0, 10.0], normal: DOWN, obj: 0, poly: 0, flags: SOLID };
         assert_eq!(ray_tri([1.0, -5.0, 1.0], DOWN, &t), Some(5.0));
         assert_eq!(ray_tri([11.0, -5.0, 1.0], DOWN, &t), None);
+    }
+
+    /// One minute of section 0 after the skip: the world and Mendel make
+    /// sounds, and every sound event names a real, non-empty sample.
+    #[test]
+    fn section0_sounds_point_at_real_samples() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 0);
+        run(&mut sim, &mut mesh, 60, Some(5));
+        let a = Archive::parse(&d).unwrap();
+        let world_bank = crate::sound::Bank::decode(&d, &a.world(0).unwrap().sounds);
+        let creature_set = galapagos_formats::worlds::SoundSet::parse(&d, a.header.creature_sounds as usize).unwrap();
+        let creature_bank = crate::sound::Bank::decode(&d, &creature_set);
+        let (mut world, mut cues) = (0, 0);
+        for e in &sim.events {
+            let bank = match e.kind {
+                sim::EV_SOUND => { world += 1; &world_bank }
+                sim::EV_CREATURE_SOUND => { cues += 1; &creature_bank }
+                _ => continue,
+            };
+            let s = bank.sounds.get(e.a as usize).and_then(|s| s.as_ref());
+            assert!(s.is_some_and(|s| !s.samples.is_empty()), "event {e:?} names an empty slot");
+        }
+        println!("section 0, 60 s: {world} world sounds, {cues} Mendel cues");
+        assert!(world > 0 && cues > 0);
     }
 }

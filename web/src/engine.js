@@ -64,12 +64,14 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
     // The world simulation (see crates/engine/src/sim.rs).
     sim: {
       ticksPerSecond: () => wasm.sim_ticks_per_second(),
-      // Runs n ticks; returns host events as {kind, a, b}.
+      // Runs n ticks; returns host events as {kind, a, b, c}.
       tick(n) {
         const count = wasm.sim_tick(n);
-        const raw = new Int32Array(wasm.memory.buffer, wasm.sim_events_ptr(), count * 3);
+        const raw = new Int32Array(wasm.memory.buffer, wasm.sim_events_ptr(), count * 4);
         const out = [];
-        for (let i = 0; i < count; i++) out.push({ kind: raw[i * 3], a: raw[i * 3 + 1], b: raw[i * 3 + 2] });
+        for (let i = 0; i < count; i++) {
+          out.push({ kind: raw[i * 4], a: raw[i * 4 + 1], b: raw[i * 4 + 2], c: raw[i * 4 + 3] });
+        }
         return out;
       },
       // [first, end) vertex range patched since the last call, or null.
@@ -111,6 +113,21 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
       clearance: (f, e) => wasm.creature_camera_clearance(f[0], f[1], f[2], e[0], e[1], e[2]),
       // Right click: a ray against his mesh. Returns "left", "right" or null.
       touch: (o, d) => [null, "left", "right"][wasm.creature_touch_ray(o[0], o[1], o[2], d[0], d[1], d[2])],
+    },
+
+    // Sound `i` of a bank (0 = current world, 1 = Mendel, 2 = predators):
+    // { rate, baseNote, samples: Int16Array } copied out of WASM memory, or
+    // null for an empty slot.
+    sound(bank, i) {
+      const [rate, len, baseNote, ptr] = new Uint32Array(wasm.memory.buffer, wasm.sound_info(bank, i), 4);
+      if (!len) return null;
+      return { rate, baseNote, samples: new Int16Array(wasm.memory.buffer, ptr, len).slice() };
+    },
+
+    // How emitter n of object id plays (meanings inferred, see objects.md).
+    emitter(id, n) {
+      const [near, far, volume, loop, pitch, variation] = new Int32Array(wasm.memory.buffer, wasm.world_emitter(id, n), 6);
+      return { near, far, volume, loop: loop !== 0, pitch: pitch || 65536, variation };
     },
 
     // Smacker movies. The engine takes ownership of the uploaded bytes.

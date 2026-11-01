@@ -10,11 +10,12 @@
 
 mod creature;
 mod sim;
+mod sound;
 mod world;
 
 use galapagos_formats::creature::{overlay_for_age, Brain, CreatureBody};
 use galapagos_formats::smacker::{Smacker, YScale};
-use galapagos_formats::worlds::Archive;
+use galapagos_formats::worlds::{Archive, SoundSet};
 use std::cell::RefCell;
 
 /// Allocate `len` bytes the host (JavaScript) can write a file into.
@@ -165,6 +166,9 @@ struct Worlds {
     sim: Option<sim::Sim>,
     /// Host events handed out by the last `sim_tick`.
     events: Vec<sim::HostEvent>,
+    /// Sound banks, indexed by `sound::BANK_*`: the current section's,
+    /// Mendel's and the predators' (the last two live in the global block).
+    banks: [sound::Bank; 3],
 }
 
 thread_local! {
@@ -175,12 +179,18 @@ thread_local! {
 #[no_mangle]
 pub extern "C" fn worlds_open(ptr: *mut u8, len: usize) -> i32 {
     let data = unsafe { take(ptr, len) };
-    let n = match Archive::parse(&data) {
-        Ok(a) => a.sections.len() as i32,
+    let (n, creature, predator) = match Archive::parse(&data) {
+        Ok(a) => {
+            let bank = |off: u32| {
+                SoundSet::parse(&data, off as usize).map_or_else(|_| sound::Bank::empty(), |s| sound::Bank::decode(&data, &s))
+            };
+            (a.sections.len() as i32, bank(a.header.creature_sounds), bank(a.header.predator_sounds))
+        }
         Err(_) => return -1,
     };
     WORLDS.with(|w| {
-        *w.borrow_mut() = Some(Worlds { data, mesh: None, sim: None, events: Vec::new() })
+        let banks = [sound::Bank::empty(), creature, predator];
+        *w.borrow_mut() = Some(Worlds { data, mesh: None, sim: None, events: Vec::new(), banks })
     });
     n
 }
@@ -196,6 +206,7 @@ pub extern "C" fn world_build(i: usize) -> i32 {
         let Ok(section) = archive.world(i) else { return -1 };
         let mesh = world::WorldMesh::build(&section);
         let n = (mesh.vertices.len() / world::FLOATS_PER_VERTEX) as i32;
+        worlds.banks[sound::BANK_WORLD as usize] = sound::Bank::decode(&worlds.data, &section.sounds);
         let mut sim = sim::Sim::new(&section, &mesh);
         // Mendel carries his brain from section to section; the first time,
         // it comes from the CD (see `default_brain`).
@@ -478,4 +489,43 @@ pub extern "C" fn creature_camera_clearance(fx: f32, fy: f32, fz: f32, ex: f32, 
         let Some(sim) = guard.as_ref().and_then(|w| w.sim.as_ref()) else { return 1.0 };
         sim.creature.as_ref().map_or(1.0, |c| c.camera_clearance(sim, [fx, fy, fz], [ex, ey, ez]))
     })
+}
+
+// ——— Sounds ——————————————————————————————————————————————————————————
+//
+// JavaScript fetches each sample once (lazily, when an event first asks for
+// it) and turns it into a WebAudio AudioBuffer. Events say *which* sound and
+// *who* plays it; the emitter supplies how (distance, volume, pitch, loop).
+
+thread_local! {
+    static SOUND_INFO: std::cell::Cell<[u32; 4]> = const { std::cell::Cell::new([0; 4]) };
+    static EMITTER: std::cell::Cell<[i32; 6]> = const { std::cell::Cell::new([0; 6]) };
+}
+
+/// Four u32 for sound `i` of `bank`: sample rate, sample count (0 = empty
+/// slot), MIDI base note, pointer to the i16 mono samples.
+#[no_mangle]
+pub extern "C" fn sound_info(bank: u32, i: u32) -> *const u32 {
+    WORLDS.with(|w| {
+        let guard = w.borrow();
+        let pcm = guard.as_ref().and_then(|w| w.banks.get(bank as usize)?.sounds.get(i as usize)?.as_ref());
+        let info = pcm.map_or([0; 4], |p| [p.rate, p.samples.len() as u32, p.base_note as u32, p.samples.as_ptr() as u32]);
+        SOUND_INFO.with(|s| s.set(info));
+    });
+    SOUND_INFO.with(|s| s.as_ptr() as *const u32)
+}
+
+/// Six i32 describing emitter `n` (0-based) of object `id`: near and far
+/// distance, volume (256 = full), looping (0/1), pitch and pitch variation
+/// (both 16.16 fixed point). All but the indices are inferred meanings
+/// (docs/re/objects.md, sound emitters).
+#[no_mangle]
+pub extern "C" fn world_emitter(id: u32, n: u32) -> *const i32 {
+    WORLDS.with(|w| {
+        let guard = w.borrow();
+        let e = guard.as_ref().and_then(|w| w.sim.as_ref()?.emitter(id as u16, n as usize));
+        let v = e.map_or([0; 6], |e| [e.near, e.far, e.volume as i32, e.looping as i32, e.pitch as i32, e.variation as i32]);
+        EMITTER.with(|s| s.set(v));
+    });
+    EMITTER.with(|s| s.as_ptr() as *const i32)
 }

@@ -460,6 +460,30 @@ wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></c
         <pre class="code"><code><span class="c">// in the browser console, on the game page</span>
 galapagos.engine.sim.object(<span class="n">85</span>)        <span class="c">// → { position: [...], state: 2 }</span>
 galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).position, <span class="n">12000</span>)</code></pre>
+        <h3>Sound: four copies of everything</h3>
+        <p>
+          Every sample is stored four times in the archive: 8-bit at 11 kHz, then 16-bit at 11, 22 and 44 kHz, one
+          copy per "Fidelity" setting. A 1997 PC with 16 MB of RAM had to pick one. A browser doesn't, so we always
+          take the best copy.
+        </p>
+        <p>
+          The world's sounds come from <em>emitters</em> attached to objects: up to three alternative sounds, a pitch
+          and a random pitch variation, a volume, and a near and a far distance. That maps neatly onto WebAudio: one
+          <code>PannerNode</code> per sound at the object's position, with the camera as the listener. The box promised
+          "active-panning 3-D stereo sound"; this is the modern equivalent.
+        </p>
+        <p>
+          One bug was invisible until we counted. Our first version played the wrong sound every time, because an
+          emitter's sound numbers are <em>1-based</em>. The data proves it: read them as 1-based and only 1 of 1,467
+          references lands on an empty slot; read them as 0-based and 107 do. When the code doesn't say, the data
+          often can.
+        </p>
+        <p>
+          Mendel has five sound cues of his own: landing after a fall, spotting a hazard with his infrared eyes,
+          seeing certain surfaces, and a strong left/right imbalance, each followed by a short, partly random
+          silence. Choosing which sound plays uses the game's random generator, not his brain's, so a sound can never
+          change how he behaves.
+        </p>
       </section>
 
       <section id="journal" class="chapter">
@@ -475,6 +499,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑01</time> Two research tracks in parallel: the object state machines (all 2,089 objects parse exactly; gate table explains the 8 sections) and Mendel (body, walk cycle, senses, and the NERM brain, verified byte for byte against the CD's five brains).</li>
           <li><time>2026‑11‑02</time> The worlds come alive: a 24 Hz port of the object simulation, with motion paths, appearance changes, music, gates and click picking. Discovered that folders put most of a world to sleep until Mendel arrives.</li>
           <li><time>2026‑11‑02</time> Mendel is alive: born on the birth tube's ceiling, carried by the intro capsule, walking with his real NERM brain, waking folders with his footsteps, and feeling right-clicks.</li>
+          <li><time>2026‑11‑02</time> Sound: world emitters with 3-D panning, Mendel's five cues, the best of four stored qualities. Found that emitter sound numbers are 1-based by counting empty slots.</li>
         </ol>
       </section>
 

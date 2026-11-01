@@ -2,6 +2,7 @@ import { loadCached, importIso, forget } from "./disc.js";
 import { loadEngine } from "./engine.js";
 import { playMovie } from "./movie.js";
 import { createWorldView } from "./world-view.js";
+import { createSfx } from "./audio.js";
 
 const $ = (id) => document.getElementById(id);
 const log = (msg) => ($("log").textContent += msg + "\n");
@@ -53,10 +54,14 @@ async function boot(files) {
     if (n > 0 && files[String(n)]) bytesOf(files[String(n)]).then((b) => playMovie(engine, b, $("screen"), audio));
   };
 
+  const sfx = createSfx(engine, audio);
+
   const view = createWorldView($("world"), {
     // Fixed timestep: run as many ticks as real time demands (max 5 per
     // frame, so a background tab doesn't fast-forward on return).
     onFrame() {
+      const ear = view.listener();
+      if (ear) sfx.listen(ear.eye, ear.forward, ear.up);
       const now = performance.now();
       clock = Math.min(clock + (now - last) / 1000, 5 / hz);
       last = now;
@@ -65,6 +70,8 @@ async function boot(files) {
       if (!n) return;
       for (const ev of engine.sim.tick(n)) {
         if (ev.kind === 1) music(ev.a);
+        if (ev.kind === 3) sfx.emitter(ev.a, ev.b, ev.c); // a world object made a sound
+        if (ev.kind === 5) sfx.creature(ev.a); // one of Mendel's cues
         if (ev.kind === 4) view.snap(); // a teleporter asked for a camera cut
         if (ev.kind === 2) {
           status(`A dimensional gate opened: section ${current} → ${ev.a} (time screen of level ${ev.b}).`);
@@ -118,6 +125,7 @@ async function boot(files) {
   const status = (msg) => ($("log").textContent = summary + "\n" + msg);
   const show = (i) => {
     current = i;
+    sfx.reset();
     const w = worlds.build(i);
     view.load({ ...w, takeDirty: engine.sim.takeDirty, creatureVertices: engine.creature.vertices });
     mendelSeen = false;
@@ -137,7 +145,7 @@ async function boot(files) {
   }
   show(0);
   // Poke the running game from DevTools: galapagos.engine.sim.object(85)…
-  globalThis.galapagos = { engine, worlds, view, show };
+  globalThis.galapagos = { engine, worlds, view, show, sfx };
   jukebox(engine, files, audio);
 }
 
