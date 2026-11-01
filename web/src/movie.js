@@ -15,11 +15,52 @@ function toAudioBuffer(ctx, samples, rate, channels) {
   return buf;
 }
 
-export function playMovie(engine, bytes, canvas, audioCtx) {
-  const movie = engine.openMovie(bytes);
+// How a frame reaches the canvas. Smacker's "Y-interlace" flag (the intro
+// uses it) stores 240 lines meant for a 480-line screen. There are two
+// honest ways to show that today:
+//
+//   smooth     the canvas holds the 240 stored lines and CSS stretches them
+//              to 4:3; bilinear filtering blends neighbouring lines, roughly
+//              what a blurry 1997 CRT did. The default.
+//   scanlines  the exact original output: each stored line on every other
+//              row of a 480-line canvas, black rows in between.
+//
+// Either way the browser scales smoothly. `image-rendering: pixelated` at a
+// non-integer factor would double some rows and not others (moiré).
+function presenter(canvas, movie, scanlines) {
   const g = canvas.getContext("2d");
-  const image = movie.width > 4 ? new ImageData(movie.width, movie.height) : null;
-  if (image) [canvas.width, canvas.height] = [movie.width, movie.height];
+  const { width: w, height: h } = movie;
+  let mode = null;
+  let image = null;
+
+  return function present(pixels) {
+    const want = movie.interlaced && scanlines() ? "scanlines" : "smooth";
+    if (want !== mode) {
+      mode = want;
+      const rows = mode === "scanlines" ? h * 2 : h;
+      [canvas.width, canvas.height] = [w, rows];
+      canvas.style.aspectRatio = `${w} / ${movie.displayHeight}`;
+      image = new ImageData(w, rows); // starts transparent black
+      if (mode === "scanlines") {
+        for (let i = 3; i < image.data.length; i += 4) image.data[i] = 255; // opaque black gaps
+      }
+    }
+    if (mode === "smooth") {
+      image.data.set(pixels);
+    } else {
+      const line = w * 4;
+      for (let y = 0; y < h; y++) {
+        image.data.set(pixels.subarray(y * line, (y + 1) * line), 2 * y * line);
+      }
+    }
+    g.putImageData(image, 0, 0);
+  };
+}
+
+export function playMovie(engine, bytes, canvas, audioCtx, { scanlines = () => false } = {}) {
+  const movie = engine.openMovie(bytes);
+  // Audio-only files (the soundtrack) carry a 4x4 placeholder picture: skip it.
+  const present = movie.width > 4 ? presenter(canvas, movie, scanlines) : null;
 
   let source = null;
   if (movie.sampleRate) {
@@ -56,10 +97,7 @@ export function playMovie(engine, bytes, canvas, audioCtx) {
         if (!pixels) return finish();
         shown++;
       }
-      if (pixels && image) {
-        image.data.set(pixels);
-        g.putImageData(image, 0, 0);
-      }
+      if (pixels && present) present(pixels);
       requestAnimationFrame(tick);
     })();
   });

@@ -6,6 +6,18 @@ const $ = (id) => document.getElementById(id);
 const log = (msg) => ($("log").textContent += msg + "\n");
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
 
+// Display preference for interlaced movies, remembered across visits.
+const scanlines = () => localStorage.getItem("galapagos.scanlines") === "on";
+function scanlineToggle() {
+  const b = $("scanlines");
+  const label = () => (b.textContent = scanlines() ? "Scanlines: original" : "Scanlines: smooth");
+  label();
+  b.onclick = () => {
+    localStorage.setItem("galapagos.scanlines", scanlines() ? "off" : "on");
+    label();
+  };
+}
+
 // Browsers keep audio muted until the user interacts with the page,
 // so the stage waits for one click before anything plays.
 function waitForClick(el) {
@@ -23,7 +35,8 @@ async function boot(files) {
   await audio.resume();
 
   // File 0 is the Anark studio intro (640x240, line-interlaced to 640x480).
-  await playMovie(engine, await bytesOf(files["0"]), $("screen"), audio);
+  scanlineToggle();
+  await playMovie(engine, await bytesOf(files["0"]), $("screen"), audio, { scanlines });
 
   const worlds = await bytesOf(files.worlds);
   log(`worlds: ${(worlds.length / 1e6).toFixed(1)} MB, ${engine.worldsSectionCount(worlds)} sections`);

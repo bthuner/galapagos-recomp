@@ -791,6 +791,19 @@ impl Frame<'_> {
         }
     }
 
+    /// RGBA at the *stored* size, ignoring the Y flags. A browser can then
+    /// stretch it to the display height with smooth filtering. For the
+    /// interlaced intro that's line doubling with interpolation, which is closer
+    /// to what a blurry 1997 CRT showed than hard black gaps on a sharp LCD.
+    pub fn to_rgba_stored(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.pixels.len() * 4);
+        for &idx in self.pixels {
+            let [r, g, b] = self.palette[idx as usize];
+            out.extend_from_slice(&[r, g, b, 255]);
+        }
+        out
+    }
+
     /// Converts to RGBA8 (`width * display_height * 4` bytes), applying
     /// Y-interlace (black odd lines) or Y-double. This is the buffer you
     /// hand to `ImageData` / `putImageData` in the browser.

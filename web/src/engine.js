@@ -33,10 +33,11 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
     // Smacker movies. The engine takes ownership of the uploaded bytes.
     openMovie(bytes) {
       if (wasm.movie_open(...upload(bytes)) !== 0) throw new Error("Not a Smacker file");
-      const [width, height, frames, usPerFrame, sampleRate, channels] =
-        new Uint32Array(wasm.memory.buffer, wasm.movie_info(), 6);
+      const [width, height, displayHeight, frames, usPerFrame, sampleRate, channels, yMode] =
+        new Uint32Array(wasm.memory.buffer, wasm.movie_info(), 8);
       return {
-        width, height, frames, usPerFrame, sampleRate, channels,
+        width, height, displayHeight, frames, usPerFrame, sampleRate, channels,
+        interlaced: yMode === 2,
         decodeAudio() {
           const n = wasm.movie_decode_audio();
           if (n < 0) throw new Error("Corrupt movie audio");

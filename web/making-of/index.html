@@ -198,8 +198,15 @@ pos = first_stream_with_valid_crc(overlay)
         <p>
           640×240, 386 frames at 24 fps, 16 seconds: fire that gathers into Anark's green arched logo. The header sets
           the <em>Y-interlace</em> flag. The movie is stored at half height and drawn on every other line of a 640×480
-          screen, which halves the data a 2× CD-ROM drive has to stream. The black scanlines you see are faithful to
-          the original.
+          screen, which halves the data a 2× CD-ROM drive has to stream.
+        </p>
+        <p>
+          On a 1997 CRT the phosphor glow blurred the black lines into a soft texture. On a sharp LCD, against a
+          mostly white logo, they turn harsh. Our first version made it worse: it scaled the canvas by a
+          non-integer factor with <code>image-rendering: pixelated</code>, which doubles some rows and not others,
+          and the result was moiré. The fix is to give the browser the 240 stored lines and let its bilinear filter
+          stretch them to 4:3. That's line doubling with interpolation, and it's the default. If you want the exact
+          original output, the <em>Scanlines: original</em> toggle draws the black lines and still scales smoothly.
         </p>
         <h3>Files 1–10: not videos at all</h3>
         <p>
@@ -255,6 +262,7 @@ wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></c
         <ol class="journal">
           <li><time>2026‑11‑01</time> Unpacked the Wise installer, recovered <code>galapagos.exe</code> and <code>smackw32.dll</code>. Repository scaffolded: Rust workspace, ISO reader, OPFS cache, WebAssembly boot.</li>
           <li><time>2026‑11‑01</time> Smacker decoder in Rust: the Anark intro now plays in the browser, synced to its audio; files 1–10 turn out to be the soundtrack. Found and fixed a classic bug: a <code>display: grid</code> rule overrode the <code>hidden</code> attribute.</li>
+          <li><time>2026‑11‑01</time> Interlaced intro: smooth line doubling by default, original scanlines as an option, and no more moiré from pixelated scaling.</li>
         </ol>
       </section>
 

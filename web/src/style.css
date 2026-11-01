@@ -113,8 +113,11 @@ body::before {
 
 .stage { min-height: 100vh; display: grid; place-items: center; gap: 1rem; }
 #screen {
-  width: min(100vw, calc(100vh * 4 / 3));
-  image-rendering: pixelated;
+  /* Fit the viewport at 4:3. No `image-rendering: pixelated`: at non-integer
+     scale factors it doubles some lines and not others, which causes moiré. */
+  display: block;
+  width: min(100vw, calc(85vh * 4 / 3));
+  aspect-ratio: 4 / 3;
   background: #000;
 }
 .log { color: var(--mute); font-size: 0.8rem; }
@@ -150,3 +153,4 @@ body::before {
   cursor: pointer;
 }
 .jukebox button.is-on { background: var(--lime); color: var(--abyss); border-color: var(--lime); }
+.stage__bar { display: flex; gap: 2rem; font-size: 0.85rem; }

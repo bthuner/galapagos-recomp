@@ -8,7 +8,7 @@
 //! fills the buffer, then passes `(ptr, len)` to an `*_open` function, which
 //! takes ownership. JavaScript must not touch or free that buffer afterwards.
 
-use galapagos_formats::smacker::Smacker;
+use galapagos_formats::smacker::{Smacker, YScale};
 use galapagos_formats::worlds::Archive;
 use std::cell::RefCell;
 
@@ -49,12 +49,12 @@ pub extern "C" fn worlds_section_count(ptr: *const u8, len: usize) -> i32 {
 
 struct Movie {
     smk: Smacker,
-    /// The latest frame, expanded to RGBA at display size (640x480 for the intro).
+    /// The latest frame as RGBA at its stored size (640x240 for the intro).
     rgba: Vec<u8>,
     /// Audio track 0 for the whole movie, decoded up front.
     audio: Vec<i16>,
     /// Header facts, laid out for JavaScript to read as a Uint32Array.
-    info: [u32; 6],
+    info: [u32; 8],
 }
 
 thread_local! {
@@ -69,13 +69,19 @@ pub extern "C" fn movie_open(ptr: *mut u8, len: usize) -> i32 {
     };
     let i = smk.info();
     let (rate, channels) = i.audio.first().map_or((0, 0), |t| (t.sample_rate, t.channels as u32));
-    let info = [i.width, i.display_height(), i.frame_count, i.us_per_frame, rate, channels];
+    let y_scale = match i.y_scale {
+        YScale::None => 0,
+        YScale::Doubled => 1,
+        YScale::Interlaced => 2,
+    };
+    let info = [i.width, i.height, i.display_height(), i.frame_count, i.us_per_frame, rate, channels, y_scale];
     MOVIE.with(|m| *m.borrow_mut() = Some(Movie { smk, rgba: Vec::new(), audio: Vec::new(), info }));
     0
 }
 
-/// Pointer to six u32s: width, display height, frames, µs per frame,
-/// audio sample rate, audio channels.
+/// Pointer to eight u32s: width, stored height, display height, frames,
+/// µs per frame, audio sample rate, audio channels, and the Y mode
+/// (0 = as stored, 1 = line-doubled, 2 = interlaced with black lines).
 #[no_mangle]
 pub extern "C" fn movie_info() -> *const u32 {
     MOVIE.with(|m| m.borrow().as_ref().map_or(core::ptr::null(), |m| m.info.as_ptr()))
@@ -122,7 +128,7 @@ pub extern "C" fn movie_next_frame() -> i32 {
         }
         match movie.smk.decode_next_frame() {
             Ok(f) => {
-                movie.rgba = f.to_rgba();
+                movie.rgba = f.to_rgba_stored();
                 1
             }
             Err(_) => -1,
@@ -130,7 +136,8 @@ pub extern "C" fn movie_next_frame() -> i32 {
     })
 }
 
-/// The current frame as width × display-height RGBA bytes.
+/// The current frame as width × stored-height RGBA bytes. Scaling to the
+/// display height is the browser's job (see web/src/movie.js).
 #[no_mangle]
 pub extern "C" fn movie_frame_ptr() -> *const u8 {
     MOVIE.with(|m| m.borrow().as_ref().map_or(core::ptr::null(), |m| m.rgba.as_ptr()))
