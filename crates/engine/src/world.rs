@@ -24,7 +24,7 @@
 //!   Distance darkening (the other half of the 32×32×256 shade table's job)
 //!   happens in the fragment shader, using the section's far-clip distance.
 
-use galapagos_formats::worlds::{Object, Section, WorldObject};
+use galapagos_formats::worlds::{Object, PolyFrame, Section, WorldObject};
 
 pub const FLOATS_PER_VERTEX: usize = 7;
 const TEX: f32 = 128.0;
@@ -41,6 +41,13 @@ pub struct WorldMesh {
     pub vertices: Vec<f32>,
     /// One range per drawn object, in section object order.
     pub draws: Vec<DrawRange>,
+    /// For each section object (by list index): its draw index, if it has a mesh.
+    pub draw_of_object: Vec<Option<usize>>,
+    /// For each draw: the vertex range of every mesh polygon (count 0 if the
+    /// polygon was degenerate), so appearance changes can patch in place.
+    pub poly_ranges: Vec<Vec<DrawRange>>,
+    /// Texture coordinates before any per-frame offset, 2 per vertex.
+    pub base_uv: Vec<f32>,
     /// One column-major 4×4 matrix per drawn object (16 f32 each).
     pub transforms: Vec<f32>,
     /// `textures.len() / (128*128*4)` RGBA layers.
@@ -85,6 +92,8 @@ impl WorldMesh {
         let mut vertices = Vec::new();
         let mut draws = Vec::new();
         let mut transforms = Vec::new();
+        let mut draw_of_object = Vec::new();
+        let mut poly_ranges = Vec::new();
         let mut bounds = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN];
         let light_dir = {
             let l = section.environment.light_direction;
@@ -93,11 +102,15 @@ impl WorldMesh {
         let mut objects_drawn = 0;
 
         for object in &section.objects {
-            let Object::World(obj) = object else { continue };
+            let Object::World(obj) = object else {
+                draw_of_object.push(None);
+                continue;
+            };
+            draw_of_object.push(obj.mesh.as_ref().map(|_| draws.len()));
             if obj.mesh.is_some() {
                 objects_drawn += 1;
                 let first = (vertices.len() / FLOATS_PER_VERTEX) as u32;
-                emit_object(obj, light_dir, &mut vertices, &mut bounds);
+                poly_ranges.push(emit_object(obj, light_dir, &mut vertices, &mut bounds));
                 let count = (vertices.len() / FLOATS_PER_VERTEX) as u32 - first;
                 draws.push(DrawRange { first, count });
                 let [x, y, z] = obj.position.map(|c| c as f32);
@@ -113,33 +126,73 @@ impl WorldMesh {
             }
         }
         let far_clip = section.environment.far_clip as f32;
-        WorldMesh { vertices, draws, transforms, textures, texture_count, bounds, objects_drawn, far_clip }
-    }
-}
-
-fn emit_object(obj: &WorldObject, light_dir: V3, out: &mut Vec<f32>, bounds: &mut [f32; 6]) {
-    let mesh = obj.mesh.as_ref().unwrap();
-    let origin = obj.position.map(|c| c as f32);
-    let local: Vec<V3> = mesh.vertices.iter().map(|v| v.map(|c| c as f32)).collect();
-
-    for (pi, poly) in mesh.polygons.iter().enumerate() {
-        let pts: Vec<V3> = poly.iter().filter_map(|&i| local.get(i as usize).copied()).collect();
-        if pts.len() < 3 {
-            continue;
+        // emit_object wrote un-offset UVs; keep a copy so frame offsets can
+        // be re-applied whenever a polygon's appearance frame changes.
+        let base_uv = vertices.chunks_exact(FLOATS_PER_VERTEX).flat_map(|v| [v[3], v[4]]).collect();
+        let mut mesh = WorldMesh { vertices, draws, draw_of_object, poly_ranges, base_uv, transforms, textures, texture_count, bounds, objects_drawn, far_clip };
+        // Apply each polygon's initial appearance frame (layer, UV offset).
+        for object in &section.objects {
+            let Object::World(obj) = object else { continue };
+            let Some(states) = &obj.appearance else { continue };
+            let Some(state) = states.first() else { continue };
+            let draw = mesh.draw_of_object[obj_index(section, obj)].unwrap_or(usize::MAX);
+            if draw == usize::MAX {
+                continue;
+            }
+            for (p, frames) in state.polygons.iter().enumerate() {
+                if let Some(f) = frames.first() {
+                    mesh.apply_frame(draw, p, Some(f));
+                }
+            }
         }
-        let frame = obj
-            .appearance
-            .as_ref()
-            .and_then(|states| states.first())
-            .and_then(|s| s.polygons.get(pi))
-            .and_then(|frames| frames.first());
+        mesh
+    }
+
+    /// Writes a polygon's appearance frame into the vertex buffer: texture
+    /// layer (or hidden / untextured) and the texel offset that makes
+    /// surfaces scroll. Returns the patched vertex range.
+    pub fn apply_frame(&mut self, draw: usize, poly: usize, frame: Option<&PolyFrame>) -> Option<DrawRange> {
+        let r = *self.poly_ranges.get(draw)?.get(poly)?;
         let layer = match frame {
-            Some(f) if f.enabled == 0 => -2.0, // hidden until a state change
+            Some(f) if f.enabled == 0 => -2.0,
             Some(f) if f.texture >= 0 => f.texture as f32,
             _ => -1.0,
         };
         let (du, dv) = frame.map_or((0.0, 0.0), |f| (f.u as f32 / TEX, f.v as f32 / TEX));
+        for v in r.first..r.first + r.count {
+            let i = v as usize;
+            let o = i * FLOATS_PER_VERTEX;
+            self.vertices[o + 3] = self.base_uv[i * 2] + du;
+            self.vertices[o + 4] = self.base_uv[i * 2 + 1] + dv;
+            self.vertices[o + 5] = layer;
+        }
+        Some(r)
+    }
+}
 
+fn obj_index(section: &Section, obj: &WorldObject) -> usize {
+    section
+        .objects
+        .iter()
+        .position(|o| matches!(o, Object::World(w) if core::ptr::eq(w, obj)))
+        .unwrap()
+}
+
+fn emit_object(obj: &WorldObject, light_dir: V3, out: &mut Vec<f32>, bounds: &mut [f32; 6]) -> Vec<DrawRange> {
+    let mut ranges = Vec::new();
+    let mesh = obj.mesh.as_ref().unwrap();
+    let origin = obj.position.map(|c| c as f32);
+    let local: Vec<V3> = mesh.vertices.iter().map(|v| v.map(|c| c as f32)).collect();
+
+    for poly in &mesh.polygons {
+        let pts: Vec<V3> = poly.iter().filter_map(|&i| local.get(i as usize).copied()).collect();
+        let first = (out.len() / FLOATS_PER_VERTEX) as u32;
+        if pts.len() < 3 {
+            ranges.push(DrawRange { first, count: 0 });
+            continue;
+        }
+        // Layer and texel offset come from the appearance frame and are
+        // written afterwards by `WorldMesh::apply_frame`.
         // Texel axes from the first three vertices, as the original does.
         let eu = sub(pts[2], pts[1]);
         let ev = sub(pts[0], pts[1]);
@@ -163,10 +216,13 @@ fn emit_object(obj: &WorldObject, light_dir: V3, out: &mut Vec<f32>, bounds: &mu
                     bounds[a] = bounds[a].min(origin[a] + p[a]);
                     bounds[a + 3] = bounds[a + 3].max(origin[a] + p[a]);
                 }
-                out.extend_from_slice(&[p[0], p[1], p[2], uv[i].0 + du, uv[i].1 + dv, layer, light]);
+                out.extend_from_slice(&[p[0], p[1], p[2], uv[i].0, uv[i].1, -1.0, light]);
             }
         }
+        let count = (out.len() / FLOATS_PER_VERTEX) as u32 - first;
+        ranges.push(DrawRange { first, count });
     }
+    ranges
 }
 
 #[cfg(test)]

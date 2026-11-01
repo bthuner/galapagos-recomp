@@ -7,6 +7,8 @@
 // the simulation can change from frame to frame (moving platforms, doors…).
 //
 // Camera: drag to orbit, wheel to zoom, right-drag (or shift-drag) to pan.
+// A click (press and release without dragging) is turned into a world-space
+// ray and handed to `onPick`, which forwards it to the engine's picker.
 
 const VS = `#version 300 es
 layout(location=0) in vec3 aPos;
@@ -72,7 +74,7 @@ function compile(gl, vs, fs) {
   return p;
 }
 
-export function createWorldView(canvas) {
+export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {} } = {}) {
   const gl = canvas.getContext("webgl2", { antialias: true });
   if (!gl) throw new Error("WebGL2 is not available");
   const prog = compile(gl, VS, FS);
@@ -120,6 +122,10 @@ export function createWorldView(canvas) {
     fadeFar = world.farClip > 0 && world.farClip < 900000 ? world.farClip : radius * 4;
   }
 
+  // The camera basis of the last frame, for turning clicks into rays.
+  let eyeNow = [0, 0, 0], basis = null, viewProj = null;
+  const FOV = 1.0;
+
   function draw() {
     const w = canvas.clientWidth, h = canvas.clientHeight;
     if (canvas.width !== w * devicePixelRatio) {
@@ -138,11 +144,22 @@ export function createWorldView(canvas) {
       target[1] + cam.up * dist * Math.sin(pitch),
       target[2] + dist * Math.cos(pitch) * Math.cos(yaw),
     ];
-    const proj = perspective(1.0, w / h, radius / 500, radius * 8);
+    const proj = perspective(FOV, w / h, radius / 500, radius * 8);
+    eyeNow = eye;
+    basis = { target, aspect: w / h };
     gl.useProgram(prog);
-    gl.uniformMatrix4fv(uViewProj, false, mul(proj, lookAt(eye, target, [0, cam.up, 0])));
+    viewProj = mul(proj, lookAt(eye, target, [0, cam.up, 0]));
+    gl.uniformMatrix4fv(uViewProj, false, viewProj);
     gl.uniform1f(uFar, fadeFar);
     gl.bindVertexArray(vao);
+    onFrame();
+    // Upload only what the simulation patched (appearance changes).
+    const dirty = current.takeDirty?.();
+    if (dirty) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      const [a, b] = dirty;
+      gl.bufferSubData(gl.ARRAY_BUFFER, a * 7 * 4, current.liveVertices().subarray(a * 7, b * 7));
+    }
     const { draws } = current;
     const transforms = current.transforms();
     for (let i = 0; i < draws.length / 2; i++) {
@@ -154,10 +171,29 @@ export function createWorldView(canvas) {
   // Input: orbit / pan / zoom.
   let drag = null;
   canvas.addEventListener("pointerdown", (e) => {
-    drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey };
+    drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, pan: e.button === 2 || e.shiftKey };
     canvas.setPointerCapture(e.pointerId);
   });
-  canvas.addEventListener("pointerup", () => (drag = null));
+  canvas.addEventListener("pointerup", (e) => {
+    const moved = drag && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) > 4;
+    if (drag && !moved && !drag.pan && basis) onPick(...rayThrough(e));
+    drag = null;
+  });
+
+  // The ray from the eye through the clicked pixel, in world space.
+  function rayThrough(e) {
+    const r = canvas.getBoundingClientRect();
+    const nx = ((e.clientX - r.left) / r.width) * 2 - 1;
+    const ny = 1 - ((e.clientY - r.top) / r.height) * 2;
+    const norm = (a) => { const l = Math.hypot(...a); return a.map((v) => v / l); };
+    const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const fwd = norm(basis.target.map((t, i) => t - eyeNow[i]));
+    const right = norm(cross(fwd, [0, cam.up, 0]));
+    const up = cross(right, fwd);
+    const k = Math.tan(FOV / 2);
+    const dir = norm(fwd.map((f, i) => f + nx * k * basis.aspect * right[i] + ny * k * up[i]));
+    return [eyeNow, dir];
+  }
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointermove", (e) => {
     if (!drag) return;
@@ -187,6 +223,24 @@ export function createWorldView(canvas) {
 
   return {
     load,
+    // World point → CSS pixel coordinates in the page (null if behind).
+    project(p) {
+      if (!viewProj) return null;
+      const m = viewProj;
+      const x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
+      const y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
+      const w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
+      if (w <= 0) return null;
+      const r = canvas.getBoundingClientRect();
+      return [r.left + ((x / w + 1) / 2) * r.width, r.top + ((1 - y / w) / 2) * r.height];
+    },
+    // The world-space ray under a page coordinate: [origin, direction].
+    rayAt: (clientX, clientY) => rayThrough({ clientX, clientY }),
+    // Aim the orbit camera at a world point from a given distance.
+    focus(point, dist = cam.dist) {
+      cam.target = [...point];
+      cam.dist = dist;
+    },
     // Flip the up axis, for exploring the geometry upside down.
     flipUp() { cam.up = -cam.up; },
     stop() { running = false; },

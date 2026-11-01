@@ -8,6 +8,7 @@
 //! fills the buffer, then passes `(ptr, len)` to an `*_open` function, which
 //! takes ownership. JavaScript must not touch or free that buffer afterwards.
 
+mod sim;
 mod world;
 
 use galapagos_formats::smacker::{Smacker, YScale};
@@ -159,6 +160,9 @@ pub extern "C" fn movie_close() {
 struct Worlds {
     data: Vec<u8>,
     mesh: Option<world::WorldMesh>,
+    sim: Option<sim::Sim>,
+    /// Host events handed out by the last `sim_tick`.
+    events: Vec<sim::HostEvent>,
 }
 
 thread_local! {
@@ -173,7 +177,9 @@ pub extern "C" fn worlds_open(ptr: *mut u8, len: usize) -> i32 {
         Ok(a) => a.sections.len() as i32,
         Err(_) => return -1,
     };
-    WORLDS.with(|w| *w.borrow_mut() = Some(Worlds { data, mesh: None }));
+    WORLDS.with(|w| {
+        *w.borrow_mut() = Some(Worlds { data, mesh: None, sim: None, events: Vec::new() })
+    });
     n
 }
 
@@ -188,6 +194,7 @@ pub extern "C" fn world_build(i: usize) -> i32 {
         let Ok(section) = archive.world(i) else { return -1 };
         let mesh = world::WorldMesh::build(&section);
         let n = (mesh.vertices.len() / world::FLOATS_PER_VERTEX) as i32;
+        worlds.sim = Some(sim::Sim::new(&section, &mesh));
         worlds.mesh = Some(mesh);
         n
     })
@@ -246,4 +253,111 @@ pub extern "C" fn world_draws_ptr() -> *const u32 {
 #[no_mangle]
 pub extern "C" fn world_transforms_ptr() -> *const f32 {
     with_mesh(|m| m.transforms.as_ptr(), core::ptr::null())
+}
+
+// ——— Simulation ——————————————————————————————————————————————————————
+//
+// JavaScript owns the clock: it calls `sim_tick` as many times as 24 Hz
+// demands, then reads back what changed (transforms are re-read every frame;
+// vertex changes come as one dirty range; side effects come as events).
+
+/// Run `n` ticks of the world simulation. Returns the number of host events
+/// produced (read them at [`sim_events_ptr`], 3 × i32 each).
+#[no_mangle]
+pub extern "C" fn sim_tick(n: u32) -> u32 {
+    WORLDS.with(|w| {
+        let mut guard = w.borrow_mut();
+        let Some(worlds) = guard.as_mut() else { return 0 };
+        let (Some(sim), Some(mesh)) = (worlds.sim.as_mut(), worlds.mesh.as_mut()) else { return 0 };
+        for _ in 0..n {
+            sim.step(mesh);
+        }
+        worlds.events = std::mem::take(&mut sim.events);
+        worlds.events.len() as u32
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sim_events_ptr() -> *const sim::HostEvent {
+    WORLDS.with(|w| w.borrow().as_ref().map_or(core::ptr::null(), |w| w.events.as_ptr()))
+}
+
+/// Takes the vertex range patched since the last call. Returns -1 if
+/// nothing changed; otherwise 0, with `[first, end)` in the two u32 at
+/// [`sim_dirty_ptr`].
+#[no_mangle]
+pub extern "C" fn sim_take_dirty() -> i32 {
+    WORLDS.with(|w| {
+        let mut guard = w.borrow_mut();
+        let Some(worlds) = guard.as_mut() else { return -1 };
+        let Some(sim) = worlds.sim.as_mut() else { return -1 };
+        match sim.dirty.take() {
+            Some((a, b)) => {
+                DIRTY.with(|d| d.set([a, b]));
+                0
+            }
+            None => -1,
+        }
+    })
+}
+
+thread_local! {
+    static DIRTY: std::cell::Cell<[u32; 2]> = const { std::cell::Cell::new([0, 0]) };
+}
+
+#[no_mangle]
+pub extern "C" fn sim_dirty_ptr() -> *const u32 {
+    DIRTY.with(|d| d.as_ptr() as *const u32)
+}
+
+/// Pick along a world-space ray; a hit counts as a click on the next tick.
+/// Returns the object id hit, or 0.
+#[no_mangle]
+pub extern "C" fn sim_click(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32, dz: f32) -> u32 {
+    WORLDS.with(|w| {
+        let mut guard = w.borrow_mut();
+        let Some(worlds) = guard.as_mut() else { return 0 };
+        let Some(sim) = worlds.sim.as_mut() else { return 0 };
+        match sim.pick([ox, oy, oz], [dx, dy, dz]) {
+            Some(id) => {
+                sim.click(id);
+                id as u32
+            }
+            None => 0,
+        }
+    })
+}
+
+/// The simulation rate. 24 Hz is inferred: the time screen divides the
+/// tick counters by 24 (docs/re/objects.md §7).
+#[no_mangle]
+pub extern "C" fn sim_ticks_per_second() -> u32 {
+    sim::TICKS_PER_SECOND
+}
+
+thread_local! {
+    static SCRATCH: std::cell::Cell<[i32; 4]> = const { std::cell::Cell::new([0; 4]) };
+}
+
+/// Position (3 × i32) and current state (1 × i32) of object `id`, for
+/// debugging and the making-of's "poke it from the console" examples.
+#[no_mangle]
+pub extern "C" fn sim_object_info(id: u32) -> *const i32 {
+    WORLDS.with(|w| {
+        if let Some(sim) = w.borrow().as_ref().and_then(|w| w.sim.as_ref()) {
+            let p = sim.position_of(id as u16);
+            SCRATCH.with(|s| s.set([p[0], p[1], p[2], sim.state_of(id as u16) as i32]));
+        }
+    });
+    SCRATCH.with(|s| s.as_ptr() as *const i32)
+}
+
+/// Debug/teaching switch: run every state machine, ignoring folder gating.
+#[no_mangle]
+pub extern "C" fn sim_set_wake_all(on: u32) {
+    WORLDS.with(|w| {
+        if let Some(sim) = w.borrow_mut().as_mut().and_then(|w| w.sim.as_mut()) {
+            sim.wake_all = on != 0;
+        }
+    });
 }
