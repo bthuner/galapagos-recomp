@@ -176,18 +176,55 @@ pos = first_stream_with_valid_crc(overlay)
 
       <section id="smacker" class="chapter">
         <span class="num">05</span>
-        <h2>The films</h2>
+        <h2>The films, and the music hiding in them</h2>
         <p>
-          Files <code>0</code>–<code>10</code> are Smacker — RAD Game Tools' video codec, which was everywhere in 90s games.
-          It is a palette-based codec: each frame is cut into 4×4 blocks, each block is described by
-          symbols from four Huffman trees, and the trees are stored in the file header.
+          Files <code>0</code>–<code>10</code> are Smacker, RAD Game Tools' video codec, which shipped in thousands of
+          90s games. Smacker is built for 256-colour screens. Each frame is an 8-bit image with a palette, cut into
+          4×4 blocks, and every block is described by symbols pulled from four Huffman trees stored in the header:
+        </p>
+        <ul class="strings">
+          <li><code>TYPE</code><span>what kind of block, plus a run length: "the next 12 blocks are all solid"</span></li>
+          <li><code>MCLR</code> · <code>MMAP</code><span>two-colour blocks: a colour pair, then a 16-bit mask choosing between them</span></li>
+          <li><code>FULL</code><span>blocks with all sixteen pixels spelled out</span></li>
+          <li><code>void</code><span>"unchanged since last frame": no data at all, which is where most of the compression comes from</span></li>
+        </ul>
+        <p>
+          Each of those trees is itself compressed. Its leaves are 16-bit values built from two smaller 8-bit trees,
+          and three "recently used" slots act as a tiny cache. The decoder is about 900 lines of dependency-free Rust in
+          <a href="https://github.com/bthuner/galapagos-recomp/blob/main/crates/formats/src/smacker.rs">smacker.rs</a>,
+          with every step commented.
+        </p>
+        <h3>File 0: the studio intro</h3>
+        <p>
+          640×240, 386 frames at 24 fps, 16 seconds: fire that gathers into Anark's green arched logo. The header sets
+          the <em>Y-interlace</em> flag. The movie is stored at half height and drawn on every other line of a 640×480
+          screen, which halves the data a 2× CD-ROM drive has to stream.
         </p>
         <p>
-          The odd part: ten of the eleven files say their picture is 4×4 pixels. A video that small makes no
-          sense, so they are most likely sound-only containers — music and voices — where the "video"
-          is a placeholder.
+          On a 1997 CRT the phosphor glow blurred the black lines into a soft texture. On a sharp LCD, against a
+          mostly white logo, they turn harsh. Our first version made it worse: it scaled the canvas by a
+          non-integer factor with <code>image-rendering: pixelated</code>, which doubles some rows and not others,
+          and the result was moiré. The fix is to give the browser the 240 stored lines and let its bilinear filter
+          stretch them to 4:3. That's line doubling with interpolation, and it's the default. If you want the exact
+          original output, the <em>Scanlines: original</em> toggle draws the black lines and still scales smoothly.
         </p>
-        <p class="wip">Work in progress: a from-scratch Rust decoder for video and compressed audio.</p>
+        <h3>Files 1–10: not videos at all</h3>
+        <p>
+          Their headers claim a picture of 4×4 pixels at 10 fps, and every frame type is <code>0x02</code>, meaning
+          "audio only". They are about 8.5 minutes of music: 22,050 Hz, 16-bit, compressed with Smacker's Huffman
+          <abbr title="Differential pulse-code modulation">DPCM</abbr>, which stores the difference between consecutive
+          samples instead of the samples themselves. Anark reused RAD's licensed player as a compressed music format
+          rather than writing one.
+        </p>
+        <h3>Playing it in the browser: the audio clock wins</h3>
+        <p>
+          The engine decodes the whole soundtrack first and gives it to WebAudio as a single buffer. On every
+          <code>requestAnimationFrame</code>, the page asks which frame belongs to the current audio time and decodes
+          forward to it. If the tab stutters, we drop frames; the sound never drifts.
+        </p>
+        <pre class="code"><code><span class="c">// web/src/movie.js</span>
+<span class="k">const</span> want = Math.floor((audioCtx.currentTime - t0) / secondsPerFrame);
+<span class="k">while</span> (shown &lt; want) { pixels = movie.nextFrame(); shown++; }</code></pre>
       </section>
 
       <section id="architecture" class="chapter">
@@ -206,7 +243,7 @@ pos = first_stream_with_valid_crc(overlay)
         <p>
           The format readers have to run in two places: natively, for tests against the real files, and in
           the browser. Rust's <code>wasm32-unknown-unknown</code> target gives us both from one codebase, and the
-          output is about 25 KB.
+          whole engine, Smacker decoder included, is about 50 KB of WebAssembly.
         </p>
         <p>
           We skip <code>wasm-bindgen</code> on purpose. The boundary is a handful of
@@ -224,6 +261,8 @@ wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></c
         <h2>Journal</h2>
         <ol class="journal">
           <li><time>2026‑11‑01</time> Unpacked the Wise installer, recovered <code>galapagos.exe</code> and <code>smackw32.dll</code>. Repository scaffolded: Rust workspace, ISO reader, OPFS cache, WebAssembly boot.</li>
+          <li><time>2026‑11‑01</time> Smacker decoder in Rust: the Anark intro now plays in the browser, synced to its audio; files 1–10 turn out to be the soundtrack. Found and fixed a classic bug: a <code>display: grid</code> rule overrode the <code>hidden</code> attribute.</li>
+          <li><time>2026‑11‑01</time> Interlaced intro: smooth line doubling by default, original scanlines as an option, and no more moiré from pixelated scaling.</li>
         </ol>
       </section>
 
