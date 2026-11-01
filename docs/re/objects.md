@@ -274,7 +274,9 @@ playback speed.
 
 ```text
 u16 count; count x {                                         34 bytes
-  i16 sound[3]     indices into the section sound set, -1 = none
+  i16 sound[3]     1-based indices into the section sound set, -1 = none
+                   (observed on data: 1-based leaves 1 of 1,467 references on
+                   an empty slot, 0-based leaves 107); one is picked at random
   u32 pitch        16.16, 65536 = 1.0
   u32 variation    16.16 fraction (0, 0.02, 0.05, 0.2)
   i32 near, far    attenuation distances (5000/20000 ... 300000 = global)

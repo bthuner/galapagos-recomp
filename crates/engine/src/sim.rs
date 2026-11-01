@@ -34,11 +34,13 @@ pub struct HostEvent {
     pub kind: u32,
     pub a: i32,
     pub b: i32,
+    pub c: i32,
 }
 
 pub const EV_MUSIC: u32 = 1; // a = Smacker file 1..10, 0 = stop
 pub const EV_SECTION: u32 = 2; // a = section, b = level (time screen)
-pub const EV_SOUND: u32 = 3; // a = section sound index, b = object id
+pub const EV_SOUND: u32 = 3; // a = world-bank sound (0-based), b = object id, c = emitter index
+pub const EV_CREATURE_SOUND: u32 = 5; // a = creature-bank sound (0-based)
 pub const EV_CAMERA_SNAP: u32 = 4; // a teleporter of kind 2 asks the camera to jump
 
 /// What a portal or save pad asks of Mendel; the creature picks these up
@@ -151,7 +153,7 @@ impl Sim {
     }
 
     /// The CRT `rand()` the original links (MSVC LCG, 15-bit output).
-    fn rand(&self) -> u32 {
+    pub(crate) fn rand(&self) -> u32 {
         let s = self.rng.get().wrapping_mul(214013).wrapping_add(2531011);
         self.rng.set(s);
         (s >> 16) & 0x7fff
@@ -283,9 +285,18 @@ impl Sim {
             self.select_appearance(i, (n - 1).max(0) as usize, mesh);
         }
         if let Some(n) = a.sound {
-            let sound = self.objs[i].obj.as_ref().and_then(|o| o.logic.sounds.get((n - 1).max(0) as usize));
-            if let Some(&s) = sound.and_then(|e| e.sounds.iter().find(|&&s| s >= 0)) {
-                self.events.push(HostEvent { kind: EV_SOUND, a: s as i32, b: i as i32 + 1 });
+            // An emitter lists up to three alternative sounds; the sound
+            // system picks one at random. Their indices are **1-based** into
+            // the section's sound set (checked on the CD: 1-based leaves 1 of
+            // 1,467 references on an empty slot, 0-based leaves 107).
+            let e = (n - 1).max(0) as usize;
+            let emitter = self.objs[i].obj.as_ref().and_then(|o| o.logic.sounds.get(e));
+            if let Some(em) = emitter {
+                let choices: Vec<i16> = em.sounds.iter().copied().filter(|&s| s > 0).collect();
+                if !choices.is_empty() {
+                    let s = choices[self.rand() as usize % choices.len()];
+                    self.events.push(HostEvent { kind: EV_SOUND, a: s as i32 - 1, b: i as i32 + 1, c: e as i32 });
+                }
             }
         }
         if let Some(n) = a.motion {
@@ -308,13 +319,13 @@ impl Sim {
                 // shorts[0]: 1 = enable, 0 = disable; shorts[1] = descendants.
                 self.objs[i].skip = if p.shorts[0] != 0 { 0 } else { p.shorts[1].max(0) as u32 };
             }
-            b"Voic" => self.events.push(HostEvent { kind: EV_MUSIC, a: p.shorts[0] as i32, b: 0 }),
+            b"Voic" => self.events.push(HostEvent { kind: EV_MUSIC, a: p.shorts[0] as i32, b: 0, c: 0 }),
             b"Tele" | b"Strt" | b"STel" => {
                 let o = self.objs[i].pos;
                 let at = |off: [i32; 3]| [(o[0] + off[0]) as f32, (o[1] + off[1]) as f32, (o[2] + off[2]) as f32];
                 match p.portal() {
                     PortalAction::ChangeSection { section, level } => {
-                        self.events.push(HostEvent { kind: EV_SECTION, a: section as i32, b: level as i32 })
+                        self.events.push(HostEvent { kind: EV_SECTION, a: section as i32, b: level as i32, c: 0 })
                     }
                     // inferred: `mode` is ignored; the offset is always
                     // relative to the portal, which fits every pad on the CD.
@@ -437,6 +448,11 @@ impl Sim {
             }
         }
         best.map(|(_, id)| id)
+    }
+
+    /// Sound emitter `n` of object `id` (1-based).
+    pub fn emitter(&self, id: u16, n: usize) -> Option<galapagos_formats::logic::SoundEmitter> {
+        self.objs.get(id.wrapping_sub(1) as usize)?.obj.as_ref()?.logic.sounds.get(n).copied()
     }
 
     /// Current position of object `id` (1-based), in world units.

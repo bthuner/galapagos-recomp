@@ -6,3 +6,6 @@
 /web/pkg/
 /out/
 node_modules/
+
+# Local agent worktrees
+/.claude/worktrees/

@@ -328,6 +328,13 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
 
   return {
     load,
+    // Where the camera is and where it looks, for the audio listener.
+    listener() {
+      if (!basis) return null;
+      const d = basis.target.map((t, i) => t - eyeNow[i]);
+      const l = Math.hypot(...d) || 1;
+      return { eye: eyeNow, forward: d.map((v) => v / l), up: [0, cam.up, 0] };
+    },
     // World point → CSS pixel coordinates in the page (null if behind).
     project(p) {
       if (!viewProj) return null;
