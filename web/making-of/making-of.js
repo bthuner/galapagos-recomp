@@ -23,7 +23,8 @@ addEventListener("scroll", () => {
   bar.style.transform = `scaleX(${scrollY / max})`;
 }, { passive: true });
 
-// The `worlds` header: a u32 count, then eight u32 section offsets.
+// The `worlds` header: u16 section count, u16 default section, then eight
+// u32 section offsets.
 // These 36 bytes are facts about the file layout, not game content.
 const HEADER = [8, 0x4601b5, 0x13a6a81, 0x20f0c23, 0x2fe2f38, 0x3fa1cfb, 0x4cf984c, 0x5c488b1, 0x68fe9cd];
 const MB = (n) => (n / 1048576).toFixed(1) + " MB";
@@ -36,11 +37,12 @@ function hexFigure(fig) {
   info.textContent = "Little-endian: the least significant byte comes first.";
 
   HEADER.forEach((value, i) => {
-    const field = i === 0 ? "count" : `off${i - 1}`;
-    const text = i === 0
-      ? "section_count = 8"
-      : `section[${i - 1}] starts at 0x${value.toString(16)} (${MB(value)} into the file)`;
     for (let b = 0; b < 4; b++) {
+      // The first u32 is really two u16s: count (bytes 0-1), default section (2-3).
+      const field = i > 0 ? `off${i - 1}` : b < 2 ? "count" : "default";
+      const text = i > 0
+        ? `section[${i - 1}] starts at 0x${value.toString(16)} (${MB(value)} into the file)`
+        : b < 2 ? "u16 section_count = 8" : "u16 default_section = 0";
       const span = document.createElement("span");
       span.className = "hex__b";
       span.dataset.f = field;

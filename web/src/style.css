@@ -154,3 +154,17 @@ body::before {
 }
 .jukebox button.is-on { background: var(--lime); color: var(--abyss); border-color: var(--lime); }
 .stage__bar { display: flex; gap: 2rem; font-size: 0.85rem; }
+.world { width: min(100vw, calc(80vh * 16 / 9)); aspect-ratio: 16 / 9; display: block; cursor: grab; touch-action: none; }
+.world:active { cursor: grabbing; }
+.sections { display: flex; gap: 0.4rem; flex-wrap: wrap; justify-content: center; }
+.sections button, .jukebox button { transition: background 0.2s, color 0.2s; }
+.sections button {
+  padding: 0.5rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid #ffffff33;
+  background: none;
+  color: var(--bone);
+  font: 0.8rem ui-monospace, monospace;
+  cursor: pointer;
+}
+.sections button.is-on { background: var(--lime); color: var(--abyss); border-color: var(--lime); }
