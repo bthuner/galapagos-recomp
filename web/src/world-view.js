@@ -2,7 +2,9 @@
 //
 // The engine gives us a flat array of triangles (x, y, z, u, v, layer, light)
 // and a stack of 128×128 textures. WebGL2's TEXTURE_2D_ARRAY holds the whole
-// stack in one object, so a single draw call renders the entire world.
+// stack in one object, so no texture switches are needed. Vertices are local
+// to their object, and each object is drawn with its own model matrix, which
+// the simulation can change from frame to frame (moving platforms, doors…).
 //
 // Camera: drag to orbit, wheel to zoom, right-drag (or shift-drag) to pan.
 
@@ -12,10 +14,11 @@ layout(location=1) in vec2 aUV;
 layout(location=2) in float aLayer;
 layout(location=3) in float aLight;
 uniform mat4 uViewProj;
+uniform mat4 uModel;
 out vec2 vUV; flat out float vLayer; out float vLight; out float vDepth;
 void main() {
   vUV = aUV; vLayer = aLayer; vLight = aLight;
-  gl_Position = uViewProj * vec4(aPos, 1.0);
+  gl_Position = uViewProj * uModel * vec4(aPos, 1.0);
   vDepth = gl_Position.w;
 }`;
 
@@ -27,6 +30,7 @@ uniform float uFar;
 in vec2 vUV; flat in float vLayer; in float vLight; in float vDepth;
 out vec4 color;
 void main() {
+  if (vLayer < -1.5) discard; // hidden in the current appearance state
   // Textures repeat, as in the original's wrap-around texel addressing.
   vec3 c = vLayer < 0.0 ? vec3(0.55) : texture(uTex, vec3(fract(vUV), vLayer)).rgb;
   // Depth cueing: surfaces fade to black with distance, as the original's
@@ -74,6 +78,8 @@ export function createWorldView(canvas) {
   const prog = compile(gl, VS, FS);
   const uViewProj = gl.getUniformLocation(prog, "uViewProj");
   const uFar = gl.getUniformLocation(prog, "uFar");
+  const uModel = gl.getUniformLocation(prog, "uModel");
+  let current = null;
   const vao = gl.createVertexArray();
   const vbo = gl.createBuffer();
   const tex = gl.createTexture();
@@ -97,6 +103,7 @@ export function createWorldView(canvas) {
     };
     attr(0, 3, 0); attr(1, 2, 3); attr(2, 1, 5); attr(3, 1, 6);
     count = world.vertices.length / 7;
+    current = world;
 
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
     const layers = Math.max(1, world.textureCount);
@@ -136,7 +143,12 @@ export function createWorldView(canvas) {
     gl.uniformMatrix4fv(uViewProj, false, mul(proj, lookAt(eye, target, [0, cam.up, 0])));
     gl.uniform1f(uFar, fadeFar);
     gl.bindVertexArray(vao);
-    gl.drawArrays(gl.TRIANGLES, 0, count);
+    const { draws } = current;
+    const transforms = current.transforms();
+    for (let i = 0; i < draws.length / 2; i++) {
+      gl.uniformMatrix4fv(uModel, false, transforms.subarray(i * 16, i * 16 + 16));
+      gl.drawArrays(gl.TRIANGLES, draws[i * 2], draws[i * 2 + 1]);
+    }
   }
 
   // Input: orbit / pan / zoom.

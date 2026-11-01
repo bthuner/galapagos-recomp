@@ -230,3 +230,20 @@ pub extern "C" fn world_object_count() -> u32 {
 pub extern "C" fn world_far_clip() -> f32 {
     with_mesh(|m| m.far_clip, 0.0)
 }
+
+/// Number of drawn objects; each has a [`world::DrawRange`] (two u32:
+/// first vertex, vertex count) and a 4×4 column-major transform.
+#[no_mangle]
+pub extern "C" fn world_draw_count() -> u32 {
+    with_mesh(|m| m.draws.len() as u32, 0)
+}
+
+#[no_mangle]
+pub extern "C" fn world_draws_ptr() -> *const u32 {
+    with_mesh(|m| m.draws.as_ptr() as *const u32, core::ptr::null())
+}
+
+#[no_mangle]
+pub extern "C" fn world_transforms_ptr() -> *const f32 {
+    with_mesh(|m| m.transforms.as_ptr(), core::ptr::null())
+}
