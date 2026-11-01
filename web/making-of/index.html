@@ -403,6 +403,41 @@ wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></c
           A world is 1,500–5,300 triangles, roughly what a 1997 software renderer could push at 640×480 on a
           Pentium 90. A phone GPU today draws that in well under a millisecond.
         </p>
+        <h3>Bringing the machines to life</h3>
+        <p>
+          <code>sim.rs</code> ports the 24 Hz object loop. JavaScript owns the clock: each animation frame it works
+          out how many ticks real time requires (at most five, so a tab returning from the background doesn't
+          fast-forward) and asks the engine to run them. Three kinds of change come back across the boundary, each in
+          its cheapest form:
+        </p>
+        <ul class="strings">
+          <li><b>Moving objects</b><span>16 floats per object; the renderer re-reads every transform each frame</span></li>
+          <li><b>Appearance changes</b><span>patched in place in the vertex buffer, uploaded as one dirty range with <code>bufferSubData</code></span></li>
+          <li><b>Side effects</b><span>a short list of events: play music track <em>n</em>, play sound <em>s</em>, go through a gate to section <em>k</em></span></li>
+        </ul>
+        <p>
+          Clicks work the way they did in 1997. The page turns the mouse position into a ray (and checks itself by
+          projecting a point on that ray back to the same pixel), the engine tests it against every pickable polygon,
+          and the nearest object counts as "clicked" for exactly one tick.
+        </p>
+        <h3>A world that sleeps until Mendel arrives</h3>
+        <p>
+          The first live test was puzzling: almost nothing could be clicked. Instrumenting the simulation showed why.
+          Two seconds after loading, 97 of section 0's 171 objects are inside <em>disabled folders</em>, groups the
+          game switches off until Mendel walks in. It's level-of-detail for behaviour: in 1997 there was no CPU to
+          spare for machines nobody could see. Our first guess was wrong. We hid disabled folders, and most of the
+          world disappeared, while the gameplay footage shows complete worlds. So folders stop <em>thinking</em>, not
+          drawing.
+        </p>
+        <p>
+          That makes Mendel more than the main character: his footsteps (the "touched" event, which bubbles up from a
+          floor polygon through its parent folders) are what wake the world up. Until he's in, a clearly labelled
+          debug switch, <em>Wake every machine</em>, ignores folders so you can poke all 2,089 state machines yourself.
+          The running game is also exposed on <code>window.galapagos</code> for DevTools:
+        </p>
+        <pre class="code"><code><span class="c">// in the browser console, on the game page</span>
+galapagos.engine.sim.object(<span class="n">85</span>)        <span class="c">// → { position: [...], state: 2 }</span>
+galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).position, <span class="n">12000</span>)</code></pre>
       </section>
 
       <section id="journal" class="chapter">
@@ -416,6 +451,7 @@ wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></c
           <li><time>2026‑11‑01</time> First light: a WebGL2 viewer renders all eight worlds with their textures. The axis is Y-down.</li>
           <li><time>2026‑11‑01</time> Compared against gameplay footage: fixed the texture origin (v1, not v0), brightened lighting, added distance fade.</li>
           <li><time>2026‑11‑01</time> Two research tracks in parallel: the object state machines (all 2,089 objects parse exactly; gate table explains the 8 sections) and Mendel (body, walk cycle, senses, and the NERM brain, verified byte for byte against the CD's five brains).</li>
+          <li><time>2026‑11‑02</time> The worlds come alive: a 24 Hz port of the object simulation, with motion paths, appearance changes, music, gates and click picking. Discovered that folders put most of a world to sleep until Mendel arrives.</li>
         </ol>
       </section>
 
