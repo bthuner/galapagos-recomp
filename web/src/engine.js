@@ -4,23 +4,51 @@
 //   1. ask it to allocate `len` bytes inside its linear memory,
 //   2. copy the file there,
 //   3. pass the (pointer, length) pair to an exported function.
-// No bindings generator, no magic: ~30 lines you can read.
+// No bindings generator, no magic: you can read all of it.
+//
+// One trap: when WebAssembly memory grows, every existing view on
+// `memory.buffer` is detached. So we create views *after* each call that
+// might allocate, never cache them.
 
 export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
   const { instance } = await WebAssembly.instantiateStreaming(fetch(url), {});
   const wasm = instance.exports;
+  const u8 = (ptr, len) => new Uint8Array(wasm.memory.buffer, ptr, len);
 
   function upload(bytes) {
     const ptr = wasm.alloc(bytes.length);
-    new Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
+    u8(ptr, bytes.length).set(bytes);
     return [ptr, bytes.length];
   }
 
   return {
     wasm,
-    upload,
     worldsSectionCount(bytes) {
-      return wasm.worlds_section_count(...upload(bytes));
+      const [ptr, len] = upload(bytes);
+      const n = wasm.worlds_section_count(ptr, len);
+      wasm.dealloc(ptr, len);
+      return n;
+    },
+
+    // Smacker movies. The engine takes ownership of the uploaded bytes.
+    openMovie(bytes) {
+      if (wasm.movie_open(...upload(bytes)) !== 0) throw new Error("Not a Smacker file");
+      const [width, height, frames, usPerFrame, sampleRate, channels] =
+        new Uint32Array(wasm.memory.buffer, wasm.movie_info(), 6);
+      return {
+        width, height, frames, usPerFrame, sampleRate, channels,
+        decodeAudio() {
+          const n = wasm.movie_decode_audio();
+          if (n < 0) throw new Error("Corrupt movie audio");
+          return new Int16Array(wasm.memory.buffer, wasm.movie_audio_ptr(), n).slice();
+        },
+        nextFrame() {
+          const r = wasm.movie_next_frame();
+          if (r < 0) throw new Error("Corrupt movie frame");
+          return r === 1 ? u8(wasm.movie_frame_ptr(), width * height * 4) : null;
+        },
+        close: () => wasm.movie_close(),
+      };
     },
   };
 }

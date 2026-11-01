@@ -30,13 +30,17 @@
     <nav class="foot">
       <a href="./making-of/">How this was made →</a>
       <a href="https://github.com/bthuner/galapagos-recomp">Source</a>
-      <button id="forget" class="link" hidden>Forget my CD</button>
     </nav>
   </main>
 
   <section id="stage" class="stage" hidden>
-    <canvas id="screen" width="640" height="480"></canvas>
+    <div class="screen">
+      <canvas id="screen" width="640" height="480"></canvas>
+      <button id="start" class="start">Press to begin</button>
+    </div>
     <pre id="log" class="log"></pre>
+    <nav id="jukebox" class="jukebox" aria-label="Soundtrack" hidden></nav>
+    <button id="forget-stage" class="link">Forget my CD</button>
   </section>
 
   <script type="module" src="./src/main.js"></script>
