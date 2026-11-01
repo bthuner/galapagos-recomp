@@ -198,20 +198,46 @@ impl CreatureBody {
     /// (`CreatureBody_RemapIndices` @ 0x427040 with flag 1); side B, being
     /// mirrored, keeps file order.
     pub fn pose(&self, phase: u8, stance: u8) -> PosedMesh {
-        let t = stance as i32;
+        self.pose_turning(phase, stance as i32, 0, true)
+    }
+
+    /// The full `CreatureBody_SetPose` @ 0x426410, turning included.
+    ///
+    /// Turning is "tank style": the legs of one side play the walk cycle
+    /// backwards, blended in proportionally to `turn` (0..=256). `side`
+    /// (the brain's turn output >= 128) picks which side reverses: side B
+    /// when `side` is set, side A otherwise.
+    ///
+    /// ```text
+    /// legs(ph)   = lerp(legs_b, legs_a, stance/256) at frame(ph)
+    /// back(ph)   = lerp(legs(ph), legs(-ph), turn/256)
+    /// side A     = side ? legs(ph)             : back(ph)
+    /// side B     = mirror_z(side ? back(ph+128) : legs(ph+128))
+    /// ```
+    pub fn pose_turning(&self, phase: u8, stance: i32, turn: i32, side: bool) -> PosedMesh {
+        let t = stance.clamp(0, 256);
+        let turn = turn.clamp(0, 256);
         let frame = |p: &BodyPart, ph: u8| -> Vec<[i32; 3]> {
             p.frames[Self::frame_for_phase(ph)].iter().map(|&v| p.transform(v)).collect()
         };
-        let legs = |ph: u8| -> Vec<[i32; 3]> {
-            let a = frame(&self.legs_a, ph);
-            let b = frame(&self.legs_b, ph);
-            a.iter().zip(&b).map(|(a, b)| core::array::from_fn(|k| b[k] + (((a[k] - b[k]) * t) >> 8))).collect()
+        let lerp = |a: &[[i32; 3]], b: &[[i32; 3]], w: i32| -> Vec<[i32; 3]> {
+            a.iter().zip(b).map(|(a, b)| core::array::from_fn(|k| a[k] + (((b[k] - a[k]) * w) >> 8))).collect()
         };
+        let legs = |ph: u8| -> Vec<[i32; 3]> { lerp(&frame(&self.legs_b, ph), &frame(&self.legs_a, ph), t) };
+        let back = |ph: u8| -> Vec<[i32; 3]> {
+            let fwd = legs(ph);
+            if turn == 0 {
+                return fwd;
+            }
+            lerp(&fwd, &legs(ph.wrapping_neg()), turn)
+        };
+        let half = phase.wrapping_add(128);
+        let (side_a, side_b) = if side { (legs(phase), back(half)) } else { (back(phase), legs(half)) };
         let mut vertices = frame(&self.shell, phase);
         let base_a = vertices.len();
-        vertices.extend(legs(phase));
+        vertices.extend(side_a);
         let base_b = vertices.len();
-        vertices.extend(legs(phase.wrapping_add(128)).into_iter().map(|[x, y, z]| [x, y, -z]));
+        vertices.extend(side_b.into_iter().map(|[x, y, z]| [x, y, -z]));
 
         let mut faces = Vec::new();
         for (part, base, reverse) in [(&self.shell, 0, true), (&self.legs_a, base_a, true), (&self.legs_b, base_b, false)] {

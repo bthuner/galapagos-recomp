@@ -299,6 +299,28 @@ pos = first_stream_with_valid_crc(overlay)
           A saved brain (<code>.mnd</code>) is exactly one 28,242-byte genome set. Our writer reproduces the five
           brains shipped on the CD (one per "age" in the preferences) byte for byte.
         </p>
+              <h3>Alive, in a browser tab</h3>
+        <p>
+          Porting the spec into the running engine (<code>creature.rs</code>) turned up things that reading code alone
+          hadn't:
+        </p>
+        <ul class="strings">
+          <li><b>He's born on a ceiling</b><span>the start point sits exactly on the roof of a birth tube; he only falls in because polygons are one-sided, solid only from their front</span></li>
+          <li><b>The intro is a ride</b><span>a capsule docks around the tube and carries him for 130 s along a 1,992-frame motion path; holding Space (the <code>STel</code> object) skips it</span></li>
+          <li><b>Riding platforms</b><span>he keeps his position <em>and</em> orientation in the platform's frame, so a rolling capsule rolls him too</span></li>
+          <li><b>Footsteps wake the world</b><span>dropped on a platform, his touch event climbs the folder chain and a sleeping upper level wakes within 20 ticks</span></li>
+        </ul>
+        <p>
+          The brain is the real one: the age-3 genome from the CD reads his two infrared eyes, three 200-step Markov
+          chains drive slew-limited "muscles", and the genetic algorithm evolves about twice a minute while you watch.
+          His brain survives death and gates. Right-click his left or right side and he feels a bump there.
+        </p>
+        <p>
+          Some parts are honest stand-ins, each marked <code>// inferred:</code> or <code>// not in the original:</code>
+          in the code. The original walks from polygon to polygon; ours is a ray-cast character controller. The
+          camera is a chase camera, not yet the game's per-floor camera keys. Creature sounds, afflictions, and the
+          world snapshot a death restores aren't ported yet.
+        </p>
       </section>
 
       <section id="smacker" class="chapter">
@@ -452,6 +474,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑01</time> Compared against gameplay footage: fixed the texture origin (v1, not v0), brightened lighting, added distance fade.</li>
           <li><time>2026‑11‑01</time> Two research tracks in parallel: the object state machines (all 2,089 objects parse exactly; gate table explains the 8 sections) and Mendel (body, walk cycle, senses, and the NERM brain, verified byte for byte against the CD's five brains).</li>
           <li><time>2026‑11‑02</time> The worlds come alive: a 24 Hz port of the object simulation, with motion paths, appearance changes, music, gates and click picking. Discovered that folders put most of a world to sleep until Mendel arrives.</li>
+          <li><time>2026‑11‑02</time> Mendel is alive: born on the birth tube's ceiling, carried by the intro capsule, walking with his real NERM brain, waking folders with his footsteps, and feeling right-clicks.</li>
         </ol>
       </section>
 
