@@ -1,0 +1,8 @@
+# Original game data is copyrighted: never commit it. Bring your own ISO.
+/originals/
+*.iso
+*.smk
+/target/
+/web/pkg/
+/out/
+node_modules/

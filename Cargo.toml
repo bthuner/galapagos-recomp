@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["crates/formats", "crates/engine"]
+
+[profile.release]
+opt-level = "s"
+lto = true

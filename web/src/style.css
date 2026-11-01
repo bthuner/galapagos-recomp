@@ -1,0 +1,119 @@
+/* Galapagos recomp — player shell.
+   Palette taken from the game's worlds: abyssal teal, bioluminescent lime,
+   bone. One typeface family, many weights, lots of air. */
+
+:root {
+  --abyss: #050b0d;
+  --deep: #0b1a1e;
+  --bone: #ece6d8;
+  --mute: #7f8d8a;
+  --lime: #c6ff3d;
+  --ease: cubic-bezier(0.2, 0.7, 0, 1);
+  font-family: ui-sans-serif, "Inter", "Helvetica Neue", Arial, sans-serif;
+  color: var(--bone);
+  background: var(--abyss);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; }
+body::before {
+  /* slow bioluminescent drift behind everything */
+  content: "";
+  position: fixed;
+  inset: -20%;
+  background:
+    radial-gradient(40% 30% at 30% 35%, #0f3b3c 0%, transparent 70%),
+    radial-gradient(30% 25% at 75% 70%, #23310a 0%, transparent 70%);
+  animation: drift 24s var(--ease) infinite alternate;
+  z-index: -1;
+}
+@keyframes drift { to { transform: translate3d(4%, -3%, 0) rotate(6deg); } }
+
+.boot {
+  min-height: 100vh;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 1.5rem;
+  padding: 6vh 6vw;
+  text-align: center;
+}
+.eyebrow {
+  margin: 0;
+  font-size: 0.75rem;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--mute);
+}
+.title {
+  margin: 0;
+  font-size: clamp(4rem, 15vw, 13rem);
+  font-weight: 200;
+  letter-spacing: -0.06em;
+  line-height: 0.85;
+}
+.title span { color: var(--lime); }
+.lede { margin: 0; max-width: 32ch; font-size: 1.15rem; color: var(--mute); }
+
+.drop {
+  position: relative;
+  margin-top: 2rem;
+  width: min(26rem, 80vw);
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 0.6s var(--ease);
+}
+.drop__ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid #ffffff22;
+  background: repeating-radial-gradient(circle, #ffffff06 0 1px, transparent 1px 9px);
+}
+.drop__ring::after {
+  /* the CD's spindle hole */
+  content: "";
+  position: absolute;
+  inset: 44%;
+  border-radius: 50%;
+  border: 1px solid #ffffff33;
+}
+.drop:hover, .drop.is-over { transform: scale(1.04) rotate(-4deg); }
+.drop.is-over .drop__ring { border-color: var(--lime); }
+.drop__text { display: grid; gap: 0.4rem; padding: 0 3rem; transform: translateY(-4.5rem); }
+.drop__text small { color: var(--mute); }
+
+.progress { width: min(26rem, 80vw); }
+.progress__bar { height: 2px; background: #ffffff1a; overflow: hidden; }
+.progress__bar i {
+  display: block;
+  height: 100%;
+  background: var(--lime);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.3s var(--ease);
+}
+.progress__label { font-size: 0.85rem; color: var(--mute); }
+
+.foot { display: flex; gap: 2rem; font-size: 0.85rem; }
+.foot a, .link {
+  color: var(--bone);
+  background: none;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  border-bottom: 1px solid #ffffff33;
+}
+.foot a:hover, .link:hover { border-color: var(--lime); }
+
+.stage { min-height: 100vh; display: grid; place-items: center; gap: 1rem; }
+#screen {
+  width: min(100vw, calc(100vh * 4 / 3));
+  image-rendering: pixelated;
+  background: #000;
+}
+.log { color: var(--mute); font-size: 0.8rem; }

@@ -1,0 +1,7 @@
+[package]
+name = "galapagos-formats"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust readers for Galapagos (1997) data: the `worlds` archive and Smacker videos."
+
+[dependencies]

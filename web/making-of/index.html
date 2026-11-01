@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Making of — Galapagos, recompiled for the web</title>
+  <meta name="description" content="How a 1997 Windows game about an autonomous creature was reverse engineered and rebuilt in Rust and WebAssembly." />
+  <link rel="stylesheet" href="./making-of.css" />
+</head>
+<body>
+  <div class="progress" aria-hidden="true"><i id="progress"></i></div>
+
+  <header class="hero">
+    <p class="kicker">A making of, written as it happens</p>
+    <h1>Bringing<br /><em>Mendel</em><br />back.</h1>
+    <p class="hero__lede">
+      In 1997 a small Boulder studio shipped a game whose hero ignores you.
+      This is the logbook of rebuilding it — byte by byte — so it runs in a browser tab.
+    </p>
+    <a class="hero__cta" href="../">Play it →</a>
+    <div class="hero__scroll" aria-hidden="true">scroll</div>
+  </header>
+
+  <div class="layout">
+    <nav class="toc" aria-label="Chapters">
+      <ol>
+        <li><a href="#prologue">Prologue</a></li>
+        <li><a href="#disc">The disc</a></li>
+        <li><a href="#installer">The installer</a></li>
+        <li><a href="#exe">The executable</a></li>
+        <li><a href="#worlds">The worlds</a></li>
+        <li><a href="#smacker">The films</a></li>
+        <li><a href="#architecture">The new engine</a></li>
+        <li><a href="#journal">Journal</a></li>
+      </ol>
+    </nav>
+
+    <article class="story">
+
+      <section id="prologue" class="chapter">
+        <span class="num">00</span>
+        <h2>A creature that doesn't take orders</h2>
+        <p class="big">
+          <em>Galapagos: Mendel's Escape</em> (Anark Game Studios, published by Electronic Arts, 1997)
+          is a puzzle game where you never control the protagonist.
+        </p>
+        <p>
+          Mendel is a four-legged synthetic organism driven by what Anark called
+          <abbr title="Non-stationary Entropic Reduction Mapping">NERM</abbr>: a self-organising controller
+          that learns from feedback. You click on the environment — bridges, fans, platforms — and Mendel,
+          sensing with infrared "sonar", decides what to do about it. Kill him too often and he regenerates
+          more neurotic. Guide him well and he grows confident.
+        </p>
+        <p>
+          The game targeted Windows 95, DirectX 5 and a 90 MHz Pentium. Today it doesn't run without
+          emulation or compatibility shims. The goal of this project is the opposite of emulation:
+          <strong>understand every file the game reads, then write a new program that reads them the
+          same way</strong> — a <em>recomp</em> — in Rust, compiled to WebAssembly.
+        </p>
+        <aside class="note">
+          <b>Rule zero.</b> The original data is copyrighted, so none of it lives in this repository.
+          You bring your own CD image; the browser reads it locally.
+        </aside>
+      </section>
+
+      <section id="disc" class="chapter">
+        <span class="num">01</span>
+        <h2>What's on the disc</h2>
+        <p>
+          A CD image is just a sequence of 2048-byte sectors in the <em>ISO 9660</em> format. Sector 16
+          holds the volume descriptor; inside it, a pointer to the root directory. Directories are
+          files of variable-length records. That's the whole filesystem — we read it in
+          <a href="https://github.com/bthuner/galapagos-recomp/blob/main/web/src/iso9660.js">80 lines of JavaScript</a>.
+        </p>
+        <table class="files">
+          <thead><tr><th>Path</th><th>Size</th><th>What it is</th></tr></thead>
+          <tbody>
+            <tr><td>setup.exe</td><td>125 MB</td><td>A Wise installer. The game executable hides inside.</td></tr>
+            <tr><td>install/data/worlds</td><td>126 MB</td><td>Everything else: geometry, textures, sounds… One opaque archive.</td></tr>
+            <tr><td>install/data/0 … 10</td><td>0.5–4.5 MB</td><td>RAD Smacker v2 files. <code>0</code> is 640×240; the rest claim to be 4×4 pixels.</td></tr>
+            <tr><td>redist/directx</td><td>—</td><td>DirectX 5 redistributable. We won't need it.</td></tr>
+            <tr><td>ip.exe, eahelp.hlp</td><td>—</td><td>EA's support utility and help file.</td></tr>
+          </tbody>
+        </table>
+        <p>
+          The first surprise: no <code>galapagos.exe</code> anywhere. It is only created when the
+          installer runs. To read the game's code, we'd have to unwrap the installer without running it.
+        </p>
+      </section>
+
+      <section id="installer" class="chapter">
+        <span class="num">02</span>
+        <h2>Unwrapping a 1997 installer by hand</h2>
+        <p>
+          <code>setup.exe</code> is 125 MB, but its code sections add up to about 28 KB. The rest is an
+          <em>overlay</em> — bytes glued after the end of the program, which Windows simply ignores
+          when it loads it. The strings <code>WiseMain</code> and <code>STUB32.EXE</code> identify the
+          packer: Wise Installation System.
+        </p>
+        <figure class="bytes">
+          <div class="bytes__row">
+            <span class="seg seg--pe" style="flex:1">PE stub · 28 KB</span>
+            <span class="seg seg--hdr" style="flex:.4">hdr</span>
+            <span class="seg seg--z" style="flex:2">deflate</span><span class="seg seg--crc">crc</span>
+            <span class="seg seg--z" style="flex:3">deflate</span><span class="seg seg--crc">crc</span>
+            <span class="seg seg--z" style="flex:1.2">…</span><span class="seg seg--crc">crc</span>
+            <span class="seg seg--z" style="flex:8">deflate (worlds, 126 MB)</span><span class="seg seg--crc">crc</span>
+          </div>
+          <figcaption>The Wise overlay: files back to back, each a raw DEFLATE stream followed by its CRC-32. No directory, no names.</figcaption>
+        </figure>
+        <p>
+          With no table of contents, the natural first idea is brute force: try to inflate at every byte
+          offset. It produces garbage fast. At offset <code>0x6e3a</code>, three bytes happen to be a
+          valid DEFLATE stream that decodes to the single character <code>"0"</code>. Random data is full
+          of such accidents.
+        </p>
+        <p>
+          The fix is the CRC trailer. A real member is followed by the CRC-32 of its own content; an
+          accident almost never is. The first candidate that passes is at <code>0x6e51</code>. After that
+          no more searching is needed: each stream tells us where it ends, we skip its 4-byte CRC, and the next one
+          starts right there. Forty members fall out, every checksum matches, and member 22 is a 710 KB
+          executable full of strings like <em>"Are you sure you want to quit Galapagos?"</em>.
+        </p>
+        <pre class="code"><code><span class="c"># tools/wise_extract.py — the whole idea</span>
+pos = first_stream_with_valid_crc(overlay)
+<span class="k">while</span> pos &lt; len(data):
+    payload, used = inflate(data, pos)
+    <span class="k">assert</span> crc32(payload) == u32(data, pos + used)
+    save(payload)
+    pos += used + <span class="n">4</span></code></pre>
+      </section>
+
+      <section id="exe" class="chapter">
+        <span class="num">03</span>
+        <h2>Reading the machine code</h2>
+        <p>
+          We load <code>galapagos.exe</code> into a decompiler (Ghidra, driven through the REA toolkit).
+          It finds <strong>2,293 procedures</strong> in 372 KB of x86 code compiled with Microsoft Visual C++.
+          No symbols, no debug info. Function names are things like <code>FUN_004366b0</code>.
+        </p>
+        <p>
+          The strings are the first map. Error messages are written for programmers, and they name the
+          subsystems they belong to:
+        </p>
+        <ul class="strings">
+          <li><code>"No source texture for cache slot"</code><span>a software texture cache</span></li>
+          <li><code>"Too many polygons of a given texture"</code><span>geometry is grouped by texture</span></li>
+          <li><code>"USoundServices :: CreateSoundSample"</code><span>C++ classes with a U- prefix</span></li>
+          <li><code>"Mendel NERMs (*.mnd)"</code><span>Mendel's brain is saved separately from the game</span></li>
+        </ul>
+        <p>
+          Following who references the string <code>"Worlds"</code> lands us in <code>FUN_004366b0</code>.
+          It doesn't load anything. It calls <code>SearchPathA</code> twelve times — for <code>0</code>
+          through <code>10</code> and <code>Worlds</code> — and counts how many files exist. That's how
+          the game checks the CD is in the drive. It also tells us the whole runtime data set is just these twelve files.
+        </p>
+      </section>
+
+      <section id="worlds" class="chapter">
+        <span class="num">04</span>
+        <h2>Inside the worlds</h2>
+        <p>
+          The 126 MB archive opens with a table that is easy to read once you know the game ships "five worlds":
+        </p>
+        <figure class="hex" id="hex-worlds">
+          <figcaption>The first 36 bytes of <code>worlds</code>. Hover a field.</figcaption>
+        </figure>
+        <p>
+          A count (8), then eight absolute offsets into the file, in ascending order. Sections average 14 MB.
+          Before the first section sits a 70 MB global block, which itself begins with an offset table.
+          Each section opens with a number — 999999, 75000, 110000, 60000 — that smells like a timer or
+          budget, followed by runs of doubled bytes (<code>f9 f9 ed ed f6 f6</code>).
+        </p>
+        <p class="wip">Work in progress: tracing the loader functions in the executable to name every structure.</p>
+      </section>
+
+      <section id="smacker" class="chapter">
+        <span class="num">05</span>
+        <h2>The films</h2>
+        <p>
+          Files <code>0</code>–<code>10</code> are Smacker — RAD Game Tools' video codec, which was everywhere in 90s games.
+          It is a palette-based codec: each frame is cut into 4×4 blocks, each block is described by
+          symbols from four Huffman trees, and the trees are stored in the file header.
+        </p>
+        <p>
+          The odd part: ten of the eleven files say their picture is 4×4 pixels. A video that small makes no
+          sense, so they are most likely sound-only containers — music and voices — where the "video"
+          is a placeholder.
+        </p>
+        <p class="wip">Work in progress: a from-scratch Rust decoder for video and compressed audio.</p>
+      </section>
+
+      <section id="architecture" class="chapter">
+        <span class="num">06</span>
+        <h2>The new engine</h2>
+        <div class="arch">
+          <div class="arch__box"><b>Your CD image</b><small>File.slice() · ISO 9660 in JS</small></div>
+          <div class="arch__arrow">→</div>
+          <div class="arch__box"><b>OPFS cache</b><small>140 MB, copied once</small></div>
+          <div class="arch__arrow">→</div>
+          <div class="arch__box arch__box--hot"><b>Rust → WebAssembly</b><small>formats · simulation · Mendel</small></div>
+          <div class="arch__arrow">→</div>
+          <div class="arch__box"><b>WebGL2 · WebAudio</b><small>thin JS host</small></div>
+        </div>
+        <h3>Why Rust, and why no bindings generator</h3>
+        <p>
+          The format readers have to run in two places: natively, for tests against the real files, and in
+          the browser. Rust's <code>wasm32-unknown-unknown</code> target gives us both from one codebase, and the
+          output is about 25 KB.
+        </p>
+        <p>
+          We skip <code>wasm-bindgen</code> on purpose. The boundary is a handful of
+          <code>extern "C"</code> functions that exchange pointers into WebAssembly memory. It's less convenient,
+          but you can read all of the JS/Rust glue in one sitting.
+        </p>
+        <pre class="code"><code><span class="c">// web/src/engine.js</span>
+<span class="k">const</span> ptr = wasm.alloc(bytes.length);
+<span class="k">new</span> Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
+wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></code></pre>
+      </section>
+
+      <section id="journal" class="chapter">
+        <span class="num">07</span>
+        <h2>Journal</h2>
+        <ol class="journal">
+          <li><time>2026‑11‑01</time> Unpacked the Wise installer, recovered <code>galapagos.exe</code> and <code>smackw32.dll</code>. Repository scaffolded: Rust workspace, ISO reader, OPFS cache, WebAssembly boot.</li>
+        </ol>
+      </section>
+
+      <footer class="end">
+        <p>Co-authored with AI · Galapagos © 1997 Anark Corporation / Electronic Arts. This project ships no original game data.</p>
+      </footer>
+    </article>
+  </div>
+
+  <script type="module" src="./making-of.js"></script>
+</body>
+</html>

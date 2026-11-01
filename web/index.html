@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Galapagos — Mendel's Escape, in your browser</title>
+  <meta name="description" content="A clean-room WebAssembly recomp of Anark's Galapagos (1997). Bring your own CD." />
+  <link rel="stylesheet" href="./src/style.css" />
+</head>
+<body>
+  <main id="boot" class="boot">
+    <p class="eyebrow">Anark Game Studios · 1997 → WebAssembly · 2026</p>
+    <h1 class="title">Galapagos<span>.</span></h1>
+    <p class="lede">Mendel has a mind of his own. You can't control him — only help him.</p>
+
+    <label id="drop" class="drop" tabindex="0">
+      <input id="iso" type="file" accept=".iso" hidden />
+      <span class="drop__ring" aria-hidden="true"></span>
+      <span class="drop__text">
+        <strong>Drop your Galapagos CD image</strong>
+        <small>Galapagos PC.iso · read locally, never uploaded</small>
+      </span>
+    </label>
+
+    <div id="progress" class="progress" hidden>
+      <div class="progress__bar"><i></i></div>
+      <p class="progress__label">Reading the disc…</p>
+    </div>
+
+    <nav class="foot">
+      <a href="./making-of/">How this was made →</a>
+      <a href="https://github.com/bthuner/galapagos-recomp">Source</a>
+      <button id="forget" class="link" hidden>Forget my CD</button>
+    </nav>
+  </main>
+
+  <section id="stage" class="stage" hidden>
+    <canvas id="screen" width="640" height="480"></canvas>
+    <pre id="log" class="log"></pre>
+  </section>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

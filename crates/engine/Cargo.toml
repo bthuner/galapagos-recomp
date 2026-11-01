@@ -1,0 +1,11 @@
+[package]
+name = "galapagos-engine"
+version = "0.1.0"
+edition = "2021"
+description = "The Galapagos recomp runtime, compiled to WebAssembly."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+galapagos-formats = { path = "../formats" }
