@@ -224,3 +224,9 @@ pub extern "C" fn world_bounds_ptr() -> *const f32 {
 pub extern "C" fn world_object_count() -> u32 {
     with_mesh(|m| m.objects_drawn, 0)
 }
+
+/// Far-clip distance of the current section's environment, in world units.
+#[no_mangle]
+pub extern "C" fn world_far_clip() -> f32 {
+    with_mesh(|m| m.far_clip, 0.0)
+}

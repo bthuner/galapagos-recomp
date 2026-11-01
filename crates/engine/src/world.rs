@@ -9,13 +9,15 @@
 //! ```
 //!
 //! * Polygons on disk are convex n-gons; we fan them into triangles.
-//! * There are no texture coordinates on disk. The engine stretches each
-//!   128×128 texture across the polygon, using its first edge (v0→v1) and
-//!   last edge (v0→vn) as the texture axes. We do the same, which is exact
-//!   for the quads that make up most of a world.
+//! * There are no texture coordinates on disk. The engine's polygon
+//!   initialiser (0x42320d) gives the first three vertices the texel
+//!   coordinates (0,127), (0,0), (127,0): v1 is the origin, u runs along
+//!   v1→v2 and v runs along v1→v0. That defines an affine map over the
+//!   polygon's plane; a quad's fourth vertex lands on (127,127).
 //! * `layer` indexes a TEXTURE_2D_ARRAY; -1 means "untextured".
-//! * `light` is a flat Lambert term from the section's light direction,
-//!   the job the 32×32×256 shade table did in software.
+//! * `light` is a flat Lambert term from the section's light direction.
+//!   Distance darkening (the other half of the 32×32×256 shade table's job)
+//!   happens in the fragment shader, using the section's far-clip distance.
 
 use galapagos_formats::worlds::{Object, Section, WorldObject};
 
@@ -30,6 +32,8 @@ pub struct WorldMesh {
     /// min x, y, z, max x, y, z.
     pub bounds: [f32; 6],
     pub objects_drawn: u32,
+    /// Section environment far clip, in world units (drives depth cueing).
+    pub far_clip: f32,
 }
 
 type V3 = [f32; 3];
@@ -84,7 +88,8 @@ impl WorldMesh {
                 textures.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
             }
         }
-        WorldMesh { vertices, textures, texture_count, bounds, objects_drawn }
+        let far_clip = section.environment.far_clip as f32;
+        WorldMesh { vertices, textures, texture_count, bounds, objects_drawn, far_clip }
     }
 }
 
@@ -116,14 +121,22 @@ fn emit_object(obj: &WorldObject, light_dir: V3, out: &mut Vec<f32>, bounds: &mu
         let layer = if layer >= 0 { layer as f32 } else { -1.0 };
         let (du, dv) = frame.map_or((0.0, 0.0), |f| (f.u as f32 / TEX, f.v as f32 / TEX));
 
-        let e1 = sub(pts[1], pts[0]);
-        let e2 = sub(pts[pts.len() - 1], pts[0]);
-        let normal = normalize(cross(e1, e2));
-        // Two-sided: polygons may face either way, as in a software renderer
-        // without back-face culling.
-        let light = 0.45 + 0.55 * dot(normal, light_dir).abs();
+        // Texel axes from the first three vertices, as the original does.
+        let eu = sub(pts[2], pts[1]);
+        let ev = sub(pts[0], pts[1]);
+        let normal = normalize(cross(eu, ev));
+        // Two-sided (no back-face culling in the original). The footage shows
+        // surfaces near full brightness up close, so the Lambert term is gentle.
+        let light = 0.7 + 0.3 * dot(normal, light_dir).abs();
 
-        let uv: Vec<(f32, f32)> = pts.iter().map(|&p| affine_st(sub(p, pts[0]), e1, e2)).collect();
+        const EDGE: f32 = 127.0 / TEX; // (0,127) is the last texel, not 128
+        let uv: Vec<(f32, f32)> = pts
+            .iter()
+            .map(|&p| {
+                let (s, t) = affine_st(sub(p, pts[1]), eu, ev);
+                (s * EDGE, t * EDGE)
+            })
+            .collect();
         for k in 1..pts.len() - 1 {
             for &i in &[0, k, k + 1] {
                 let p = pts[i];
@@ -144,6 +157,7 @@ mod tests {
 
     #[test]
     fn affine_maps_a_quad_to_unit_square() {
+        // eu, ev span the polygon plane; the opposite corner is (1, 1).
         let (e1, e2) = ([10.0, 0.0, 0.0], [0.0, 0.0, 10.0]);
         assert_eq!(affine_st([10.0, 0.0, 10.0], e1, e2), (1.0, 1.0));
         assert_eq!(affine_st([0.0, 0.0, 10.0], e1, e2), (0.0, 1.0));

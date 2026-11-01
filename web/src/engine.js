@@ -48,6 +48,7 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
             textures: new Uint8Array(mem, wasm.world_textures_ptr(), textureCount * 128 * 128 * 4).slice(),
             bounds: [...new Float32Array(mem, wasm.world_bounds_ptr(), 6)],
             objects: wasm.world_object_count(),
+            farClip: wasm.world_far_clip(),
           };
         },
       };

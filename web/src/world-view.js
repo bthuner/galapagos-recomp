@@ -23,15 +23,16 @@ const FS = `#version 300 es
 precision highp float;
 precision highp sampler2DArray;
 uniform sampler2DArray uTex;
-uniform vec3 uFog;
-uniform float uFogFar;
+uniform float uFar;
 in vec2 vUV; flat in float vLayer; in float vLight; in float vDepth;
 out vec4 color;
 void main() {
   // Textures repeat, as in the original's wrap-around texel addressing.
   vec3 c = vLayer < 0.0 ? vec3(0.55) : texture(uTex, vec3(fract(vUV), vLayer)).rgb;
-  c *= vLight;
-  color = vec4(mix(c, uFog, clamp(vDepth / uFogFar, 0.0, 1.0) * 0.6), 1.0);
+  // Depth cueing: surfaces fade to black with distance, as the original's
+  // shade table did (visible in gameplay footage).
+  c *= vLight * (1.0 - 0.85 * clamp(vDepth / uFar, 0.0, 1.0));
+  color = vec4(c, 1.0);
 }`;
 
 // ——— tiny matrix kit (column-major, like WebGL expects) ———
@@ -72,8 +73,7 @@ export function createWorldView(canvas) {
   if (!gl) throw new Error("WebGL2 is not available");
   const prog = compile(gl, VS, FS);
   const uViewProj = gl.getUniformLocation(prog, "uViewProj");
-  const uFog = gl.getUniformLocation(prog, "uFog");
-  const uFogFar = gl.getUniformLocation(prog, "uFogFar");
+  const uFar = gl.getUniformLocation(prog, "uFar");
   const vao = gl.createVertexArray();
   const vbo = gl.createBuffer();
   const tex = gl.createTexture();
@@ -84,6 +84,7 @@ export function createWorldView(canvas) {
   // sky), so "up" is -Y.
   const cam = { yaw: 0.8, pitch: 0.5, dist: 1, target: [0, 0, 0], up: -1 };
   let radius = 1;
+  let fadeFar = 1;
 
   function load(world) {
     gl.bindVertexArray(vao);
@@ -108,6 +109,8 @@ export function createWorldView(canvas) {
     cam.target = [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2];
     radius = Math.hypot(x1 - x0, y1 - y0, z1 - z0) / 2;
     cam.dist = radius * 1.6;
+    // A far clip of 999999 means "no limit"; fall back to the world's size.
+    fadeFar = world.farClip > 0 && world.farClip < 900000 ? world.farClip : radius * 4;
   }
 
   function draw() {
@@ -117,7 +120,7 @@ export function createWorldView(canvas) {
       canvas.height = h * devicePixelRatio;
     }
     gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.clearColor(0.02, 0.04, 0.05, 1);
+    gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.enable(gl.DEPTH_TEST);
     if (!count) return;
@@ -131,8 +134,7 @@ export function createWorldView(canvas) {
     const proj = perspective(1.0, w / h, radius / 500, radius * 8);
     gl.useProgram(prog);
     gl.uniformMatrix4fv(uViewProj, false, mul(proj, lookAt(eye, target, [0, cam.up, 0])));
-    gl.uniform3f(uFog, 0.02, 0.04, 0.05);
-    gl.uniform1f(uFogFar, radius * 6);
+    gl.uniform1f(uFar, fadeFar);
     gl.bindVertexArray(vao);
     gl.drawArrays(gl.TRIANGLES, 0, count);
   }
