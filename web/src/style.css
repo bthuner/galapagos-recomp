@@ -154,7 +154,7 @@ body::before {
 }
 .jukebox button.is-on { background: var(--lime); color: var(--abyss); border-color: var(--lime); }
 .stage__bar { display: flex; gap: 2rem; font-size: 0.85rem; }
-.world { width: min(100vw, calc(80vh * 16 / 9)); aspect-ratio: 16 / 9; display: block; cursor: grab; touch-action: none; }
+.world { width: min(94vw, calc(78vh * 16 / 9)); aspect-ratio: 16 / 9; display: block; cursor: grab; touch-action: none; }
 .world:active { cursor: grabbing; }
 .sections { display: flex; gap: 0.4rem; flex-wrap: wrap; justify-content: center; }
 .sections button, .jukebox button { transition: background 0.2s, color 0.2s; }
@@ -168,3 +168,6 @@ body::before {
   cursor: pointer;
 }
 .sections button.is-on { background: var(--lime); color: var(--abyss); border-color: var(--lime); }
+.wake { font-size: 0.8rem; color: var(--bone); display: flex; gap: 0.5rem; align-items: center; }
+.wake small { color: var(--mute); }
+.wake input { accent-color: var(--lime); }

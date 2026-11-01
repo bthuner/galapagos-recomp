@@ -54,10 +54,36 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
             // returning a fresh view each frame (memory may have grown).
             transforms: () =>
               new Float32Array(wasm.memory.buffer, wasm.world_transforms_ptr(), wasm.world_draw_count() * 16),
+            liveVertices: () => new Float32Array(wasm.memory.buffer, wasm.world_vertices_ptr(), verts * 7),
             farClip: wasm.world_far_clip(),
           };
         },
       };
+    },
+
+    // The world simulation (see crates/engine/src/sim.rs).
+    sim: {
+      ticksPerSecond: () => wasm.sim_ticks_per_second(),
+      // Runs n ticks; returns host events as {kind, a, b}.
+      tick(n) {
+        const count = wasm.sim_tick(n);
+        const raw = new Int32Array(wasm.memory.buffer, wasm.sim_events_ptr(), count * 3);
+        const out = [];
+        for (let i = 0; i < count; i++) out.push({ kind: raw[i * 3], a: raw[i * 3 + 1], b: raw[i * 3 + 2] });
+        return out;
+      },
+      // [first, end) vertex range patched since the last call, or null.
+      takeDirty() {
+        if (wasm.sim_take_dirty() < 0) return null;
+        return [...new Uint32Array(wasm.memory.buffer, wasm.sim_dirty_ptr(), 2)];
+      },
+      wakeAll: (on) => wasm.sim_set_wake_all(on ? 1 : 0),
+      click: (o, d) => wasm.sim_click(o[0], o[1], o[2], d[0], d[1], d[2]),
+      // { position: [x, y, z], state } of object `id` (1-based).
+      object(id) {
+        const [x, y, z, state] = new Int32Array(wasm.memory.buffer, wasm.sim_object_info(id), 4);
+        return { position: [x, y, z], state };
+      },
     },
 
     // Smacker movies. The engine takes ownership of the uploaded bytes.

@@ -39,20 +39,58 @@ async function boot(files) {
   scanlineToggle();
   await playMovie(engine, await bytesOf(files["0"]), $("screen"), audio, { scanlines });
 
-  // The worlds: no game logic yet, but we can already walk around them.
+  // The worlds, alive: the 24 Hz object simulation runs; clicks reach the
+  // state machines. Mendel is not in yet.
   $("screen").parentElement.hidden = true;
   $("world").hidden = false;
   const worlds = engine.openWorlds(await bytesOf(files.worlds));
-  const view = createWorldView($("world"));
+  const hz = engine.sim.ticksPerSecond();
+  let clock = 0, last = performance.now(), current = 0;
+
+  const music = (n) => {
+    dispatchEvent(new KeyboardEvent("keydown")); // stop the current track
+    if (n > 0 && files[String(n)]) bytesOf(files[String(n)]).then((b) => playMovie(engine, b, $("screen"), audio));
+  };
+
+  const view = createWorldView($("world"), {
+    // Fixed timestep: run as many ticks as real time demands (max 5 per
+    // frame, so a background tab doesn't fast-forward on return).
+    onFrame() {
+      const now = performance.now();
+      clock = Math.min(clock + (now - last) / 1000, 5 / hz);
+      last = now;
+      const n = Math.floor(clock * hz);
+      clock -= n / hz;
+      if (!n) return;
+      for (const ev of engine.sim.tick(n)) {
+        if (ev.kind === 1) music(ev.a);
+        if (ev.kind === 2) {
+          status(`A dimensional gate opened: section ${current} → ${ev.a} (time screen of level ${ev.b}).`);
+          setTimeout(() => show(ev.a), 0);
+        }
+      }
+    },
+    onPick(origin, dir) {
+      const id = engine.sim.click(origin, dir);
+      status(id ? `Clicked object #${id}.` : "Nothing clickable there.");
+    },
+  });
   const picker = $("sections");
   picker.hidden = false;
+  $("wake").hidden = false;
+  $("wake-all").onchange = (e) => engine.sim.wakeAll(e.target.checked);
+  let summary = "";
+  const status = (msg) => ($("log").textContent = summary + "\n" + msg);
   const show = (i) => {
+    current = i;
     const w = worlds.build(i);
-    view.load(w);
+    view.load({ ...w, takeDirty: engine.sim.takeDirty });
+    engine.sim.wakeAll($("wake-all").checked);
     picker.querySelectorAll("button").forEach((b, j) => b.classList.toggle("is-on", j === i));
-    $("log").textContent =
-      `Section ${i}: ${w.objects} objects, ${w.vertices.length / 21} triangles, ${w.textureCount} textures. ` +
-      "Drag to orbit, wheel to zoom, right-drag to pan.";
+    summary =
+      `Section ${i}: ${w.objects} objects, ${w.vertices.length / 21} triangles, ${w.textureCount} textures, simulated at ${hz} Hz. ` +
+      "Drag to orbit, wheel to zoom, right-drag to pan, click objects to trigger them.";
+    status("");
   };
   for (let i = 0; i < worlds.sectionCount; i++) {
     const b = document.createElement("button");
@@ -60,7 +98,9 @@ async function boot(files) {
     b.onclick = () => show(i);
     picker.append(b);
   }
-  show(1);
+  show(0);
+  // Poke the running game from DevTools: galapagos.engine.sim.object(85)…
+  globalThis.galapagos = { engine, worlds, view, show };
   jukebox(engine, files, audio);
 }
 
