@@ -294,6 +294,28 @@ pos = first_stream_with_valid_crc(overlay)
 <span class="k">const</span> ptr = wasm.alloc(bytes.length);
 <span class="k">new</span> Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
 wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></code></pre>
+        <h3>First light: walking around a world</h3>
+        <p>
+          Before any game logic, we can already look at the levels. <code>world.rs</code> flattens a section's
+          objects into one array of triangles and one stack of textures, and WebGL2 draws the whole world in a single
+          call using a <code>TEXTURE_2D_ARRAY</code>. Three decisions were needed along the way:
+        </p>
+        <ul class="strings">
+          <li><b>Texture coordinates</b><span>none on disk; the exe's polygon initialiser gives the first three vertices texels (0,127), (0,0), (127,0), which defines an affine map across the polygon</span></li>
+          <li><b>Lighting</b><span>a gentle Lambert term, plus fade-to-black with distance up to the section's far-clip, the two jobs the 256 KB shade table did</span></li>
+          <li><b>Which way is up</b><span>Y points down, like screen coordinates; rendered Y-up, every tower hung from the sky</span></li>
+        </ul>
+        <p>
+          <b>Footage as a test oracle.</b> The first viewer looked wrong next to a 1997 gameplay video: too dark, and the
+          grid textures didn't line up with the panels. Re-reading the polygon initialiser showed the cause. We had used
+          v0 as the texture origin, but the engine uses v1, with u along v1→v2 and v along v1→v0, so every texture was
+          transposed and mirrored. With that fixed, plus the brightness the footage shows, the cylinders, grids and
+          ladders match the video.
+        </p>
+        <p>
+          A world is 1,500–5,300 triangles, roughly what a 1997 software renderer could push at 640×480 on a
+          Pentium 90. A phone GPU today draws that in well under a millisecond.
+        </p>
       </section>
 
       <section id="journal" class="chapter">
@@ -304,6 +326,8 @@ wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></c
           <li><time>2026‑11‑01</time> Smacker decoder in Rust: the Anark intro now plays in the browser, synced to its audio; files 1–10 turn out to be the soundtrack. Found and fixed a classic bug: a <code>display: grid</code> rule overrode the <code>hidden</code> attribute.</li>
           <li><time>2026‑11‑01</time> Interlaced intro: smooth line doubling by default, original scanlines as an option, and no more moiré from pixelated scaling.</li>
           <li><time>2026‑11‑01</time> The <code>worlds</code> archive decoded down to meshes: header, UI pictures, font, sound sets, palettes, textures, a lighting lookup table, and 16 object classes. All 8 sections parse end to end.</li>
+          <li><time>2026‑11‑01</time> First light: a WebGL2 viewer renders all eight worlds with their textures. The axis is Y-down.</li>
+          <li><time>2026‑11‑01</time> Compared against gameplay footage: fixed the texture origin (v1, not v0), brightened lighting, added distance fade.</li>
         </ol>
       </section>
 
