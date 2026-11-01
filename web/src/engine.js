@@ -48,6 +48,12 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
             textures: new Uint8Array(mem, wasm.world_textures_ptr(), textureCount * 128 * 128 * 4).slice(),
             bounds: [...new Float32Array(mem, wasm.world_bounds_ptr(), 6)],
             objects: wasm.world_object_count(),
+            // Per-object draw ranges: [first0, count0, first1, count1, ...].
+            draws: new Uint32Array(mem, wasm.world_draws_ptr(), wasm.world_draw_count() * 2).slice(),
+            // Transforms change as the simulation runs, so this is a getter
+            // returning a fresh view each frame (memory may have grown).
+            transforms: () =>
+              new Float32Array(wasm.memory.buffer, wasm.world_transforms_ptr(), wasm.world_draw_count() * 16),
             farClip: wasm.world_far_clip(),
           };
         },

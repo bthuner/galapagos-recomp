@@ -14,7 +14,12 @@
 //!   coordinates (0,127), (0,0), (127,0): v1 is the origin, u runs along
 //!   v1→v2 and v runs along v1→v0. That defines an affine map over the
 //!   polygon's plane; a quad's fourth vertex lands on (127,127).
-//! * `layer` indexes a TEXTURE_2D_ARRAY; -1 means "untextured".
+//! * `layer` indexes a TEXTURE_2D_ARRAY; -1 means "untextured" and -2
+//!   "hidden in the current appearance state" (kept in the buffer so a
+//!   state change can reveal it by rewriting one float per vertex).
+//! * Vertices are *object-local*. Each object carries a 4×4 transform, so
+//!   the simulation can move a platform by changing 16 floats instead of
+//!   rebuilding geometry. The renderer draws one range per object.
 //! * `light` is a flat Lambert term from the section's light direction.
 //!   Distance darkening (the other half of the 32×32×256 shade table's job)
 //!   happens in the fragment shader, using the section's far-clip distance.
@@ -24,8 +29,20 @@ use galapagos_formats::worlds::{Object, Section, WorldObject};
 pub const FLOATS_PER_VERTEX: usize = 7;
 const TEX: f32 = 128.0;
 
+/// The slice of the vertex array belonging to one object.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct DrawRange {
+    pub first: u32,
+    pub count: u32,
+}
+
 pub struct WorldMesh {
     pub vertices: Vec<f32>,
+    /// One range per drawn object, in section object order.
+    pub draws: Vec<DrawRange>,
+    /// One column-major 4×4 matrix per drawn object (16 f32 each).
+    pub transforms: Vec<f32>,
     /// `textures.len() / (128*128*4)` RGBA layers.
     pub textures: Vec<u8>,
     pub texture_count: u32,
@@ -66,6 +83,8 @@ fn affine_st(p: V3, e1: V3, e2: V3) -> (f32, f32) {
 impl WorldMesh {
     pub fn build(section: &Section) -> Self {
         let mut vertices = Vec::new();
+        let mut draws = Vec::new();
+        let mut transforms = Vec::new();
         let mut bounds = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN];
         let light_dir = {
             let l = section.environment.light_direction;
@@ -77,7 +96,12 @@ impl WorldMesh {
             let Object::World(obj) = object else { continue };
             if obj.mesh.is_some() {
                 objects_drawn += 1;
+                let first = (vertices.len() / FLOATS_PER_VERTEX) as u32;
                 emit_object(obj, light_dir, &mut vertices, &mut bounds);
+                let count = (vertices.len() / FLOATS_PER_VERTEX) as u32 - first;
+                draws.push(DrawRange { first, count });
+                let [x, y, z] = obj.position.map(|c| c as f32);
+                transforms.extend_from_slice(&[1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., x, y, z, 1.]);
             }
         }
 
@@ -89,21 +113,17 @@ impl WorldMesh {
             }
         }
         let far_clip = section.environment.far_clip as f32;
-        WorldMesh { vertices, textures, texture_count, bounds, objects_drawn, far_clip }
+        WorldMesh { vertices, draws, transforms, textures, texture_count, bounds, objects_drawn, far_clip }
     }
 }
 
 fn emit_object(obj: &WorldObject, light_dir: V3, out: &mut Vec<f32>, bounds: &mut [f32; 6]) {
     let mesh = obj.mesh.as_ref().unwrap();
     let origin = obj.position.map(|c| c as f32);
-    let world: Vec<V3> = mesh
-        .vertices
-        .iter()
-        .map(|v| [origin[0] + v[0] as f32, origin[1] + v[1] as f32, origin[2] + v[2] as f32])
-        .collect();
+    let local: Vec<V3> = mesh.vertices.iter().map(|v| v.map(|c| c as f32)).collect();
 
     for (pi, poly) in mesh.polygons.iter().enumerate() {
-        let pts: Vec<V3> = poly.iter().filter_map(|&i| world.get(i as usize).copied()).collect();
+        let pts: Vec<V3> = poly.iter().filter_map(|&i| local.get(i as usize).copied()).collect();
         if pts.len() < 3 {
             continue;
         }
@@ -113,12 +133,11 @@ fn emit_object(obj: &WorldObject, light_dir: V3, out: &mut Vec<f32>, bounds: &mu
             .and_then(|states| states.first())
             .and_then(|s| s.polygons.get(pi))
             .and_then(|frames| frames.first());
-        // Invisible in the initial state: skip (e.g. hidden until triggered).
-        if frame.is_some_and(|f| f.enabled == 0) {
-            continue;
-        }
-        let layer = frame.map_or(-1, |f| f.texture);
-        let layer = if layer >= 0 { layer as f32 } else { -1.0 };
+        let layer = match frame {
+            Some(f) if f.enabled == 0 => -2.0, // hidden until a state change
+            Some(f) if f.texture >= 0 => f.texture as f32,
+            _ => -1.0,
+        };
         let (du, dv) = frame.map_or((0.0, 0.0), |f| (f.u as f32 / TEX, f.v as f32 / TEX));
 
         // Texel axes from the first three vertices, as the original does.
@@ -141,8 +160,8 @@ fn emit_object(obj: &WorldObject, light_dir: V3, out: &mut Vec<f32>, bounds: &mu
             for &i in &[0, k, k + 1] {
                 let p = pts[i];
                 for a in 0..3 {
-                    bounds[a] = bounds[a].min(p[a]);
-                    bounds[a + 3] = bounds[a + 3].max(p[a]);
+                    bounds[a] = bounds[a].min(origin[a] + p[a]);
+                    bounds[a + 3] = bounds[a + 3].max(origin[a] + p[a]);
                 }
                 out.extend_from_slice(&[p[0], p[1], p[2], uv[i].0 + du, uv[i].1 + dv, layer, light]);
             }
