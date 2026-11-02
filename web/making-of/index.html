@@ -318,8 +318,35 @@ pos = first_stream_with_valid_crc(overlay)
         <p>
           Some parts are honest stand-ins, each marked <code>// inferred:</code> or <code>// not in the original:</code>
           in the code. The original walks from polygon to polygon; ours is a ray-cast character controller.
-          Afflictions aren't ported yet.
         </p>
+        <h3>Afflictions: what the floor does to him</h3>
+        <p>
+          The readme only hints that some places "retard his development". The code is precise: every floor polygon
+          carries four bits that name one of twelve <em>afflictions</em>, applied for as long as Mendel touches it.
+          They change his body and senses, never his brain's bookkeeping. A shield (one minute) makes lethal floors
+          harmless and shimmers his skin. Speed (gait 53) and agitation (gait 40, with the "agitated" cry that had
+          waited since chapter 06) change how he walks. Blindness zeroes both eyes for ten seconds. Confusion feeds
+          them random 0-or-full readings, while the screen turns negative for thirty seconds. Three change gravity
+          itself, and camouflage paints him with the floor's texture.
+        </p>
+        <p>
+          The screen effects are tiny palette scripts in a three-letter language (<code>C</code>, <code>L</code>,
+          <code>D</code>), stepped once per tick in 1997 by rewriting the VGA palette. We run the same scripts and apply
+          the result as a colour remap in the shader. On the CD only five of the twelve are used, and the agitating
+          floors are cruel: each is also a delayed lethal floor, so Mendel spends eighty ticks frantic before he
+          dies.
+        </p>
+        <h3>Predators are just machines that hunt</h3>
+        <p>
+          We expected predators to be second creatures with brains of their own. They're ordinary world objects (a mesh,
+          appearances, a state machine) with a small hunting routine bolted on. It's the same trapezoidal mover the
+          camera uses, aimed past Mendel and smoothed by the same tracker, with six probes around the body. A bite
+          isn't a special case either: the probe touches Mendel's invisible click hull, which posts an event, which
+          sets a lethal "surface" for his next tick. He dies the way he dies on a bad floor. Section 2 has a ball that
+          hunts for a hundred ticks and then vanishes, a fork that always chases, and a polygon thing that circles his
+          side; section 7's predators are lethal walls that explode away when a machine reaches the right state.
+        </p>
+
       </section>
 
       <section id="smacker" class="chapter">
@@ -605,6 +632,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> The original camera, ported from <code>Camera_Update</code>: per-polygon keys, 33 styles, 12 eye modes, integer filters.</li>
           <li><time>2026‑11‑02</time> Correction: the world is Z-up, not Y-down. Mendel now stands on floors (flag bit 1), is born on the start disc, rides the capsule and lands on the arrival pad as in the footage. Polygons with negative texture numbers (collision geometry such as the birth tube) are no longer drawn.</li>
           <li><time>2026‑11‑02</time> The red start disc: −5 frames hide whole objects (the start pad is an invisible elevator). Audio measured for clipping, balance and DC; limiter and Sound test panel added.</li>
+          <li><time>2026‑11‑02</time> All twelve afflictions (floor-driven, with palette-script screen effects) and all five predator classes, ported. Saves move to GLPS v2.</li>
         </ol>
       </section>
 

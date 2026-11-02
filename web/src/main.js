@@ -103,6 +103,8 @@ async function boot(files) {
         if (ev.kind === 1) music(ev.a);
         if (ev.kind === 3) sfx.emitter(ev.a, ev.b, ev.c); // a world object made a sound
         if (ev.kind === 5) sfx.creature(ev.a); // one of Mendel's cues
+        if (ev.kind === 8) sfx.affliction(ev.a, ev.b, ev.c); // an affliction's sound, at Mendel
+        if (ev.kind === 9) sfx.predator(ev.a, ev.b, ev.c); // a predator growls or bites
         if (ev.kind === 4) view.snap(); // a teleporter asked for a camera cut
         if (ev.kind === 6) menu.offerSave(); // a save pad was clicked under Mendel
         if (ev.kind === 2) passGate(ev.a, ev.b); // a dimensional gate: time screen, then the next section
@@ -163,7 +165,7 @@ async function boot(files) {
     current = i;
     sfx.reset();
     const w = built ? worlds.current() : worlds.build(i);
-    view.load({ ...w, takeDirty: engine.sim.takeDirty, creatureVertices: engine.creature.vertices });
+    view.load({ ...w, takeDirty: engine.sim.takeDirty, creatureVertices: engine.creature.vertices, tint: engine.sim.tint });
     mendelSeen = false;
     engine.sim.wakeAll($("wake-all").checked);
     picker.querySelectorAll("button").forEach((b, j) => b.classList.toggle("is-on", j === i));

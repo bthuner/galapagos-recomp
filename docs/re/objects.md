@@ -306,9 +306,9 @@ classes:
 | `Rend` | `0x419ee0` | `0x45fcd0` | `0x419f40` | 9-way switch on `shorts[0]` (0..8): renderer effects (unknown) |
 | `Over` | `0x419e30` | `0x45fc20` | `0x419e90` | `0x419c50(shorts[0])`: overlay (unknown) |
 | `MEnc` | `0x4260d0` | `0x460c10` | base | at (0,0,0) in every section; Update `0x426150`: when picked, makes Mendel react (`0x41cb80`); its polygons carry pick bit 0 (inferred: Mendel's own click target) |
-| `Pred` | `0x42a1a0` | `0x460ea8` | `0x42a2d0` | predator: `shorts[0]` 1/2 = start an attack/behaviour (ignored while one runs), `shorts[1]` active, `shorts[2..3]` animation ids played through the creature animation system (`0x424870`) |
-| `PBal`, `PFrk`, `PMan` | `0x415020`, `0x415480`, `0x415930` | `0x45f6c0`.. | `0x42a2d0` (shared with `Pred`) | animated hazards; their polygons carry bit 30, which the creature probes with mask `0x40000100` (inferred: contact hurts) |
-| `PPol` | `0x4292b0` | `0x460de8` | `0x429430` | uses `ints` (e.g. `1, 22500, 520, 1000, 0, 30, 0, -1000`): unknown |
+| `Pred` | `0x42a1a0` | `0x460ea8` | `0x42a2d0` | predator (observed, see **predators.md**): `shorts[0]` 1 = vanish (then parked at 100000), 2 = appear at home then active; ignored while one runs; `shorts[1]` play the transition effect, `shorts[2..3]` its kind and variant (the same effect class as Mendel's dematerialisation, `0x424520`/`0x424870`) |
+| `PBal`, `PFrk`, `PMan` | `0x415020`, `0x415480`, `0x415930` | `0x45f6c0`, `0x45f7b0`, `0x45f8a0` | `0x42a2d0` (shared with `Pred`) | hunters: once active, a trapezoidal mover lunges past Mendel; six probes (mask 0x103) touch his click hull `MEnc`, which hands him the predator's flags (`0x405b2100` / `0x40582100`: lethal kind 2, death). Bit 30 on their polygons makes his eyes see them |
+| `PPol` | `0x4292b0` | `0x460de8` | `0x429430` | the launcher: `ints` = mode, radius, angle, bob amplitude/phase, wobble amplitude/phase, lift; circles its home towards Mendel's bearing; `PBal` appears where it is (`Game+0x17efc0`) |
 | `Cmra` | `0x412700` | `0x45f608` | — | camera, section 8 |
 
 ### Portals (`Tele` / `Strt` / `STel`) — observed
@@ -551,8 +551,9 @@ creature code asks.
   ancestor.
 * Portals/gates/spawn, `Voic` music (Smacker files already decoded),
   the per-polygon camera (ported: camera.rs, §6).
-* Still missing: `Rend`, `Over`,
-  `PPol` and predator AI, the save-pad dialog wiring.
+* Predators (`Pred`, `PBal`, `PFrk`, `PPol`; predator.rs, predators.md).
+* Still missing: `Rend`, `Over`, the transition effects, the save-pad
+  dialog wiring.
 
 ## Open questions
 
@@ -565,8 +566,8 @@ creature code asks.
   solid surface).
 * Camera style `a, b` fields and the exact smoothing.
 * Event bits other than 1 (none used on the CD).
-* `Rend` (9 effects), `Over`, `PPol`, `MEnc` details; how predators hurt
-  Mendel.
+* `Rend` (9 effects), `Over`, `MEnc` details (how predators hurt Mendel
+  is in predators.md).
 * The tick period actually programmed into `App_IdleTick`.
 
 REA note: the function names in this document were applied with
