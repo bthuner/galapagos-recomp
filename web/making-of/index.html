@@ -519,6 +519,29 @@ wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></c
         <pre class="code"><code><span class="c">// in the browser console, on the game page</span>
 galapagos.engine.sim.object(<span class="n">85</span>)        <span class="c">// → { position: [...], state: 2 }</span>
 galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).position, <span class="n">12000</span>)</code></pre>
+        <h3>Tick zero: when a world wakes up wrong</h3>
+        <p>
+          World 2 had no Mendel unless the debug switch "Wake every machine" was on. Tracing the first tick showed
+          why. Folder #193 has a single rule: "if machine #178 is in state 0, switch me off". #178 starts in
+          state 1, but our port only <em>queued</em> initial states and entered them during the first tick. So on
+          tick zero #193 saw #178 still in state 0, switched off, and took the start pad #194 down with it. One frame
+          of a half-built world was enough to break the level.
+        </p>
+        <p>
+          The exe never shows that frame. Its object reader (<code>0x4222d0</code>) ends with a pass over every
+          object, folders included, that enters each initial state: the state is recorded and its entry actions
+          run, all before the first tick evaluates a single condition. We now load the same way. Two smaller
+          details came along:
+        </p>
+        <ul class="strings">
+          <li><b>Live skips</b><span>a folder that switches off during a tick hides its contents from the rest of that same tick (<code>0x4284f0</code> reads the skip count after applying each object)</span></li>
+          <li><b>Timers survive</b><span>changing state does not reset an object's tick counter (<code>0x42cfd0</code>); only an action's explicit reset flag does</span></li>
+        </ul>
+        <p>
+          With that, every world on the CD spawns Mendel with the debug switch off: World 1 after half a second,
+          World 2 after four, upside down on his start pad. What happens next is the original's doing: he walks onto
+          the fast belt and it throws him off, again and again, until the player stops it.
+        </p>
         <h3>Sound: four copies of everything</h3>
         <p>
           Every sample is stored four times in the archive: 8-bit at 11 kHz, then 16-bit at 11, 22 and 44 kHz, one
@@ -724,6 +747,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> The original polygon walker replaces our ray-cast controller: Mendel stands on sideways and upside-down pads, rides platforms in their own coordinates, and saves remember places on polygons (GLPS v3). Fixed the object rotation order and the three motion-path modes on the way.</li>
           <li><time>2026‑11‑02</time> The "enabled" byte gates collision flags, not drawing: flip-book polygons (pad #49 and thousands more) stop flickering and stay clickable. Section 2's fast belt checked against the exe: 139 units per tick is the original speed.</li>
           <li><time>2026‑11‑02</time> Glass: <code>−4</code> frames are additive, untextured panes, and the "colour ramps" are materials. The intro capsule turns into the footage's grey veil when its ride starts.</li>
+          <li><time>2026‑11‑02</time> Level load enters every initial state before the first tick, as <code>0x4222d0</code> does: World 2 (and World 1) now spawn Mendel without "Wake every machine".</li>
           <li><time>2026‑11‑02</time> Blinking reported again: traced to a browser serving the pre-fix engine from its cache. Checked against the footage; the engine is now always revalidated before use.</li>
         </ol>
       </section>
