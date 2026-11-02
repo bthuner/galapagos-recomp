@@ -36,6 +36,7 @@ precision highp float;
 precision highp sampler2DArray;
 uniform sampler2DArray uTex;
 uniform float uFar;
+uniform float uBright; // Preferences ▸ Brightness, 1.0 = Standard
 in vec2 vUV; flat in float vLayer; in float vLight; in float vDepth;
 out vec4 color;
 void main() {
@@ -44,7 +45,7 @@ void main() {
   vec3 c = vLayer < 0.0 ? vec3(0.55) : texture(uTex, vec3(fract(vUV), vLayer)).rgb;
   // Depth cueing: surfaces fade to black with distance, as the original's
   // shade table did (visible in gameplay footage).
-  c *= vLight * (1.0 - 0.85 * clamp(vDepth / uFar, 0.0, 1.0));
+  c *= uBright * vLight * (1.0 - 0.85 * clamp(vDepth / uFar, 0.0, 1.0));
   color = vec4(c, 1.0);
 }`;
 
@@ -104,6 +105,10 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   const prog = compile(gl, VS, FS);
   const uViewProj = gl.getUniformLocation(prog, "uViewProj");
   const uFar = gl.getUniformLocation(prog, "uFar");
+  const uBright = gl.getUniformLocation(prog, "uBright");
+  // Preferences: brightness multiplier and render resolution. `pixels` is
+  // the canvas height in device pixels to aim for (0 = native).
+  let brightness = 1, pixels = 0;
   const uModel = gl.getUniformLocation(prog, "uModel");
   let current = null;
   const vao = gl.createVertexArray();
@@ -165,9 +170,12 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
 
   function draw() {
     const w = canvas.clientWidth, h = canvas.clientHeight;
-    if (canvas.width !== w * devicePixelRatio) {
-      canvas.width = w * devicePixelRatio;
-      canvas.height = h * devicePixelRatio;
+    const scale = pixels ? pixels / h : devicePixelRatio;
+    if (canvas.width !== Math.round(w * scale)) {
+      canvas.width = Math.round(w * scale);
+      canvas.height = Math.round(h * scale);
+      // Low resolutions are shown with hard pixels, like a 1997 mode switch.
+      canvas.style.imageRendering = pixels ? "pixelated" : "auto";
     }
     gl.viewport(0, 0, canvas.width, canvas.height);
     gl.clearColor(0, 0, 0, 1);
@@ -190,6 +198,7 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     viewProj = mul(proj, lookAt(view.eye, view.eye.map((e, i) => e + view.forward[i]), view.up));
     gl.uniformMatrix4fv(uViewProj, false, viewProj);
     gl.uniform1f(uFar, fadeFar);
+    gl.uniform1f(uBright, brightness);
     gl.bindVertexArray(vao);
     // Upload only what the simulation patched (appearance changes).
     const dirty = current.takeDirty?.();
@@ -369,6 +378,14 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
 
   return {
     load,
+    setBrightness(b) { brightness = b; },
+    // Render height in pixels (240, 480), or 0 for the display's native.
+    setResolution(h) { pixels = h; },
+    // Where the camera is and where it looks, for the audio listener.
+    listener() {
+      if (!basis) return null;
+      return { eye: basis.eye, forward: v3.norm(basis.forward), up: v3.norm(basis.up) };
+    },
     // World point → CSS pixel coordinates in the page (null if behind).
     project(p) {
       if (!viewProj) return null;

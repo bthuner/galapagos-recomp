@@ -27,7 +27,7 @@
 //! Everything is integer, like the original: positions in world units,
 //! angles in 1024ths of a turn, matrices in 4.12 fixed point.
 
-use crate::creature::Mode;
+use crate::creature::{After, Mode};
 use crate::sim::{self, Sim};
 use galapagos_formats::logic::CameraStyle;
 use galapagos_formats::worlds::{CameraKey, Object, Section};
@@ -403,7 +403,6 @@ pub struct Camera {
     // contact record, which our creature does not carry over teleports.
     last_ground: Option<(usize, usize)>,
     prev_mode: Option<Mode>,
-    deaths: u32,
     snap_wanted: bool,
     spawn_contact: Option<(usize, usize)>,
     teleport_contact: Option<(usize, usize)>,
@@ -466,7 +465,6 @@ impl Camera {
             last_eye: [0; 3],
             last_ground: None,
             prev_mode: None,
-            deaths: 0,
             snap_wanted: false,
             spawn_contact: None,
             teleport_contact: None,
@@ -776,17 +774,17 @@ impl Camera {
                 self.last_ground = self.spawn_contact;
                 cut = true;
             }
-            (Some(Mode::Vanishing(..)), Mode::Appearing(_)) => {
-                if c.stats.deaths != self.deaths {
-                    // Respawn (reason 3): back to the spawn's polygon.
-                    self.last_ground = self.spawn_contact;
-                    cut = true;
-                } else {
-                    self.last_ground = self.teleport_contact.or(self.last_ground);
-                    cut = self.snap_wanted;
-                }
+            // Respawn (any reason: a lethal floor, a kind-6 portal; the
+            // world snapshot was just restored): back to the spawn's polygon.
+            (Some(Mode::Vanishing(_, After::Respawn)), Mode::Appearing(_)) => {
+                self.last_ground = self.spawn_contact;
                 self.snap_wanted = false;
-                self.deaths = c.stats.deaths;
+                cut = true;
+            }
+            (Some(Mode::Vanishing(_, After::Teleport(..))), Mode::Appearing(_)) => {
+                self.last_ground = self.teleport_contact.or(self.last_ground);
+                cut = self.snap_wanted;
+                self.snap_wanted = false;
             }
             _ => {}
         }
@@ -806,6 +804,18 @@ impl Camera {
         self.last_ground = None;
         self.prev_mode = sim.creature.as_ref().map(|c| c.mode);
         self.init(sim);
+    }
+
+    /// A saved game was opened: Mendel stands where he was saved, so the
+    /// camera starts from the key of his floor, as `Camera_Init` does after
+    /// a respawn (the saved respawn point is that same spot).
+    pub fn start_loaded(&mut self, sim: &Sim) {
+        let c = sim.creature.as_ref();
+        self.prev_mode = c.map(|c| c.mode);
+        self.last_ground = c.and_then(|c| c.ground());
+        self.spawn_contact = self.last_ground;
+        self.init(sim);
+        self.samples = [self.sample(); 2];
     }
 
     /// 16 f32: 1 (valid), eye xyz, forward xyz, up xyz (unit vectors of the

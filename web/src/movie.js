@@ -57,7 +57,7 @@ function presenter(canvas, movie, scanlines) {
   };
 }
 
-export function playMovie(engine, bytes, canvas, audioCtx, { scanlines = () => false } = {}) {
+export function playMovie(engine, bytes, canvas, audioCtx, { scanlines = () => false, destination = audioCtx.destination } = {}) {
   const movie = engine.openMovie(bytes);
   // Audio-only files (the soundtrack) carry a 4x4 placeholder picture: skip it.
   const present = movie.width > 4 ? presenter(canvas, movie, scanlines) : null;
@@ -66,7 +66,7 @@ export function playMovie(engine, bytes, canvas, audioCtx, { scanlines = () => f
   if (movie.sampleRate) {
     source = audioCtx.createBufferSource();
     source.buffer = toAudioBuffer(audioCtx, movie.decodeAudio(), movie.sampleRate, movie.channels);
-    source.connect(audioCtx.destination);
+    source.connect(destination);
   }
 
   return new Promise((resolve) => {

@@ -25,6 +25,8 @@ use galapagos_formats::logic::{Actions, LogicView, PortalAction};
 use galapagos_formats::worlds::{Object, Section, WorldObject};
 use std::cell::Cell;
 
+pub mod save;
+
 pub const TICKS_PER_SECOND: u32 = 24;
 
 /// Something the browser has to do on the engine's behalf.
@@ -34,12 +36,16 @@ pub struct HostEvent {
     pub kind: u32,
     pub a: i32,
     pub b: i32,
+    pub c: i32,
 }
 
 pub const EV_MUSIC: u32 = 1; // a = Smacker file 1..10, 0 = stop
 pub const EV_SECTION: u32 = 2; // a = section, b = level (time screen)
-pub const EV_SOUND: u32 = 3; // a = section sound index, b = object id
+pub const EV_SOUND: u32 = 3; // a = world-bank sound (0-based), b = object id, c = emitter index
+pub const EV_CREATURE_SOUND: u32 = 5; // a = creature-bank sound (0-based)
 pub const EV_CAMERA_SNAP: u32 = 4; // a teleporter of kind 2 asks the camera to jump
+pub const EV_SAVE_PAD: u32 = 6; // a = clicked object id: the original opens its Save dialog (docs/re/saves.md)
+pub const EV_GAME_COMPLETE: u32 = 7; // a = 8 (level), b = 9 (time-screen picture): "GALAPAGOS COMPLETED"
 
 /// What a portal or save pad asks of Mendel; the creature picks these up
 /// on its tick (`Game_RequestTeleport` @ 0x41c690 queues them the same way).
@@ -49,8 +55,9 @@ pub enum Request {
     Spawn { at: [f32; 3], heading: i32 },
     /// Portal kinds 1, 2 and 7.
     Teleport { at: [f32; 3], heading: i32, snap: bool },
-    /// `Save` trigger (`0x41ce90`): the respawn point after a death.
-    SavePoint { at: [f32; 3] },
+    /// Portal kind 6: Mendel dissolves and respawn reason 3 runs (the
+    /// world snapshot comes back, he reappears at the respawn point).
+    Respawn,
 }
 
 struct Runtime {
@@ -66,6 +73,9 @@ struct Runtime {
     rot: [i32; 3],
     /// Expanded frames of the running motion path, and where we are in it.
     motion: Option<(Vec<([i32; 3], [i32; 3])>, usize, bool, bool)>,
+    /// Which motion path `motion` expanded (needed to rebuild it from a
+    /// snapshot or a saved game).
+    motion_path: u16,
     /// Current appearance state and per-polygon flip-book frame.
     appearance: usize,
     poly_frame: Vec<usize>,
@@ -99,6 +109,21 @@ pub struct Sim {
     /// (`ints[0]`, see logic.rs `PortalAction`); the camera starts from
     /// its key (camera.rs).
     pub portal_contact: Option<(usize, usize, bool)>,
+
+    // ——— Saves and times (sim/save.rs, docs/re/saves.md) ———
+    /// The ten persistent level variables of the `Save` class (the archive
+    /// object's `i32[10]` at `+0x13c`). They survive section changes, so a
+    /// world remembers what was done in it.
+    pub vars: [i32; save::VARS],
+    /// The world as it was at the last snapshot (level start, save, open):
+    /// what respawn reason 3 brings back.
+    pub snapshot: Option<save::WorldState>,
+    /// `Game+0x17ee84`: ticks since the game began.
+    pub total_ticks: u32,
+    /// `Game+0x17ee88`: `total_ticks` when the current level began.
+    pub level_start_ticks: u32,
+    /// Index of the section this simulation runs.
+    pub section: usize,
 }
 
 impl Sim {
@@ -133,6 +158,7 @@ impl Sim {
                     pos: rest,
                     rot: [0; 3],
                     motion: None,
+                    motion_path: 0,
                     appearance: 0,
                     poly_frame: Vec::new(),
                     animating: false,
@@ -153,11 +179,16 @@ impl Sim {
             requests: Vec::new(),
             skip_held: false,
             portal_contact: None,
+            vars: [0; save::VARS],
+            snapshot: None,
+            total_ticks: 0,
+            level_start_ticks: 0,
+            section: 0,
         }
     }
 
     /// The CRT `rand()` the original links (MSVC LCG, 15-bit output).
-    fn rand(&self) -> u32 {
+    pub(crate) fn rand(&self) -> u32 {
         let s = self.rng.get().wrapping_mul(214013).wrapping_add(2531011);
         self.rng.set(s);
         (s >> 16) & 0x7fff
@@ -228,6 +259,8 @@ impl Sim {
             self.creature = Some(c);
         }
         self.tick += 1;
+        // `Game_Tick` @ 0x41bc50 ends with `++level_ticks; ++total_ticks`.
+        self.total_ticks = self.total_ticks.wrapping_add(1);
     }
 
     // ——— What the creature may see and touch ———
@@ -289,9 +322,18 @@ impl Sim {
             self.select_appearance(i, (n - 1).max(0) as usize, mesh);
         }
         if let Some(n) = a.sound {
-            let sound = self.objs[i].obj.as_ref().and_then(|o| o.logic.sounds.get((n - 1).max(0) as usize));
-            if let Some(&s) = sound.and_then(|e| e.sounds.iter().find(|&&s| s >= 0)) {
-                self.events.push(HostEvent { kind: EV_SOUND, a: s as i32, b: i as i32 + 1 });
+            // An emitter lists up to three alternative sounds; the sound
+            // system picks one at random. Their indices are **1-based** into
+            // the section's sound set (checked on the CD: 1-based leaves 1 of
+            // 1,467 references on an empty slot, 0-based leaves 107).
+            let e = (n - 1).max(0) as usize;
+            let emitter = self.objs[i].obj.as_ref().and_then(|o| o.logic.sounds.get(e));
+            if let Some(em) = emitter {
+                let choices: Vec<i16> = em.sounds.iter().copied().filter(|&s| s > 0).collect();
+                if !choices.is_empty() {
+                    let s = choices[self.rand() as usize % choices.len()];
+                    self.events.push(HostEvent { kind: EV_SOUND, a: s as i32 - 1, b: i as i32 + 1, c: e as i32 });
+                }
             }
         }
         if let Some(n) = a.motion {
@@ -314,13 +356,13 @@ impl Sim {
                 // shorts[0]: 1 = enable, 0 = disable; shorts[1] = descendants.
                 self.objs[i].skip = if p.shorts[0] != 0 { 0 } else { p.shorts[1].max(0) as u32 };
             }
-            b"Voic" => self.events.push(HostEvent { kind: EV_MUSIC, a: p.shorts[0] as i32, b: 0 }),
+            b"Voic" => self.events.push(HostEvent { kind: EV_MUSIC, a: p.shorts[0] as i32, b: 0, c: 0 }),
             b"Tele" | b"Strt" | b"STel" => {
                 let o = self.objs[i].pos;
                 let at = |off: [i32; 3]| [(o[0] + off[0]) as f32, (o[1] + off[1]) as f32, (o[2] + off[2]) as f32];
                 match p.portal() {
                     PortalAction::ChangeSection { section, level } => {
-                        self.events.push(HostEvent { kind: EV_SECTION, a: section as i32, b: level as i32 })
+                        self.events.push(HostEvent { kind: EV_SECTION, a: section as i32, b: level as i32, c: 0 })
                     }
                     // inferred: `mode` is ignored; the offset is always
                     // relative to the portal, which fits every pad on the CD.
@@ -332,14 +374,32 @@ impl Sim {
                         self.portal_contact = Some((i, mode.max(0) as usize, false));
                         self.requests.push(Request::Teleport { at: at(offset), heading, snap: snap_camera })
                     }
-                    // Kinds 5/6 only make Mendel react (an animation).
+                    // Kinds 5 and 6 only differ by the reaction they hand
+                    // Mendel (`Portal_InitReactions` @ 0x41b140): kind 5's
+                    // 0x2d1000 ends in respawn reason 5, the end of the
+                    // game; kind 6's 0x1b2000 in reason 3, a respawn.
+                    PortalAction::ReactOnly if p.shorts[0] == 5 => {
+                        self.events.push(HostEvent { kind: EV_GAME_COMPLETE, a: 8, b: 9, c: 0 })
+                    }
+                    PortalAction::ReactOnly if p.shorts[0] == 6 => self.requests.push(Request::Respawn),
                     PortalAction::ReactOnly | PortalAction::Other(_) => {}
                 }
             }
+            // Not the save pads! `Save` trigger @ 0x41afe0 is a persistent
+            // variable: `shorts[0] = 1` stores this object's state in slot
+            // `shorts[1]` (`0x41ce90` -> archive slot 0x14 @ 0x41d530);
+            // `0` reads the slot back and queues it as the next state
+            // (`0x41ceb0` -> slot 0x10 @ 0x41d560, then 0x42ce50).
             b"Save" => {
+                let slot = p.shorts[1];
+                if !(0..save::VARS as i16).contains(&slot) {
+                    return;
+                }
                 if p.shorts[0] != 0 {
-                    let o = self.objs[i].pos;
-                    self.requests.push(Request::SavePoint { at: o.map(|c| c as f32) });
+                    self.vars[slot as usize] = self.objs[i].state as i32;
+                } else {
+                    let s = self.vars[slot as usize] as i16;
+                    self.objs[i].pending = Some(Actions { goto_state: Some(s), ..Default::default() });
                 }
             }
             _ => {}
@@ -350,6 +410,7 @@ impl Sim {
         let o = &mut self.objs[i];
         let Some(path) = o.obj.as_ref().and_then(|w| w.logic.motions.get(n)) else { return };
         o.motion = Some((path.frames(), 0, path.looping != 0, path.relative != 0));
+        o.motion_path = n as u16;
     }
 
     fn select_appearance(&mut self, i: usize, n: usize, mesh: &mut WorldMesh) {
@@ -415,9 +476,15 @@ impl Sim {
     /// Ray pick against every visible polygon whose current appearance frame
     /// is pickable (flags & 0xfffffffe), like `World_Pick` @ 0x4089e0.
     /// Returns the 1-based id of the nearest hit.
+    #[cfg(test)]
     pub fn pick(&self, origin: [f32; 3], dir: [f32; 3]) -> Option<u16> {
+        self.pick_hit(origin, dir).map(|(id, _)| id)
+    }
+
+    /// The nearest hit (as `pick`) with the hit polygon's frame flags.
+    pub fn pick_hit(&self, origin: [f32; 3], dir: [f32; 3]) -> Option<(u16, u32)> {
         let visible = self.visible();
-        let mut best: Option<(f32, u16)> = None;
+        let mut best: Option<(f32, u16, u32)> = None;
         for (i, o) in self.objs.iter().enumerate() {
             let (Some(obj), Some(_)) = (o.obj.as_ref(), o.draw) else { continue };
             if !visible[i] {
@@ -439,14 +506,19 @@ impl Sim {
                     .collect();
                 for k in 1..pts.len().saturating_sub(1) {
                     if let Some(d) = ray_triangle(origin, dir, pts[0], pts[k], pts[k + 1]) {
-                        if best.is_none_or(|(bd, _)| d < bd) {
-                            best = Some((d, i as u16 + 1));
+                        if best.is_none_or(|(bd, _, _)| d < bd) {
+                            best = Some((d, i as u16 + 1, f.flags));
                         }
                     }
                 }
             }
         }
-        best.map(|(_, id)| id)
+        best.map(|(_, id, flags)| (id, flags))
+    }
+
+    /// Sound emitter `n` of object `id` (1-based).
+    pub fn emitter(&self, id: u16, n: usize) -> Option<galapagos_formats::logic::SoundEmitter> {
+        self.objs.get(id.wrapping_sub(1) as usize)?.obj.as_ref()?.logic.sounds.get(n).copied()
     }
 
     /// Current position of object `id` (1-based), in world units.

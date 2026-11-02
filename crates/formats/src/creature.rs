@@ -510,6 +510,25 @@ impl Brain {
         Ok(Self { nerms: [Nerm::read(&mut c)?, Nerm::read(&mut c)?, Nerm::read(&mut c)?] })
     }
 
+    /// A newborn's brain (age level 1). The original runs `Nerm_Init` @
+    /// 0x427ac0, filling the genome from its LCG. inferred: we keep the
+    /// structure of a shipped brain (knots, exp table, chain layout) and
+    /// replace the genome with LCG bytes, forgetting all fitness: a mind
+    /// with Mendel's anatomy and none of his experience.
+    pub fn newborn(template: &Brain, seed: u32) -> Brain {
+        let mut rng = Lcg(seed);
+        let mut b = template.clone();
+        for n in &mut b.nerms {
+            for g in n.genome.iter_mut() {
+                *g = rng.next() as u8;
+            }
+            n.fitness = [0; POPULATION];
+            n.individual = 0;
+            n.state = 0;
+        }
+        b
+    }
+
     /// The bytes of a `.mnd` file.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut v = Vec::with_capacity(BRAIN_LEN);
@@ -704,5 +723,19 @@ mod tests {
             assert_eq!((t.unknown, t.profiles.len()), (1520, 33));
             assert_eq!(t.profiles[0], CameraProfile { damping_a: 55705, damping_b: 62259, c: 15, d: 300, mode: 0 });
         }
+    }
+
+    #[test]
+    fn newborn_brain_is_new_and_round_trips() {
+        let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../originals/mounted/install/data/worlds");
+        let Ok(data) = std::fs::read(p) else { return };
+        let a = crate::worlds::Archive::parse(&data).unwrap();
+        let template = Brain::parse(&data, a.header.creature_overlays[1] as usize).unwrap();
+        let baby = Brain::newborn(&template, 7);
+        assert_ne!(baby.nerms[0].genome, template.nerms[0].genome, "a new genome");
+        assert_eq!(baby.nerms[0].genome.len(), template.nerms[0].genome.len());
+        let bytes = baby.to_bytes();
+        assert_eq!(bytes.len(), BRAIN_LEN, "exactly one .mnd");
+        assert_eq!(Brain::parse(&bytes, 0).unwrap(), baby, "a .mnd round-trips");
     }
 }

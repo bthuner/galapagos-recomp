@@ -37,9 +37,15 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
       if (n < 0) throw new Error("Not a Galapagos worlds archive");
       return {
         sectionCount: n,
+        // Build section i into render buffers (and start its simulation).
         build(i) {
-          const verts = wasm.world_build(i);
-          if (verts < 0) throw new Error(`Section ${i} failed to parse`);
+          if (wasm.world_build(i) < 0) throw new Error(`Section ${i} failed to parse`);
+          return this.current();
+        },
+        // The buffers of the section already built (e.g. after a load).
+        current() {
+          const verts = wasm.world_current_vertex_count();
+          if (verts < 0) throw new Error("No section built");
           const textureCount = wasm.world_texture_count();
           const mem = wasm.memory.buffer;
           return {
@@ -64,12 +70,14 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
     // The world simulation (see crates/engine/src/sim.rs).
     sim: {
       ticksPerSecond: () => wasm.sim_ticks_per_second(),
-      // Runs n ticks; returns host events as {kind, a, b}.
+      // Runs n ticks; returns host events as {kind, a, b, c}.
       tick(n) {
         const count = wasm.sim_tick(n);
-        const raw = new Int32Array(wasm.memory.buffer, wasm.sim_events_ptr(), count * 3);
+        const raw = new Int32Array(wasm.memory.buffer, wasm.sim_events_ptr(), count * 4);
         const out = [];
-        for (let i = 0; i < count; i++) out.push({ kind: raw[i * 3], a: raw[i * 3 + 1], b: raw[i * 3 + 2] });
+        for (let i = 0; i < count; i++) {
+          out.push({ kind: raw[i * 4], a: raw[i * 4 + 1], b: raw[i * 4 + 2], c: raw[i * 4 + 3] });
+        }
         return out;
       },
       // [first, end) vertex range patched since the last call, or null.
@@ -130,6 +138,82 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
         });
         return f[16] ? { prev: view(0), cur: view(16) } : null;
       },
+    },
+
+    // Saved games, the respawn snapshot and the time screen
+    // (crates/engine/src/sim/save.rs, docs/re/saves.md).
+    game: {
+      // Serialises the whole game ("GLPS" v1) and, like the original after
+      // a successful save, makes Mendel's current spot the respawn point.
+      save() {
+        const n = wasm.game_save();
+        return new Uint8Array(wasm.memory.buffer, wasm.game_save_ptr(), n).slice();
+      },
+      // Rebuilds the saved section and restores everything (brain included).
+      // Returns the section index; then re-read worlds.current().
+      load(bytes) {
+        const r = wasm.game_load(...upload(bytes));
+        if (r !== 0) throw new Error(["", "Not a Galapagos save", "Unknown section", "Save does not fit its section"][-r]);
+        return wasm.game_section();
+      },
+      // Read when EV_SECTION arrives, before building the next section.
+      times() {
+        const [levelTicks, totalTicks, levelSeconds, totalSeconds] = new Uint32Array(wasm.memory.buffer, wasm.game_times(), 4);
+        return { levelTicks, totalTicks, levelSeconds, totalSeconds };
+      },
+      onSavePad: () => wasm.game_on_save_pad() === 1,
+      resetProgress: () => wasm.game_reset_progress(),
+      // Which picture and where to draw the times, for level 0..7 (8 = the
+      // end of the game) in a view of w x h pixels; null if too small.
+      timeScreen(level, w, h) {
+        const v = new Int32Array(wasm.memory.buffer, wasm.time_screen_layout(level, w, h), 30).slice();
+        if (v[0] < 0) return null;
+        const glyphs = {};
+        "0123456789:".split("").forEach((ch, k) => (glyphs[ch] = { x: v[8 + 2 * k], w: v[9 + 2 * k] }));
+        return {
+          picture: v[0], width: v[1], height: v[2], visibleHeight: v[3], glyphHeight: v[4],
+          levelX: v[5], y: v[6], totalRight: v[7], glyphs,
+        };
+      },
+    },
+
+    // ——— Menus ———
+    // File ▸ New with the Preferences age (0..255); then build section 0.
+    newGame: (age) => wasm.game_new(age),
+    section: () => wasm.world_section(),
+    // File ▸ Export / Import Mendel NERM: the 28,242-byte .mnd format.
+    exportBrain() {
+      const n = wasm.brain_export();
+      return new Uint8Array(wasm.memory.buffer, wasm.brain_export_ptr(), n).slice();
+    },
+    importBrain(bytes) {
+      const ptr = wasm.alloc(bytes.length);
+      new Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
+      return wasm.brain_import(ptr, bytes.length) === 0;
+    },
+    // UI picture i of the archive as ImageData (time screens, title strips).
+    picture(i) {
+      const [w, h, ptr] = new Uint32Array(wasm.memory.buffer, wasm.picture_info(i), 3);
+      if (!w) return null;
+      return new ImageData(new Uint8ClampedArray(wasm.memory.buffer, ptr, w * h * 4).slice(), w, h);
+    },
+    pictureCount: () => wasm.picture_count(),
+    // Preferences ▸ Fidelity: 1 = 8-bit 11 kHz … 4 = CD quality.
+    setSoundQuality: (q) => wasm.sound_set_quality(q),
+
+    // Sound `i` of a bank (0 = current world, 1 = Mendel, 2 = predators):
+    // { rate, baseNote, samples: Int16Array } copied out of WASM memory, or
+    // null for an empty slot.
+    sound(bank, i) {
+      const [rate, len, baseNote, ptr] = new Uint32Array(wasm.memory.buffer, wasm.sound_info(bank, i), 4);
+      if (!len) return null;
+      return { rate, baseNote, samples: new Int16Array(wasm.memory.buffer, ptr, len).slice() };
+    },
+
+    // How emitter n of object id plays (meanings inferred, see objects.md).
+    emitter(id, n) {
+      const [near, far, volume, loop, pitch, variation] = new Int32Array(wasm.memory.buffer, wasm.world_emitter(id, n), 6);
+      return { near, far, volume, loop: loop !== 0, pitch: pitch || 65536, variation };
     },
 
     // Smacker movies. The engine takes ownership of the uploaded bytes.
