@@ -490,7 +490,7 @@ impl Sim {
         o.poly_frame = vec![0; state.polygons.len()];
         o.animating = state.polygons.iter().any(|f| f.len() > 1);
         for (p, frames) in state.polygons.iter().enumerate() {
-            if let Some(r) = mesh.apply_frame(draw, p, frames.first()) {
+            if let Some(r) = mesh.apply_frame(draw, p, frames, 0) {
                 mark(&mut self.dirty, r.first, r.first + r.count);
             }
         }
@@ -534,7 +534,7 @@ impl Sim {
                 } else {
                     continue;
                 }
-                if let Some(r) = mesh.apply_frame(draw, p, frames.get(*f)) {
+                if let Some(r) = mesh.apply_frame(draw, p, frames, *f) {
                     mark(&mut self.dirty, r.first, r.first + r.count);
                 }
             }

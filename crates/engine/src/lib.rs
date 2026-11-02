@@ -890,3 +890,10 @@ pub extern "C" fn sound_set_quality(q: u32) {
         worlds.banks = [decode(world), decode(set(archive.header.creature_sounds)), decode(set(archive.header.predator_sounds))];
     });
 }
+
+/// One byte per draw: 0 when the object is hidden by a `-5` appearance
+/// frame (the exe's object visibility flag, 0x4022e0), else 1.
+#[no_mangle]
+pub extern "C" fn world_visible_ptr() -> *const u8 {
+    with_mesh(|m| m.visible.as_ptr(), core::ptr::null())
+}

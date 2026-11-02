@@ -35,7 +35,17 @@ async function boot(files) {
   const audio = new AudioContext();
   // One volume knob for music and effects (Preferences ▸ Volume).
   const volume = audio.createGain();
-  volume.connect(audio.destination);
+  // A gentle limiter after the volume knob: several effects plus the music
+  // can sum above full scale, which a browser turns into crackle. (The
+  // samples themselves are mastered hot, clipping included: that part is
+  // authentic and left alone.)
+  const limiter = audio.createDynamicsCompressor();
+  limiter.threshold.value = -6;
+  limiter.knee.value = 6;
+  limiter.ratio.value = 12;
+  limiter.attack.value = 0.003;
+  limiter.release.value = 0.15;
+  volume.connect(limiter).connect(audio.destination);
 
   await waitForClick($("start"));
   $("start").hidden = true;
@@ -180,6 +190,7 @@ async function boot(files) {
     set paused(v) { paused = v; },
     ready: () => !timeScreenUp,
     status,
+    sfx,
     newGame(age) {
       engine.newGame(age); // fresh brain, no carried progress or clocks
       show(0);

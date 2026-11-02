@@ -61,6 +61,8 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
             transforms: () =>
               new Float32Array(wasm.memory.buffer, wasm.world_transforms_ptr(), wasm.world_draw_count() * 16),
             liveVertices: () => new Float32Array(wasm.memory.buffer, wasm.world_vertices_ptr(), verts * 7),
+            // Objects hidden by a -5 appearance frame (fresh view each frame).
+            visible: () => new Uint8Array(wasm.memory.buffer, wasm.world_visible_ptr(), wasm.world_draw_count()),
             farClip: wasm.world_far_clip(),
           };
         },

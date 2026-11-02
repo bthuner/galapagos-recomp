@@ -145,6 +145,25 @@ export function createMenu(app) {
       app.status("Mendel's NERM exported as mendel.mnd.");
     },
     prefs: () => show("prefs"),
+    sounds: () => {
+      // Every non-empty sound of the current world (bank 0) and Mendel's
+      // (bank 1), playable one by one: a listening test for human ears.
+      const list = $(".menu__sounds");
+      list.replaceChildren();
+      for (const [bank, label] of [[0, "World"], [1, "Mendel"]]) {
+        for (let i = 0; i < 128; i++) {
+          const pcm = app.engine.sound(bank, i);
+          if (!pcm) continue;
+          const b = Object.assign(document.createElement("button"), {
+            textContent: `${label} ${i + 1}`,
+            title: `${pcm.rate} Hz, ${(pcm.samples.length / pcm.rate).toFixed(2)} s, base note ${pcm.baseNote}`,
+          });
+          b.onclick = () => app.sfx.preview(bank, i);
+          list.append(b);
+        }
+      }
+      show("sounds");
+    },
     about: () => show("about"),
     quit: () => location.reload(),
     back: () => show("main"),
@@ -194,7 +213,9 @@ export function createMenu(app) {
 
   // Esc opens and closes the menu (the original's Pause Game Menu).
   addEventListener("keydown", (e) => {
-    if (e.key !== "Escape" || !app.ready()) return;
+    // Ignore auto-repeat: holding Esc to skip the intro movie must not
+    // also open the menu once the world has loaded.
+    if (e.key !== "Escape" || e.repeat || !app.ready()) return;
     e.stopImmediatePropagation();
     setOpen(!open);
   }, true);

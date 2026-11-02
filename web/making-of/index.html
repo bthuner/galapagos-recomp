@@ -478,6 +478,14 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           often can.
         </p>
         <p>
+          Listening is the one test an AI co-author can't do, so we measured what an ear would notice instead. Effects,
+          Mendel's cues and music all sit around −15 dBFS RMS, so the balance is sensible. There's almost no DC offset,
+          so no clicks. About one effect in six has flat-topped clipping, but the independent 8-bit copies clip in the
+          same places, so it was mastered that way in 1997 and stays. What we added is a gentle limiter on the
+          master output, so several sounds plus music can't crackle when they stack, and a <em>Sound test</em> panel
+          in the menu, for human ears.
+        </p>
+        <p>
           Mendel has five sound cues of his own: landing after a fall, spotting a hazard with his infrared eyes,
           seeing certain surfaces, and a strong left/right imbalance, each followed by a short, partly random
           silence. Choosing which sound plays uses the game's random generator, not his brain's, so a sound can never
@@ -559,6 +567,23 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           sky and drops him on the arrival pad. The lesson for the rest of the project: a guess that "looks right"
           from far away is still a guess. Ask the code that has to live with it, here the camera.
         </p>
+        <h3>The red disc that was never there</h3>
+        <p>
+          After the Z-up fix, Mendel was born on a red octagon, where the footage shows a dark disc ringed with blue
+          triangles. The red was a real texture (the same red clouds as the wedge pillars), so the texture wasn't
+          broken. The executable's frame applier (<code>0x423730</code>) explained it. A polygon's texture number
+          can be negative: <code>−5</code> hides the <em>whole object</em>, <code>−4</code> sets another object-level
+          flag, and <code>−2</code>/<code>−3</code> mean "keep the previous texture". The start pad is a stack of four
+          polygons, one of them always <code>−5</code>, so the original never draws it. It is an invisible elevator floor,
+          and the dark disc with blue triangles is the room's floor underneath. We had hidden only that one polygon,
+          so the red layers below showed through.
+        </p>
+        <p>
+          A small lesson in determinism came with it. "Keep the previous texture" depends on what was drawn before, and
+          our snapshot test caught that restoring a save no longer reproduced the picture exactly. On the CD those
+          frames always sit inside flip-books, so "previous" now means the last real texture earlier in the same
+          flip-book: the same picture, computed from state alone.
+        </p>
       </section>
 
       <section id="journal" class="chapter">
@@ -579,6 +604,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> Save pads, world snapshots that rewind the world but not Mendel's mind, saved games in the browser, and the original time screen between levels.</li>
           <li><time>2026‑11‑02</time> The original camera, ported from <code>Camera_Update</code>: per-polygon keys, 33 styles, 12 eye modes, integer filters.</li>
           <li><time>2026‑11‑02</time> Correction: the world is Z-up, not Y-down. Mendel now stands on floors (flag bit 1), is born on the start disc, rides the capsule and lands on the arrival pad as in the footage. Polygons with negative texture numbers (collision geometry such as the birth tube) are no longer drawn.</li>
+          <li><time>2026‑11‑02</time> The red start disc: −5 frames hide whole objects (the start pad is an invisible elevator). Audio measured for clipping, balance and DC; limiter and Sound test panel added.</li>
         </ol>
       </section>
 

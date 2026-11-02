@@ -73,6 +73,10 @@ export function createSfx(engine, ctx, out = ctx.destination) {
   let played = 0;
 
   return {
+    // Sound test: play sound i of a bank as-is, no distance.
+    preview(bank, i) {
+      return play(bank, i, {});
+    },
     // How many sounds have started (for the curious, from DevTools).
     get played() {
       return played;

@@ -125,7 +125,7 @@ impl Sim {
             let Some(state) = obj.appearance.as_ref().and_then(|a| a.get(o.appearance)) else { continue };
             for (p, frames) in state.polygons.iter().enumerate() {
                 let f = o.poly_frame.get(p).copied().unwrap_or(0);
-                if let Some(r) = mesh.apply_frame(d, p, frames.get(f).or(frames.first())) {
+                if let Some(r) = mesh.apply_frame(d, p, frames, f) {
                     mark(&mut self.dirty, r.first, r.first + r.count);
                 }
             }
