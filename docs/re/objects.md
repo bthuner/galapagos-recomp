@@ -236,7 +236,7 @@ texture scrolling (see `worlds.md`).
 u16 path_count
 path_count x {
   u16 looping           1 = wrap to frame 0, 0 = stop at the end    (observed in 0x428c20)
-  u16 relative          1 = offsets from the rest pose, 0 = absolute (inferred, 0x423a30)
+  u16 mode              0 = add to the pose, 1 = rest + frame, 2 = absolute (observed, 0x423a30)
   u32 frame_count       = sum(steps + 1) of all keys but the last, + 1  (1,516/1,516)
   u16 key_count
   key_count x { i32 x, y, z; i32 rx, ry, rz; i32 steps }        28 bytes
@@ -251,7 +251,19 @@ than two keys and `relative != 0` is post-processed with two 16.16 constants
 (`0xeb85` ≈ 0.92, `0xf0a3` ≈ 0.94, `0x401140`/`0x401300`) — unknown,
 possibly a rotation of the keys into the object's frame. Rotations are in
 1024ths of a turn (conditions mask them with `0x3ff`); values such as 2048
-mean "two full turns", which is how fans spin. Example, section 0 #6:
+mean "two full turns", which is how fans spin.
+
+`WorldObject_StepMotion` @ `0x423a30` hands each frame to a pose setter
+chosen by the path's mode (observed in the listing): **0** → slot `0x68`
+= `0x422e80` *adds* the frame to the current pose every tick (a nudge:
+section 1's pads bounce ±100 along their normal with one-key paths
+`[0, ±100, 0]`); **1** → slot `0x64` = `0x422cb0`: rest position
+(`+0xd0`) plus the frame's position, the frame's rotation as is; **2** →
+slot `0x60` = `0x422af0`: the frame as is. All three store the key's
+`rx` in `+0xf2`, `ry` in `+0xf0` and `rz` in `+0xf4`, and the object
+matrix is `Math_RotationMatrix(+0xf2, +0xf0, +0xf4)` @ `0x430ce0`
+(`0x4096a0`), applied as `v · M`: `rx` turns about z (yaw), `ry` about x,
+`rz` about y (`sim::transform`). Example, section 0 #6:
 keys `x = 0 → -3000 → 3000 → 0` with 30/60/30 steps: a platform that sways
 3,000 units each side over 124 ticks, looping.
 
@@ -491,12 +503,14 @@ Mendel, until he steps on another keyed polygon; the capsule's keys
 
 ### Adapted in the port
 
-* Our creature forgets its floor while airborne; the original never
-  clears the contact in flight. `camera.rs` keeps the last contact.
+* The key follows Mendel's contact polygon as the polygon walker keeps
+  it (`Creature::surface`, the mover's `+0x8/+0x30`): set by every
+  placement, changed on landing, kept in flight, as in the original.
 * `+0x21e` (a creature contact flag that also unlocks modes 3/6/11) is
-  not ported; "off the ground" = our creature has no floor.
-* Object rotations come from our object transform (sim.rs), not from the
-  object's angles via `0x4097a0`.
+  not ported; "off the ground" = the walker is not grounded.
+* Object rotations come from our object transform (sim.rs, the exe's
+  `0x430ce0` convention), not from the object's second angle set via
+  `0x4097a0`.
 
 ### Which way is up: +z (settled)
 
@@ -510,7 +524,10 @@ feet at `(0, 0, −450)`, airborne gravity is `up · −0x700`, the floor
 finder casts for polygons with flag bit 1 (`0x2`), and the 1997 footage
 shows Mendel standing on the +z faces of the pads. Our first creature
 port assumed Y-down (from the first render, see worlds.md) and walked on
-the pads' sides; it is now Z-up like the exe.
+the pads' sides. +z is only the *default*, though: Mendel's own up is the
+normal of the floor polygon he stands on (mendel.md §2.2), and some
+levels stand him sideways (section 1's +y pads) or upside down
+(section 2's start).
 
 ## 7. The game loop — partly observed
 
