@@ -1108,25 +1108,14 @@ impl Creature {
         }
     }
 
-    /// For the host's chase camera (not in the original, whose camera
-    /// collides through `0x413d43` with the same mask): the clear fraction
-    /// (0..=1) of the segment from `from` to `eye`, against polygons whose
-    /// flags have 0x102, seen from either side.
-    pub fn camera_clearance(&self, sim: &Sim, from: V3, eye: V3) -> f32 {
-        let d = sub(eye, from);
-        let len = length(d);
-        if len < 1.0 {
-            return 1.0;
-        }
-        let dir = scale(d, 1.0 / len);
-        let near = self.gather_masked(sim, from, len, 0x102);
-        let mut best = len;
-        for t in &near.0 {
-            if let Some(h) = ray_tri(from, dir, t) {
-                best = best.min(h);
-            }
-        }
-        best / len
+    /// For `camera.rs` (`Camera_Collide` @ 0x413cb0): the nearest polygon
+    /// with flags 0x102 crossing the segment `from → to`, as (a point of
+    /// its plane, its unit world normal). Front faces only, like `cast`.
+    pub fn camera_probe(&self, sim: &Sim, from: V3, to: V3) -> Option<(V3, V3)> {
+        let near = self.gather_masked(sim, from, length(sub(to, from)), 0x102);
+        let h = near.segment(from, to, |_| true)?;
+        let t = near.0.iter().find(|t| t.obj == h.obj && t.poly == h.poly)?;
+        Some((t.a, t.normal))
     }
 
     /// Ray against his posed mesh. Returns `Some(true)` for a hit on his

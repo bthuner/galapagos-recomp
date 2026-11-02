@@ -62,7 +62,7 @@ async function boot(files) {
       last = now;
       const n = Math.floor(clock * hz);
       clock -= n / hz;
-      if (!n) return;
+      if (!n) return clock * hz;
       for (const ev of engine.sim.tick(n)) {
         if (ev.kind === 1) music(ev.a);
         if (ev.kind === 4) view.snap(); // a teleporter asked for a camera cut
@@ -72,6 +72,8 @@ async function boot(files) {
         }
       }
       mendelWatch();
+      // How far we are into the next tick (0..1): the camera interpolates.
+      return clock * hz;
     },
     onPick(origin, dir) {
       const id = engine.sim.click(origin, dir);
@@ -84,7 +86,7 @@ async function boot(files) {
       status(side ? `You touched Mendel's ${side} side.` : "Right-click Mendel to touch him.");
     },
     onFollowChange: (on) => ($("follow-mendel").checked = on),
-    clearance: engine.creature.clearance,
+    camera: engine.camera.state,
   });
   // Follow Mendel by default as soon as he appears, unless the user turned
   // the chase camera off in this section.

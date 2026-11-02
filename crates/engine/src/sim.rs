@@ -94,6 +94,11 @@ pub struct Sim {
     /// The Space bar is held: every `STel` object counts as clicked, the
     /// original's "skip the introduction" key (`STel` Update @ 0x41af10).
     pub skip_held: bool,
+    /// The last portal request's contact: (object index, polygon, spawn?).
+    /// The original hands Mendel this floor polygon with the request
+    /// (`ints[0]`, see logic.rs `PortalAction`); the camera starts from
+    /// its key (camera.rs).
+    pub portal_contact: Option<(usize, usize, bool)>,
 }
 
 impl Sim {
@@ -147,6 +152,7 @@ impl Sim {
             creature: None,
             requests: Vec::new(),
             skip_held: false,
+            portal_contact: None,
         }
     }
 
@@ -318,8 +324,12 @@ impl Sim {
                     }
                     // inferred: `mode` is ignored; the offset is always
                     // relative to the portal, which fits every pad on the CD.
-                    PortalAction::Spawn { offset, heading, .. } => self.requests.push(Request::Spawn { at: at(offset), heading }),
-                    PortalAction::Teleport { offset, heading, snap_camera, .. } => {
+                    PortalAction::Spawn { offset, heading, mode, .. } => {
+                        self.portal_contact = Some((i, mode.max(0) as usize, true));
+                        self.requests.push(Request::Spawn { at: at(offset), heading })
+                    }
+                    PortalAction::Teleport { offset, heading, snap_camera, mode } => {
+                        self.portal_contact = Some((i, mode.max(0) as usize, false));
                         self.requests.push(Request::Teleport { at: at(offset), heading, snap: snap_camera })
                     }
                     // Kinds 5/6 only make Mendel react (an animation).

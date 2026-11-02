@@ -501,7 +501,10 @@ pub struct CameraKey {
     /// Camera position: absolute world position, or an offset from the
     /// reference chosen by the style's `mode`.
     pub position: [i32; 3],
-    /// Camera orientation, 1024ths of a turn (inferred).
+    /// Camera orientation, 1024ths of a turn, in file order **yaw, pitch,
+    /// roll** (`Camera_ReadPaths` stores them at +0x12, +0x10, +0x14; the
+    /// default key of section 0 then aims exactly at the start pad).
+    /// Only the roll matters at run time: the camera aims at Mendel.
     pub c: [u16; 3],
 }
 

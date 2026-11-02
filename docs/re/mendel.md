@@ -413,10 +413,10 @@ u16 n                  33
 n x { i32 a; i32 b; i16 c; i16 d; i16 mode }      14 bytes
 ```
 
-Identical in all 8 sections. `a`, `b` are 16.16 fractions (0.6..0.95),
-`c` 7..30, `d` 150..700, `mode` 0..11. The camera uses entry
-`key.b` (the second byte of a camera key) to set its smoothing
-parameters; modes 0 and 7 snap the camera to its target.
+Identical in all 8 sections. `a`, `b` are the look-at and eye tracker
+constants (16.16, 0.6..0.95), `c`, `d` the eye mover's acceleration and
+top speed (7..30, 150..700 units/tick), `mode` 0..11 the key's reference
+frame. A camera key's second byte picks the entry: see objects.md §6.
 
 ## 6. Sounds — observed
 

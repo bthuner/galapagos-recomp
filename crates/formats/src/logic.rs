@@ -579,7 +579,11 @@ impl ObjectParams {
 pub enum PortalAction {
     /// Move Mendel next to this object (`Game_RequestTeleport` @ 0x41c690):
     /// `offset` from the object, facing `heading` (1024ths of a turn).
-    /// Kind 2 also snaps the camera.
+    /// Kind 2 also snaps the camera. `mode` (`ints[0]`) is really the
+    /// polygon of this object that becomes Mendel's floor contact: the
+    /// trigger (0x41b180) passes (this object's id, `ints[0]`) as the
+    /// contact, and on the CD it always names a polygon of the portal,
+    /// nearly always one with a camera key (camera.rs).
     Teleport { snap_camera: bool, mode: i32, offset: [i32; 3], heading: i32 },
     /// Dimensional gate (`Game_RequestSectionChange` @ 0x41c6e0): show the
     /// time screen of `level`, then load world section `section`.
@@ -632,15 +636,19 @@ impl ObjectLogic {
 /// identical in all eight sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CameraStyle {
-    /// 16.16 fractions (0.6 .. 0.95): smoothing factors of the camera
-    /// position / orientation chase (inferred).
+    /// 16.16 `d` of the two alpha-beta trackers (0x406a50; α = 1 − d²,
+    /// β = (1 − d)²): `[0]` smooths the look-at point (Mendel), `[1]` the
+    /// eye. 0.6 .. 0.95.
     pub damping: [u32; 2],
-    /// e.g. 15 / 300, 30 / 700: speed limits or distances (unknown).
+    /// The eye mover's acceleration and top speed, world units per tick
+    /// (0x4277e0), e.g. 15 / 300, 30 / 700.
     pub limits: [i16; 2],
-    /// 0..=11: what the camera position is relative to
-    /// (`Camera_ApplyPolygonKey` @ 0x412f60): 0/7 fixed world point;
-    /// 1/8 and 4 relative to the object Mendel stands on; 2/3/9 and 5/6
-    /// relative to Mendel; 10/11 x, y from the object and z from Mendel.
+    /// 0..=11: what the key position is relative to (0x412f60, 0x4136d0):
+    /// 0 world; 1 the key's object; 2 Mendel; 3 Mendel, held while he is
+    /// off the ground; 4 the object, in its rotating frame; 5 Mendel, in
+    /// the object's frame; 6 = 5 held off the ground; 7/8/9 = 0/1/2 with
+    /// wall probes; 10 x, y from the object, z from Mendel, in the
+    /// object's frame; 11 = 10 held off the ground.
     pub mode: i16,
 }
 

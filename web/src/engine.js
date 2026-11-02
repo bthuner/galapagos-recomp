@@ -107,10 +107,29 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
           walked: s[12], touches: s[13], deaths: s[14], generations: s[15],
         };
       },
-      // Chase-camera collision: clear fraction of the segment from → eye.
-      clearance: (f, e) => wasm.creature_camera_clearance(f[0], f[1], f[2], e[0], e[1], e[2]),
       // Right click: a ray against his mesh. Returns "left", "right" or null.
       touch: (o, d) => [null, "left", "right"][wasm.creature_touch_ray(o[0], o[1], o[2], d[0], d[1], d[2])],
+    },
+
+    // The original game camera (crates/engine/src/camera.rs), ticked with
+    // the simulation. Returns the previous and the current tick's view, so
+    // the renderer can interpolate between them; null before a world loads.
+    camera: {
+      state() {
+        const p = wasm.camera_state();
+        if (!p) return null;
+        const f = new Float32Array(wasm.memory.buffer, p, 32);
+        const view = (o) => ({
+          eye: [f[o + 1], f[o + 2], f[o + 3]],
+          forward: [f[o + 4], f[o + 5], f[o + 6]], // unit vectors of the
+          up: [f[o + 7], f[o + 8], f[o + 9]], //      original's view matrix
+          look: [f[o + 10], f[o + 11], f[o + 12]], // filtered look-at point
+          // The camera key in use: object id (0 = the section's default
+          // key), polygon, and its style's mode (0..11, see objects.md §6).
+          key: { object: f[o + 13], polygon: f[o + 14], mode: f[o + 15] },
+        });
+        return f[16] ? { prev: view(0), cur: view(16) } : null;
+      },
     },
 
     // Smacker movies. The engine takes ownership of the uploaded bytes.

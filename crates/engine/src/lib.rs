@@ -8,6 +8,7 @@
 //! fills the buffer, then passes `(ptr, len)` to an `*_open` function, which
 //! takes ownership. JavaScript must not touch or free that buffer afterwards.
 
+mod camera;
 mod creature;
 mod sim;
 mod world;
@@ -163,6 +164,8 @@ struct Worlds {
     data: Vec<u8>,
     mesh: Option<world::WorldMesh>,
     sim: Option<sim::Sim>,
+    /// The original game camera, ticked after the simulation (camera.rs).
+    camera: Option<camera::Camera>,
     /// Host events handed out by the last `sim_tick`.
     events: Vec<sim::HostEvent>,
 }
@@ -180,7 +183,7 @@ pub extern "C" fn worlds_open(ptr: *mut u8, len: usize) -> i32 {
         Err(_) => return -1,
     };
     WORLDS.with(|w| {
-        *w.borrow_mut() = Some(Worlds { data, mesh: None, sim: None, events: Vec::new() })
+        *w.borrow_mut() = Some(Worlds { data, mesh: None, sim: None, camera: None, events: Vec::new() })
     });
     n
 }
@@ -204,6 +207,9 @@ pub extern "C" fn world_build(i: usize) -> i32 {
         if let (Some(body), Some(brain)) = (body, brain) {
             sim.creature = Some(creature::Creature::new(&section, &mesh, body, brain));
         }
+        let mut cam = camera::Camera::new(&section);
+        cam.start_level(&sim);
+        worlds.camera = Some(cam);
         worlds.sim = Some(sim);
         worlds.mesh = Some(mesh);
         n
@@ -290,7 +296,13 @@ pub extern "C" fn sim_tick(n: u32) -> u32 {
         let Some(worlds) = guard.as_mut() else { return 0 };
         let (Some(sim), Some(mesh)) = (worlds.sim.as_mut(), worlds.mesh.as_mut()) else { return 0 };
         for _ in 0..n {
+            let before = sim.events.len();
             sim.step(mesh);
+            // Game_Tick order: objects → creature → camera.
+            if let Some(cam) = worlds.camera.as_mut() {
+                let snap = sim.events[before..].iter().any(|e| e.kind == sim::EV_CAMERA_SNAP);
+                cam.tick(sim, snap);
+            }
         }
         worlds.events = std::mem::take(&mut sim.events);
         worlds.events.len() as u32
@@ -300,6 +312,17 @@ pub extern "C" fn sim_tick(n: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn sim_events_ptr() -> *const sim::HostEvent {
     WORLDS.with(|w| w.borrow().as_ref().map_or(core::ptr::null(), |w| w.events.as_ptr()))
+}
+
+/// The original camera (camera.rs): 2 × 16 f32, the previous tick's view
+/// then the current one, so the browser can interpolate between them.
+/// Each: valid, eye xyz, forward xyz, up xyz, look-at xyz, key object id
+/// (1-based, 0 = the section's default key), key polygon, style mode.
+#[no_mangle]
+pub extern "C" fn camera_state() -> *const f32 {
+    WORLDS.with(|w| {
+        w.borrow().as_ref().and_then(|w| w.camera.as_ref()).map_or(core::ptr::null(), |c| c.samples.as_ptr() as *const f32)
+    })
 }
 
 /// Takes the vertex range patched since the last call. Returns -1 if
@@ -467,15 +490,4 @@ pub extern "C" fn creature_touch_ray(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32
         }
     });
     out
-}
-
-/// Chase-camera collision: the clear fraction (0..1) of the segment from
-/// `(fx, fy, fz)` to the eye `(ex, ey, ez)` (see `Creature::camera_clearance`).
-#[no_mangle]
-pub extern "C" fn creature_camera_clearance(fx: f32, fy: f32, fz: f32, ex: f32, ey: f32, ez: f32) -> f32 {
-    WORLDS.with(|w| {
-        let guard = w.borrow();
-        let Some(sim) = guard.as_ref().and_then(|w| w.sim.as_ref()) else { return 1.0 };
-        sim.creature.as_ref().map_or(1.0, |c| c.camera_clearance(sim, [fx, fy, fz], [ex, ey, ez]))
-    })
 }
