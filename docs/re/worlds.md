@@ -188,11 +188,34 @@ textures (marble, lava, water, alien skins...); each goes to
 `Renderer_AddTexture128` @ `0x405580`, which allows at most 40 — matching
 `"Not a vaild texture index"` (`0x40f4ca`, asserts `index < 0x28`).
 
-### 5.3 Colour ramps — layout observed, meaning unknown
+### 5.3 Colour ramps are materials — decoded
 
 `Renderer_ReadColorRamps` @ `0x42ece0`: `u16 count` (62 in every section),
-then `count x u16[6]`, each divided by 65535 and passed as six floats to a
-renderer virtual. Plausibly two RGB endpoints of a gradient.
+then `count x u16[6]`, each divided by 65535 and passed in order to
+`0x405620`, which appends them to the renderer's material table (`+0x1864`,
+24 bytes each). A frame's shade number (`+6`, stored at polygon `+0x60` by
+`0x402450`) selects the polygon's material. `0x401b70` turns it into a light
+level (polygon `+0x66`, a row of the 32-row lighting table, `pow(2, 5)` at
+`0x40346f`):
+
+```text
+L     = m0 + m2·ambient − Σ lights m3·intensity·(n·l)   (only n·l < 0 counts)
+t     = min(L / 2, 0.5) + m1, at most 1
+level = trunc(t · 31)
+```
+
+| field | meaning (section 0's values) |
+| --- | --- |
+| `m0` | base light: 0.35 … 1.0 in steps, so `t` reaches the middle row (0.5) at `m0 = 1` |
+| `m1` | over-brightening past the middle row, towards white (0 … 0.23) |
+| `m2` | ambient factor (1 or 0); the ambient itself is `trunc(u16 / 65535)` (`0x42e940`), 0 on the CD |
+| `m3` | directional-light factor (1 for materials 0–16, else 0) |
+| `m5` | read as a per-span switch by the software renderer (`0x404660`); 0 for 34–48 (inferred: fog off) |
+
+Materials 49–61 (base 0 … 0.41, unlit) are glass materials, see `-4` in §5.5.
+In Direct3D (`0x40c330`) a level below the middle row becomes a grey of
+`level / 16 · 255` that modulates the texture; above it the grey is 255 and
+the rest goes to the specular highlight.
 
 ### 5.4 The world sound set — observed
 
@@ -290,9 +313,16 @@ only gates the flags**: `0x42df50` (state change) and `0x42e050`
 offset (slot 0x18, `0x41dbc0`) of every frame, enabled or not. Flip-books
 are typically one enabled frame followed by disabled `-2`/`-3` frames that
 only slide the offset (section 1's pad #49 polygon 0: `(8, e1)` then
-`(-3, e0, +4/+4) × 31`): the polygon keeps texture 8 all along. `-4` sets
-a per-polygon flag (`0x4023b0` → polygon `+0x62`; the last polygon's value
-also goes to the object, `0x4022f0`), meaning unknown; `-5` hides the
+`(-3, e0, +4/+4) × 31`): the polygon keeps texture 8 all along. `-4` is
+**glass**: every applied frame sets the polygon's flag `+0x62` to
+`texture == -4` (`0x423791` → `0x4023b0`) and leaves the texture alone.
+Direct3D draws glass in bucket `0x27` of `0x40f000` with depth writes off,
+alpha blending on with the start-up factors `ONE, ONE` (`0x40a640`), no
+texture and no culling, skipping polygons whose level is 0; its grey is
+half the usual (`0x40c330`). The software renderer (`0x404660`) never lets
+glass hide a span: it adds the glass level to the light level of the
+surface behind. Section 0's intro capsule #3 is glass: material 49 (level
+0, invisible) while docked, 17–19 during the ride. `-5` hides the
 object (`0x4022e0`). The port once read `enabled == 0` as "not drawn",
 which blanked every flip-book polygon on all but its first frame (the
 "invisible pad under a floating Mendel" of section 1).
@@ -343,7 +373,7 @@ polygon counts equal to mesh polygon counts, and the four sound qualities.
 * What the 32 x 32 axes of the shade table are (light x fog? light x depth?).
 * Exact UV rule for polygons with more than 4 vertices, and the meaning of the
   appearance `flags` bits.
-* The 62 colour ramps, the `folder` and `flags` object fields, the camera key
+* The `folder` and `flags` object fields, the camera key
   fields, the 468-byte trailer.
 * Why there are 8 sections when the readme talks about 5 worlds (the overlay
   table has 5 entries — maybe 3 sections are hub/tutorial spaces).

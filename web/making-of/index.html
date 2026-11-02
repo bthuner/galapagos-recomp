@@ -659,6 +659,25 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           The same misreading had broken clicks: a flip-book polygon was only clickable on its first frame. Picking
           now reads the polygon's own flag array, as the exe does (<code>0x408730</code>).
         </p>
+        <h3>Glass, and the ramps that were materials</h3>
+        <p>
+          In the footage the intro capsule is a pale, see-through prism with Mendel visible inside. Ours had no
+          glass at all: its twelve panes carry texture number <code>−4</code>, which we had never implemented. The
+          frame applier says what −4 means (<code>0x423791</code>): "this polygon is glass", and the Direct3D renderer
+          gives glass a draw bucket of its own (<code>0x40f000</code>) with four render states: no depth writes,
+          blending on, no texture, no culling. The blend factors, set once at start-up, are <code>ONE, ONE</code>.
+          So 1997's glass isn't transparent in the modern sense. It <em>adds</em> a little grey light onto whatever
+          lies behind it, which is why it washes the red interior out towards pink and shows as grey over black.
+        </p>
+        <p>
+          How much grey? Our first try used the polygon's ordinary light and came out as solid white: front and
+          back panes both add, and each added far too much. The real answer came from the 62 "colour ramps" in
+          every section, which we'd parsed back in chapter 04 and labelled "meaning unknown". They are
+          <em>materials</em>: a base light, an over-brightening amount, ambient and directional factors. A pane's
+          brightness depends only on its material, and the capsule switches material with its state: material 49
+          (base 0, nothing to draw) while docked, 17–19 during the ride. The glass appears exactly when the
+          capsule takes off, as in the video. WebGL draws it the 1997 way: a last pass after everything else, Mendel
+          included, with additive blending and depth writes off.
         <p>
           A day later the blinking was back on screen, with the fix already merged. We measured instead of guessing:
           sampling every polygon's texture layer each frame in the running page found the exact old pattern (texture,
@@ -704,6 +723,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> All twelve afflictions (floor-driven, with palette-script screen effects) and all five predator classes, ported. Saves move to GLPS v2.</li>
           <li><time>2026‑11‑02</time> The original polygon walker replaces our ray-cast controller: Mendel stands on sideways and upside-down pads, rides platforms in their own coordinates, and saves remember places on polygons (GLPS v3). Fixed the object rotation order and the three motion-path modes on the way.</li>
           <li><time>2026‑11‑02</time> The "enabled" byte gates collision flags, not drawing: flip-book polygons (pad #49 and thousands more) stop flickering and stay clickable. Section 2's fast belt checked against the exe: 139 units per tick is the original speed.</li>
+          <li><time>2026‑11‑02</time> Glass: <code>−4</code> frames are additive, untextured panes, and the "colour ramps" are materials. The intro capsule turns into the footage's grey veil when its ride starts.</li>
           <li><time>2026‑11‑02</time> Blinking reported again: traced to a browser serving the pre-fix engine from its cache. Checked against the footage; the engine is now always revalidated before use.</li>
         </ol>
       </section>
