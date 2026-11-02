@@ -851,8 +851,12 @@ impl Sim {
                     .filter_map(|&k| verts.get(k as usize))
                     .map(|v| apply(&t, [v[0] as f32, v[1] as f32, v[2] as f32]))
                     .collect();
-                for k in 1..pts.len().saturating_sub(1) {
-                    if let Some(d) = ray_triangle(origin, dir, pts[0], pts[k], pts[k + 1]) {
+                // The exe tests the hit point against the polygon's own edges
+                // (`0x4076d0` → `0x407830`, a crossing count), so a ring's
+                // hole is a hole: the renderer's triangles cover exactly that
+                // area (`world::triangulate`), a fan from vertex 0 does not.
+                for [a, b, c] in crate::world::triangulate(&pts) {
+                    if let Some(d) = ray_triangle(origin, dir, pts[a], pts[b], pts[c]) {
                         if best.is_none_or(|(bd, _, _)| d < bd) {
                             best = Some((d, i as u16 + 1, flags));
                         }
