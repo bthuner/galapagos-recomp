@@ -396,6 +396,17 @@ pos = first_stream_with_valid_crc(overlay)
           so every world gains holes and notches it never had in our port. Clicking uses the real outline too: a click
           in the pool now reaches the invisible save pad underneath and offers to save, as it should.
         </p>
+        <p>
+          The same mistake had been locking Mendel in. Walls with windows and doorways are rings too: one
+          "keyhole" outline that runs round the wall, along a zero-width bridge, round the opening the other way
+          and back. So our walls were drawn solid, and worse, they <em>were</em> solid, because our collision code
+          fanned polygons as well. The exe never triangulates for collision. <code>World_Cast</code> finds where a
+          ray crosses a polygon's plane, then counts crossings of the polygon's own edges (<code>0x407830</code>),
+          a classic inside/outside test on the real outline, so a hole stays a hole. Our probes now cast against
+          the ear-clipped triangles, which cover exactly the same area. Mendel walks through the walkway's window
+          into the corridor, the intro capsule enters the hall through its hexagonal opening without crossing a
+          single solid polygon, and in World 2 the belt carries him through a wall's opening onto the next belt.
+        </p>
         <h3>The predator that never shipped</h3>
         <p>
           The exe knows a fourth hunter, <code>PMan</code>, and no world on the CD uses it. Its chase
@@ -918,6 +929,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> Mendel turned by the exe's own render angles (<code>0x412180</code>), the capsule's lean included, and the shield's sliding skin.</li>
           <li><time>2026‑11‑03</time> Correction: the objects' shape morphs were never ported. They carry each polygon's texture coordinates, so the whole world was mis-textured, and they raise the start room's flame curtains. With them, the intro matches the footage. The "different build" verdict of the day before is withdrawn.</li>
           <li><time>2026‑11‑03</time> Concave polygons ear-clipped as <code>0x40be00</code> does: the save pads' rims no longer cover their shimmering pools, and 816 polygons across the CD regain their holes.</li>
+          <li><time>2026‑11‑03</time> Collisions cast against the real outlines too: doorways and windows open, Mendel walks between rooms, and the intro capsule flies through the hall's opening.</li>
           <li><time>2026‑11‑02</time> <code>PMan</code>, the unused fourth predator, ported and tested on a re-classed fork; the shared chase now holds its heading between re-aims, and predators face their prey.</li>
           <li><time>2026‑11‑02</time> The bounce response (<code>0x408c50</code>) ported exactly, for predators and the camera: a perpendicular push only when the probe went behind the wall, plus the stored normal's nudge.</li>
           <li><time>2026‑11‑02</time> Level load enters every initial state before the first tick, as <code>0x4222d0</code> does: World 2 (and World 1) now spawn Mendel without "Wake every machine".</li>
