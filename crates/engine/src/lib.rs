@@ -8,6 +8,7 @@
 //! fills the buffer, then passes `(ptr, len)` to an `*_open` function, which
 //! takes ownership. JavaScript must not touch or free that buffer afterwards.
 
+mod camera;
 mod creature;
 mod sim;
 mod sound;
@@ -164,6 +165,8 @@ struct Worlds {
     data: Vec<u8>,
     mesh: Option<world::WorldMesh>,
     sim: Option<sim::Sim>,
+    /// The original game camera, ticked after the simulation (camera.rs).
+    camera: Option<camera::Camera>,
     /// Host events handed out by the last `sim_tick`.
     events: Vec<sim::HostEvent>,
     /// Sound banks, indexed by `sound::BANK_*`: the current section's,
@@ -202,6 +205,7 @@ pub extern "C" fn worlds_open(ptr: *mut u8, len: usize) -> i32 {
             data,
             mesh: None,
             sim: None,
+            camera: None,
             events: Vec::new(),
             banks,
             age: DEFAULT_AGE,
@@ -248,6 +252,10 @@ fn build_section(worlds: &mut Worlds, i: usize) -> i32 {
     // A level starts with a world snapshot: dying before any save brings
     // the level back to this instant (`0x41caf3` → `Game_TakeSnapshot`).
     sim.take_snapshot();
+    // `Camera_Init` at level load: the section's default key.
+    let mut cam = camera::Camera::new(&section);
+    cam.start_level(&sim);
+    worlds.camera = Some(cam);
     worlds.sim = Some(sim);
     worlds.mesh = Some(mesh);
     n
@@ -339,7 +347,13 @@ pub extern "C" fn sim_tick(n: u32) -> u32 {
         let Some(worlds) = guard.as_mut() else { return 0 };
         let (Some(sim), Some(mesh)) = (worlds.sim.as_mut(), worlds.mesh.as_mut()) else { return 0 };
         for _ in 0..n {
+            let before = sim.events.len();
             sim.step(mesh);
+            // Game_Tick order: objects → creature → camera.
+            if let Some(cam) = worlds.camera.as_mut() {
+                let snap = sim.events[before..].iter().any(|e| e.kind == sim::EV_CAMERA_SNAP);
+                cam.tick(sim, snap);
+            }
         }
         worlds.events = std::mem::take(&mut sim.events);
         worlds.events.len() as u32
@@ -349,6 +363,17 @@ pub extern "C" fn sim_tick(n: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn sim_events_ptr() -> *const sim::HostEvent {
     WORLDS.with(|w| w.borrow().as_ref().map_or(core::ptr::null(), |w| w.events.as_ptr()))
+}
+
+/// The original camera (camera.rs): 2 × 16 f32, the previous tick's view
+/// then the current one, so the browser can interpolate between them.
+/// Each: valid, eye xyz, forward xyz, up xyz, look-at xyz, key object id
+/// (1-based, 0 = the section's default key), key polygon, style mode.
+#[no_mangle]
+pub extern "C" fn camera_state() -> *const f32 {
+    WORLDS.with(|w| {
+        w.borrow().as_ref().and_then(|w| w.camera.as_ref()).map_or(core::ptr::null(), |c| c.samples.as_ptr() as *const f32)
+    })
 }
 
 /// Takes the vertex range patched since the last call. Returns -1 if
@@ -523,17 +548,6 @@ pub extern "C" fn creature_touch_ray(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32
     out
 }
 
-/// Chase-camera collision: the clear fraction (0..1) of the segment from
-/// `(fx, fy, fz)` to the eye `(ex, ey, ez)` (see `Creature::camera_clearance`).
-#[no_mangle]
-pub extern "C" fn creature_camera_clearance(fx: f32, fy: f32, fz: f32, ex: f32, ey: f32, ez: f32) -> f32 {
-    WORLDS.with(|w| {
-        let guard = w.borrow();
-        let Some(sim) = guard.as_ref().and_then(|w| w.sim.as_ref()) else { return 1.0 };
-        sim.creature.as_ref().map_or(1.0, |c| c.camera_clearance(sim, [fx, fy, fz], [ex, ey, ez]))
-    })
-}
-
 // ——— Sounds ——————————————————————————————————————————————————————————
 //
 // JavaScript fetches each sample once (lazily, when an event first asks for
@@ -635,10 +649,20 @@ pub extern "C" fn game_load(ptr: *mut u8, len: usize) -> i32 {
             return -2;
         }
         let (Some(sim), Some(mesh)) = (worlds.sim.as_mut(), worlds.mesh.as_mut()) else { return -2 };
-        match sim.load_game(&data, mesh) {
+        let r = match sim.load_game(&data, mesh) {
             Ok(()) => 0,
             Err(_) => -3,
+        };
+        // The restored Mendel stands where he was saved: start the camera
+        // afresh from there, as `Camera_Init` does after a respawn.
+        if let Ok(archive) = Archive::parse(&worlds.data) {
+            if let (Ok(section), Some(sim)) = (archive.world(section as usize), worlds.sim.as_ref()) {
+                let mut cam = camera::Camera::new(&section);
+                cam.start_loaded(sim);
+                worlds.camera = Some(cam);
+            }
         }
+        r
     })
 }
 

@@ -251,7 +251,7 @@ pos = first_stream_with_valid_crc(overlay)
           Platforms move along keyframed paths (position, rotation, step count), expanded into one pose per tick by
           integer interpolation. A full turn is 1024 units, the classic fixed-point circle. Clicking casts a
           25,000-unit ray from the camera, and the polygon's current appearance frame decides whether it can be
-          picked. The same flag bits mark ground (bit 8) and hazards (bit 30). The camera is attached to the
+          picked. The same flag bits mark floors (bit 1), walls (bit 8) and hazards (bit 30). The camera is attached to the
           <em>floor</em>: every polygon has a camera key, and when Mendel steps onto it, that key's position and
           one of 33 motion styles take over. That's where the game's sweeping, cinematic camera comes from.
         </p>
@@ -305,8 +305,8 @@ pos = first_stream_with_valid_crc(overlay)
           hadn't:
         </p>
         <ul class="strings">
-          <li><b>He's born on a ceiling</b><span>the start point sits exactly on the roof of a birth tube; he only falls in because polygons are one-sided, solid only from their front</span></li>
-          <li><b>The intro is a ride</b><span>a capsule docks around the tube and carries him for 130 s along a 1,992-frame motion path; holding Space (the <code>STel</code> object) skips it</span></li>
+          <li><b>He's born on a floor</b><span>the start disc is the floor of a birth tube. (Our first port had him born on its <em>ceiling</em>: with the wrong "up", see <a href="#up-is-z">Up is Z</a>.)</span></li>
+          <li><b>The intro is a ride</b><span>the disc hands its floor down a stack of four polygons, a capsule docks around the tube, takes over the floor and carries him for 133 s along a 1,992-frame motion path to the arrival pad; holding Space (the <code>STel</code> object) skips it</span></li>
           <li><b>Riding platforms</b><span>he keeps his position <em>and</em> orientation in the platform's frame, so a rolling capsule rolls him too</span></li>
           <li><b>Footsteps wake the world</b><span>dropped on a platform, his touch event climbs the folder chain and a sleeping upper level wakes within 20 ticks</span></li>
         </ul>
@@ -317,9 +317,8 @@ pos = first_stream_with_valid_crc(overlay)
         </p>
         <p>
           Some parts are honest stand-ins, each marked <code>// inferred:</code> or <code>// not in the original:</code>
-          in the code. The original walks from polygon to polygon; ours is a ray-cast character controller. The
-          camera is a chase camera, not yet the game's per-floor camera keys. Creature sounds, afflictions, and the
-          world snapshot a death restores aren't ported yet.
+          in the code. The original walks from polygon to polygon; ours is a ray-cast character controller.
+          Afflictions aren't ported yet.
         </p>
       </section>
 
@@ -412,7 +411,7 @@ wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></c
         <ul class="strings">
           <li><b>Texture coordinates</b><span>none on disk; the exe's polygon initialiser gives the first three vertices texels (0,127), (0,0), (127,0), which defines an affine map across the polygon</span></li>
           <li><b>Lighting</b><span>a gentle Lambert term, plus fade-to-black with distance up to the section's far-clip, the two jobs the 256 KB shade table did</span></li>
-          <li><b>Which way is up</b><span>Y points down, like screen coordinates; rendered Y-up, every tower hung from the sky</span></li>
+          <li><b>Which way is up</b><span>Z, floors face +z. Our first guess was "Y points down" (rendered Y-up, every tower hung from the sky, and Y-down looked right from far away); it took the camera port to prove it wrong, see <a href="#up-is-z">Up is Z</a></span></li>
         </ul>
         <p>
           <b>Footage as a test oracle.</b> The first viewer looked wrong next to a 1997 gameplay video: too dark, and the
@@ -525,6 +524,41 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           We do exactly that in a few dozen lines. Saved games are our own documented format ("GLPS", about 52 KB),
           stored in the browser next to the cached CD.
         </p>
+        <h3>The original camera, key by key</h3>
+        <p>
+          The designers never scripted a camera path. They gave every polygon of every object a camera key, and the
+          camera ports that literally: when Mendel steps on a polygon, its key becomes the destination. A
+          trapezoidal mover travels there (accelerate, cruise, brake to stop on the key), a critically damped
+          alpha-beta filter smooths the result into the slightly lagging sweep of the footage, and the view is
+          rebuilt from eye to Mendel with a roll measured in the frame of the floor he stands on. It is all
+          integer maths, down to the engine's own sine tables, and it runs at 24 Hz; the browser only
+          interpolates between the last two ticks.
+        </p>
+        <h3 id="up-is-z">Up is Z: correcting our first guess</h3>
+        <p>
+          The camera code kept saying something our engine didn't believe. It calls a floor "upright" when its
+          normal is <code>(0, 0, 0x400)</code>. Mendel's contact record resets to that same vector. Every portal pad is
+          an octagon in the xy plane, facing +z. We had decided on day one, from a distant orbit view, that "Y points
+          down", and from far away a Y-down world looks fine. Up close it did not: next to the 1997 footage, our
+          Mendel clung to the <em>side</em> of the arrival pad and was born on the ceiling of his tube, while in the
+          video he stands upright on top of the pad.
+        </p>
+        <p>
+          The creature code settled it. The ten hull points are plain <code>x, y, z</code> triples in his own frame,
+          the last one being his feet at <code>(0, 0, −450)</code>; we had read them as <code>x, z, y</code> to fit
+          Y-down. Airborne, gravity is added along his up vector, and leaving a surface resets it to +z. Walking
+          adds <code>cos</code> to the first surface coordinate and <code>sin</code> to the second, so a heading turns in the xy
+          plane. Two more findings fell out of the correction. Floors are flag bit 1, the bit the mover's floor
+          finder casts for, and walls are bit 8, which we had taken for "ground". A portal's offset is measured from
+          its polygon's first vertex, in the polygon's own frame, and on every pad on the CD it lands exactly on
+          the polygon's centre.
+        </p>
+        <p>
+          With +Z up, the intro plays as designed, with nothing scripted on our side. Mendel appears on the start
+          disc, the floor steps down the disc's stack of polygons, the capsule takes over, rolls him through the
+          sky and drops him on the arrival pad. The lesson for the rest of the project: a guess that "looks right"
+          from far away is still a guess. Ask the code that has to live with it, here the camera.
+        </p>
       </section>
 
       <section id="journal" class="chapter">
@@ -543,6 +577,8 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> Sound: world emitters with 3-D panning, Mendel's five cues, the best of four stored qualities. Found that emitter sound numbers are 1-based by counting empty slots.</li>
           <li><time>2026‑11‑02</time> Menus from the exe's resource tables: pause menu, Preferences with the original options (all working, including 8-bit Fidelity), new game by age, .mnd import/export.</li>
           <li><time>2026‑11‑02</time> Save pads, world snapshots that rewind the world but not Mendel's mind, saved games in the browser, and the original time screen between levels.</li>
+          <li><time>2026‑11‑02</time> The original camera, ported from <code>Camera_Update</code>: per-polygon keys, 33 styles, 12 eye modes, integer filters.</li>
+          <li><time>2026‑11‑02</time> Correction: the world is Z-up, not Y-down. Mendel now stands on floors (flag bit 1), is born on the start disc, rides the capsule and lands on the arrival pad as in the footage. Polygons with negative texture numbers (collision geometry such as the birth tube) are no longer drawn.</li>
         </ol>
       </section>
 

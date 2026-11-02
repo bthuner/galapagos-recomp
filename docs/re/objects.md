@@ -204,7 +204,7 @@ candidates). Masks seen:
 | `0x00000001` | mouse click with a configured key held | bit 0 is set on **`MEnc`** polygons only |
 | `0x00000100` | creature (`0x41859a`) | bit 8: ground/contact (8,679 frames) |
 | `0x40000100` | creature (`0x419122`) | + bit 30: set only on `PBal`/`PFrk` polygons (hazards) |
-| `0x00000102`, `0x00000002` | camera (`0x413d43`, `0x411ee4`) | camera collision (inferred) |
+| `0x00000102`, `0x00000002` | camera (`0x413d43`, `0x411ee4`) | camera wall probes, modes 7–9 (`0x413cb0`; observed, §6) |
 
 The hit object is stored as the registry's picked object
 (`ObjectRegistry_SetPicked` @ `0x406b50`) and the hit record is copied into
@@ -317,10 +317,10 @@ classes:
 
 | Kind | Effect | Args |
 |-----:|--------|------|
-| 1 | teleport Mendel next to this object (`Game_RequestTeleport` @ `0x41c690`, executed by `Game_ExecuteTeleport` @ `0x41c700`) | `ints[0]` mode, `ints[1..3]` offset, `ints[4]` heading (1024ths) |
-| 2 | same + camera snap (`Camera_Snap` @ `0x4129a0`) | same |
+| 1 | teleport Mendel next to this object (`Game_RequestTeleport` @ `0x41c690`, executed by `Game_ExecuteTeleport` @ `0x41c700`) | `ints[0]` the polygon of this object that becomes his floor contact (§6), `ints[1..3]` offset, `ints[4]` heading (1024ths) |
+| 2 | same + camera snap (`Camera_Init` @ `0x4129a0`, §6) | same |
 | 3 | **dimensional gate** (`Game_RequestSectionChange` @ `0x41c6e0`) | `ints[0]` destination section, `ints[1]` level number |
-| 4 | **spawn Mendel** (`Game_SpawnCreature` @ `0x41c590`) — every `Strt` | mode, offset, heading, 3 extra ints |
+| 4 | **spawn Mendel** (`Game_SpawnCreature` @ `0x41c590`) — every `Strt` | contact polygon, offset, heading, 3 extra ints |
 | 5, 6 | Mendel reaction only; the reaction ends in respawn reason 5 (kind 5: **game completed**) or 3 (kind 6: respawn from the snapshot), see `saves.md` | — |
 | 7 | teleport + reaction | as 1 |
 
@@ -363,36 +363,154 @@ two rows of 8, 3,700 units apart, each placing Mendel at a fixed offset
 facing 256 or 768 — a corridor of stepping-stone transporters; section 5
 has 7 in a chain.
 
-## 6. Camera — observed layout, inferred behaviour
+## 6. Camera — observed, ported in `crates/engine/src/camera.rs`
 
-`Cmra` holds one path per object (`n` = total object count, verified) and
-**one key per polygon of that object** (689 non-empty paths, each with
-exactly `polygon_count` keys). It is not a spline: it is a lookup table.
-Each tick `Camera_Update` @ `0x412d50` asks the creature which polygon it
-stands on (`0x4124a0` → object id, polygon index); if that changed and the
-polygon's key has `a != 0`, the key becomes the camera target
-(`Camera_ApplyPolygonKey` @ `0x412f60`), and the camera chases it every
-tick (`0x407030`, `0x4070b0`) with the smoothing of the key's *style*.
+There are no camera paths. The designers gave **every polygon of every
+object a camera key** (`Cmra` record: one path per object, one key per
+polygon, 689 non-empty paths). When Mendel's floor contact moves to a
+polygon whose key is set, that key becomes the camera's destination. The
+camera *always looks at Mendel*; a key decides where the eye goes, how it
+gets there, and the roll.
 
 ```text
-CameraKey (20 bytes)
-u8  a          1 = this polygon defines a camera
-u8  b          style index 0..32
-i32 x, y, z    camera position (absolute, or offset; depends on style.mode)
-u16 c[3]       orientation, 1024ths of a turn (inferred)
+CameraKey (20 bytes in the file, 24 in memory)       Camera_ReadPaths @ 0x413e80
+u8  a          1 = this polygon has a camera            observed
+u8  b          style index (read as signed char)        observed
+i32 x, y, z    eye position, absolute or relative       observed
+i16 yaw, pitch, roll   1024ths of a turn                observed: stored at
+                       +0x12, +0x10, +0x14              (the reader's order)
+
+CameraStyle (14 bytes, 33 of them, identical in all sections)  @ 0x414060
+u32 d_look     16.16 tracker constant for the look-at point     observed
+u32 d_eye      16.16 tracker constant for the eye               observed
+i16 accel      eye mover acceleration, units/tick²              observed
+i16 max        eye mover top speed, units/tick                  observed
+i16 mode       0..11, see below                                 observed
 ```
 
-The 468-byte "section trailer" is the style table, identical in all eight
-sections (`Camera_ReadStyles` @ `0x414060`):
-`u32 (ignored); u16 33; 33 x { u32 damping[2] (16.16: 0.6..0.95); i16 a, b (15/300, 20/300, 30/700, 7/150, 30/500); i16 mode }`.
-Modes (from `0x412f60`): 0 and 7 fixed world point; 1, 8 and 4 relative to
-the object Mendel stands on (`0x4230d0`); 2, 3, 9, 5, 6 relative to Mendel
-(`0x4183a0`); 10, 11 x/y from the object, z from Mendel. The styles come in
-triples (modes 0/1/2 with the same damping), so a designer picked "fixed,
-object-relative or Mendel-relative" and a smoothness. The "sweeping,
-cinematic" feel of the footage is this: per-floor-tile camera targets with
-exponential smoothing. Polygons with `a = 0` keep the previous camera, and
-the default key is used at load time.
+Checks against the data: section 0's default key, read as (yaw, pitch,
+roll), aims at the `Strt` pad within 1° (test
+`camera_follows_mendel_in_section0`). Two keys (sections 0 and 5) have
+`b = 0xff`, i.e. style −1, which reads before the table in the original:
+we ignore them.
+
+### The pipeline (classes `0x427780` → `0x414a40` → `0x406e70` → camera `0x412700`)
+
+`Camera_Update` @ `0x412d50`, called by `Game_Tick` after the creature:
+
+1. Read Mendel's contact (`0x4124a0`: object, polygon, polygon record).
+   No contact at all: do nothing. If (object, polygon) differs from the
+   current key's and that polygon's key has `a = 1`:
+   `Camera_ApplyPolygonKey` @ `0x412f60`, then `0x407030` (retarget).
+   A polygon without a key keeps the current one, **and the current
+   key's object and surface stay the reference**.
+2. **Mover** (`0x4278c0`): the eye point travels in a straight line to
+   the key with a trapezoid speed profile: `speed += accel` up to `max`
+   until the remaining distance is below the braking distance
+   (`Σ 0, accel, 2·accel … ≤ max`, or half the trip if shorter), then
+   `speed -= accel`; `pos += delta · speed / total`. Distances use
+   `0x430fa0`: `max + 3/8·(the other two) − max/16`.
+3. **Reference** (vtable `+0x14` @ `0x4136d0`): the mover's point is made
+   absolute according to the style's mode:
+
+   | mode | eye = | notes |
+   |---:|---|---|
+   | 0 | key | world point |
+   | 1 | key + object position | object = the key's object (`0x4230d0`) |
+   | 2 | key + Mendel | Mendel = creature `+0xa34` (`0x4183a0`) |
+   | 3 | as 2 | holds still while Mendel is off the ground (`0x412400`) |
+   | 4 | object + R·key | R = the object's rotation (`0x409880`) |
+   | 5 | Mendel + R·key | (`0x409940`) |
+   | 6 | as 5 | held off the ground |
+   | 7, 8, 9 | as 0, 1, 2 | after wall probes (`0x413cb0`, below) |
+   | 10 | x, y: object + R·key; z: Mendel + (R·key).z | |
+   | 11 | as 10 | held off the ground |
+
+   On a key change (`0x412f60`) the camera's current absolute eye is
+   re-expressed in the new key's frame (minus the reference, rotated by
+   R⁻¹ for 4/5/6/10/11), so the move starts from where the camera is.
+4. **Trackers** (`0x406a50`, one per axis, eye and look-at): a
+   critically damped alpha-beta filter in 16.16,
+   `α = 1 − d²`, `β = (1 − d)²`; `pred = out + vel>>16`,
+   `err = x − pred`, `out = pred + α·err>>16`, `vel += β·err`. The eye
+   uses `d_eye`, the look-at point (Mendel) `d_look`. On a key change the
+   trackers keep their state and only change `d`; if `d_eye` changes the
+   mover first restarts from the tracker's output (`0x414c10`). Mover
+   acceleration and top speed are only loaded at `Camera_Init`.
+5. **Orientation** (`Camera_Orient` @ `0x4134e0`): yaw and pitch from
+   eye → look-at (`0x430c50`); the roll travels from the current roll to
+   the key's along the mover's progress (`0x4070b0`), and is expressed in
+   the frame of the key's polygon (`0x4312b0`: the rotation taking +z to
+   the polygon normal). `Camera_KeyRoll` @ `0x4132d0` measures a key's
+   roll in that frame. Net effect: the key's up direction relative to its
+   surface is kept whichever way the camera looks. Polygons whose normal
+   is exactly +z (`nz = 0x400`) skip the frame and use the roll as is.
+6. The renderer gets eye + (pitch, yaw, roll) (`View_SetCamera` @
+   `0x403870`) and builds its matrix with `0x4302e0`: rows = right,
+   forward (camera y = depth), up (camera z = screen up; projection
+   `0x401640`: `sx = cx + x·f/y`, `sy = cy − z·f/y`).
+
+The fixed-point library: sine/cosine tables × 16384 and an arctangent
+table, built at start-up by `0x4308c0` (round half up);
+`Math_RotationMatrix` `0x430ce0` and its transpose `0x430e40` (4.12
+`short[9]`; checked against the assembly: Ghidra drops a sign in
+element 1); `0x431b50` A·B, `0x431ad0` v·M.
+
+**Wall probes** (`0x413cb0`, modes 7–9 only, mask `0x102`): six probes of
+±700 along each axis from last tick's eye; a polygon crossing one pushes
+the eye (and the trackers' state) out along its normal so the probe tip
+sits 8 units in front of it.
+
+**Field of view** (`View_Init` @ `0x4033bb`): 110°, used as a focal
+length of `width / tan 55°` with square pixels (`0x403580`). inferred:
+"width" is the full viewport width, which gives ≈ 56° vertically on 4:3.
+
+**Interpolation**: the tick takes a sub-tick fraction (`(d·p >> 8) − d +
+cur`), but `Game_Tick` passes a full tick (`0x100`, `0x422230`); the
+browser interpolates between the last two ticks instead (not in the
+original).
+
+### When the camera cuts — observed
+
+`Camera_Init` @ `0x4129a0` jumps straight to a key, with fresh trackers:
+at **level load** (`0x41ccd2`, no contact yet → the section's **default
+key**, used with its full orientation and a look-at point 5000 units
+ahead), at **spawn** (`Game_SpawnCreature` @ `0x41c590`), at **respawn**
+(`0x41c700` reason 3) and after **kind-2 teleports** (reason 2). Portals
+hand Mendel his floor contact as (portal object, `ints[0]`): the field
+called `mode` in the portal table is that polygon (on the CD it always
+names a polygon of the portal, nearly always one with a key). A contact
+without a key leaves the camera where it is.
+
+So in section 0: the default key frames the capsule and tube from above
+(the footage's diagonal opening shot), the spawn cuts to the `Strt` pad's
+key 0, the Space skip cuts to arrival pad `#83` polygon 9 (a fixed point
+above the area), and from there the camera stays put, turning to follow
+Mendel, until he steps on another keyed polygon; the capsule's keys
+(polygons 25, 27, 29: modes 1, 0, 4) make the camera ride along with it.
+
+### Adapted in the port
+
+* Our creature forgets its floor while airborne; the original never
+  clears the contact in flight. `camera.rs` keeps the last contact.
+* `+0x21e` (a creature contact flag that also unlocks modes 3/6/11) is
+  not ported; "off the ground" = our creature has no floor.
+* Object rotations come from our object transform (sim.rs), not from the
+  object's angles via `0x4097a0`.
+
+### Which way is up: +z (settled)
+
+Everything the camera code assumes says **+z is up**: the "upright"
+surface test is `normal.z == 0x400`; the creature's contact record
+resets its surface normal to (0, 0, 0x400) (`0x411b60`); every portal
+pad (`Strt`, `Tele`) is an octagon in the xy plane facing +z; and most
+designer keys have their up vector near +z (e.g. section 3: 159 of 209).
+The creature code agrees (mendel.md §2.2): the hull's last point is the
+feet at `(0, 0, −450)`, airborne gravity is `up · −0x700`, the floor
+finder casts for polygons with flag bit 1 (`0x2`), and the 1997 footage
+shows Mendel standing on the +z faces of the pads. Our first creature
+port assumed Y-down (from the first render, see worlds.md) and walked on
+the pads' sides; it is now Z-up like the exe.
 
 ## 7. The game loop — partly observed
 
@@ -415,7 +533,7 @@ designed around **24 ticks per second** (inferred; the idle handler
 tick runs every object's entry actions → the `Strt` object's state machine
 fires its trigger (after e.g. 100 ticks or on an event), which spawns
 Mendel at `Strt.position + offset` facing `heading` (`Game_SpawnCreature`
-sets `+0x17eff8` and, depending on its arguments, snaps the camera; the
+sets `+0x17eff8`, sets his floor contact to (the portal, `ints[0]`) and runs `Camera_Init`, §6; the
 exact argument mapping of `0x41c590` is not pinned down). Teleport and
 spawn requests are queued and executed by `Game_ExecuteTeleport` when the
 creature code asks.
@@ -432,9 +550,8 @@ creature code asks.
 * Events: set bit 1 on the polygon owner Mendel touches, OR it into every
   ancestor.
 * Portals/gates/spawn, `Voic` music (Smacker files already decoded),
-  the per-polygon camera with style smoothing.
-* Still missing: creature movement/collision (another spec), the exact
-  camera chase formula (`0x407030`, `0x4070b0`, `0x406f80`), `Rend`, `Over`,
+  the per-polygon camera (ported: camera.rs, §6).
+* Still missing: `Rend`, `Over`,
   `PPol` and predator AI, the save-pad dialog wiring.
 
 ## Open questions

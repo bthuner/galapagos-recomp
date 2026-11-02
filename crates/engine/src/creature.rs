@@ -19,11 +19,14 @@
 //! surface    lethal floors, pain, delayed hazards                     0x419550
 //! ```
 //!
-//! Coordinates: world space is the section's (Y points *down*). Mendel's
-//! model space, after the load-time axis swap of `BodyPart::transform`, is
-//! `x` forward, `y` down, `z` left; his origin floats `height` units above
-//! the ground (41 + stance·166/256: exactly where the posed feet end,
-//! checked on the CD data), so `world = pos + R(heading) · model`.
+//! Coordinates: world space is the section's, **Z up** (floors face +z,
+//! gravity pulls along −z; see docs/re/mendel.md §2.2). Headings turn in
+//! the xy plane, `heading_dir(h) = (cos, sin, 0)`, so a growing heading
+//! turns towards +y, his left. Mendel's model space, after the load-time
+//! axis swap of `BodyPart::transform`, is `x` forward, `y` down (towards
+//! his feet), `z` left; his origin floats `height` units above the ground
+//! (41 + stance·166/256: exactly where the posed feet end, checked on the
+//! CD data), so `world = pos + R(heading) · model`.
 //!
 //! The original mover walks in the plane of the polygon it stands on
 //! (`0x41dc30`, a navmesh-like routine with surface-local coordinates) and
@@ -33,7 +36,7 @@
 //! approximation is marked `inferred:`.
 
 use crate::sim::save::{Reader, Writer};
-use crate::sim::{self, Request, Sim};
+use crate::sim::{self, PortalPlace, Request, Sim};
 use crate::world::{WorldMesh, FLOATS_PER_VERTEX};
 use galapagos_formats::creature::{Brain, CreatureBody, Lcg};
 use galapagos_formats::worlds::{Object, Section};
@@ -63,9 +66,11 @@ fn normalize(a: V3) -> V3 {
     if l == 0.0 { a } else { scale(a, 1.0 / l) }
 }
 
-/// Mendel's "up" in world space: the world's Y axis points down.
-const UP: V3 = [0.0, -1.0, 0.0];
-const DOWN: V3 = [0.0, 1.0, 0.0];
+/// The world's up: +Z. The exe resets the mover's contact normal to
+/// `(0, 0, 0x400)` (0x411b60), airborne gravity is `up · −0x700`
+/// (0x41814e), and the camera tests upright floors with `n.z == 0x400`.
+const UP: V3 = [0.0, 0.0, 1.0];
+const DOWN: V3 = [0.0, 0.0, -1.0];
 
 /// Gravity, units per tick². Grounded, the mover adds −7 to the vertical
 /// speed of the body above its feet; airborne it adds `up · −0x700 >> 10`
@@ -109,12 +114,12 @@ const GATHER_RADIUS: f32 = 3200.0;
 const MAX_DROP: f32 = 40_000.0;
 
 /// The ten hull points (`creature+0xa60`, set in `Creature_ReadMaster`
-/// @ 0x417570), stored as `x, z, y` triples. Converted here to model space
-/// `(forward, down, left)`; the spec's `y` is *up* (inferred: with `y`
-/// down the two front "touch" points would sit under the floor).
+/// @ 0x417570) as plain `x, y, z` triples in the mover's Z-up frame:
+/// forward, left, up (the last point, `(0, 0, −450)`, is the feet).
+/// Converted here to model space `(forward, down, left)`.
 const HULL: [[f32; 3]; 10] = {
-    const fn p(x: f32, z: f32, y_up: f32) -> [f32; 3] {
-        [x, -y_up, z]
+    const fn p(fwd: f32, left: f32, up: f32) -> [f32; 3] {
+        [fwd, -up, left]
     }
     [
         p(400.0, 450.0, 225.0), // 0: front left  → touch input L
@@ -131,7 +136,14 @@ const HULL: [[f32; 3]; 10] = {
 };
 
 // ——— Polygon flags (docs/re/objects.md §3, docs/re/mendel.md §2.3) ———
+/// Bit 8: what the hull and the eyes collide with (masks 0x100 at
+/// `0x41859a`, 0x40000100 at `0x419122`): walls, in practice.
 const SOLID: u32 = 0x100;
+/// Bit 1: a floor. The mover's floor finder (0x411ec3) casts with mask 2
+/// (`0x4089e0(…, 2)`, nearest of up to ten hits) before attaching to the
+/// surface (0x411f55); the camera probes use 0x102. Every upward-facing
+/// pad top in section 0 is 0x2, every wall 0x340.
+const FLOOR: u32 = 0x2;
 const HAZARD: u32 = 0x4000_0000;
 const IR_VISIBLE: u32 = 0xc0;
 const LETHAL: u32 = 0xf000;
@@ -254,8 +266,7 @@ impl Near {
     ///
     /// Polygons are one-sided: a ray only hits a polygon's front, the side
     /// its normal `(v1 - v0) × (v2 - v0)` points to. Verified on the data:
-    /// floors face up, and section 0's spawn tube faces inwards, which is
-    /// why Mendel, spawned exactly on its ceiling plane, falls *into* it
+    /// floors face up (+z), and section 0's birth tube #54 faces inwards
     /// (inferred: the original's collision culls back faces the same way).
     fn cast(&self, o: V3, d: V3, len: f32, accept: impl Fn(&Tri) -> bool) -> Option<Hit> {
         let mut best: Option<Hit> = None;
@@ -287,13 +298,14 @@ impl Near {
 fn is_wall(up: V3) -> impl Fn(&Tri) -> bool {
     move |t| t.flags & SOLID != 0 && dot(t.normal, up).abs() < FLOOR_NORMAL
 }
-/// Ground under a creature whose up is `up`. A *new* floor must also face
+/// Ground under a creature whose up is `up`: a floor polygon (flag 0x2)
+/// facing him. A *new* floor must also face
 /// the world's up; the object he already stands on may have turned under
 /// him (a rolling capsule) and still holds him. inferred: the original
 /// mover sticks to its surface (`+0x24` is the surface's up vector).
 fn is_ground(up: V3, riding: Option<usize>) -> impl Fn(&Tri) -> bool {
     move |t| {
-        t.flags & SOLID != 0
+        t.flags & FLOOR != 0
             && dot(t.normal, up) >= FLOOR_NORMAL
             && (dot(t.normal, UP) >= FLOOR_NORMAL || riding == Some(t.obj))
     }
@@ -312,10 +324,14 @@ fn unrotate_by(m: &sim::M, v: V3) -> V3 {
     [m[0] * v[0] + m[3] * v[1] + m[6] * v[2], m[1] * v[0] + m[4] * v[1] + m[7] * v[2], m[2] * v[0] + m[5] * v[1] + m[8] * v[2]]
 }
 
-/// Heading (1024ths) → world direction on a level floor.
+/// Heading (1024ths) → world direction on a level floor. Grounded, the
+/// mover adds `cos[h]·forward` to its first surface coordinate and
+/// `sin[h]·forward` to the second (tables 0x472858 = cos, 0x473058 = sin,
+/// built by `Math_InitTables` @ 0x4308c0; `CreatureMover_Integrate` @
+/// 0x418060). On a floor facing +z the surface frame is the world's.
 fn heading_dir(h: i32) -> V3 {
     let a = h as f32 * core::f32::consts::TAU / 1024.0;
-    [a.cos(), 0.0, a.sin()]
+    [a.cos(), a.sin(), 0.0]
 }
 
 // ——— The creature ———————————————————————————————————————————————————
@@ -362,6 +378,8 @@ pub struct Creature {
     menc: Option<usize>,
     light: V3,
     floor_limit: f32,
+    /// Where a pending teleport puts him (consumed when he rematerialises).
+    teleport_on: Option<PortalPlace>,
     pub mode: Mode,
 
     // Mover (`creature+0x50`).
@@ -486,7 +504,8 @@ impl Creature {
             polys,
             menc,
             light: normalize([l[0] as f32, l[1] as f32, l[2] as f32]),
-            floor_limit: mesh.bounds[4] + 20_000.0,
+            floor_limit: mesh.bounds[2] - 20_000.0,
+            teleport_on: None,
             mode: Mode::Absent,
             pos: [0.0; 3],
             fwd: heading_dir(0),
@@ -543,9 +562,9 @@ impl Creature {
     }
 
     /// His heading in 1024ths of a turn, measured in the world's
-    /// horizontal plane (`(cos, 0, sin)` convention of the mover).
+    /// horizontal (xy) plane (`(cos, sin, 0)` convention of the mover).
     pub fn heading(&self) -> i32 {
-        let a = self.fwd[2].atan2(self.fwd[0]) * 1024.0 / core::f32::consts::TAU;
+        let a = self.fwd[1].atan2(self.fwd[0]) * 1024.0 / core::f32::consts::TAU;
         (a.round() as i32) & 0x3ff
     }
 
@@ -602,7 +621,7 @@ impl Creature {
     /// Spawn, teleport and save requests queued by the portals this tick.
     fn request(&mut self, r: Request, sim: &mut Sim) {
         match r {
-            Request::Spawn { at, heading } => {
+            Request::Spawn { at, heading, on } => {
                 // inferred: a spawn while he is already alive only moves the
                 // respawn point (section 0's arrival pad #83 does that).
                 self.spawn_point = Some((at, heading));
@@ -611,15 +630,17 @@ impl Creature {
                 self.save_point = Some((at, heading));
                 if self.mode == Mode::Absent {
                     self.place(at, heading);
+                    self.settle(on, sim);
                     self.mode = Mode::Appearing(APPEAR_TICKS);
                 }
             }
-            Request::Teleport { at, heading, snap } => {
+            Request::Teleport { at, heading, snap, on } => {
                 // inferred: a request whose destination he is already close
                 // to is ignored. Pads repeat their trigger every tick until
                 // he touches them; without this he would never land.
                 if self.mode == Mode::Alive && length(sub(at, self.pos)) > 1500.0 {
                     self.mode = Mode::Vanishing(VANISH_TICKS, After::Teleport(at, heading));
+                    self.teleport_on = on;
                     self.stats.teleports += 1;
                     if snap {
                         sim.events.push(sim::HostEvent { kind: sim::EV_CAMERA_SNAP, a: 0, b: 0, c: 0 });
@@ -632,6 +653,23 @@ impl Creature {
                 }
             }
         }
+    }
+
+    /// After [`Creature::place`] at a portal: stand on its polygon, in its
+    /// frame, as `Game_SpawnCreature` / `Game_ExecuteTeleport` hand the
+    /// mover that polygon as its contact. A portal whose offset lifts him
+    /// clear of the polygon (section 6's start, 4,000 up) drops him instead.
+    fn settle(&mut self, on: Option<PortalPlace>, sim: &Sim) {
+        let Some(p) = on else { return };
+        let (up, fwd) = (normalize(p.up), normalize(p.fwd));
+        if p.lift.abs() > (self.height as f32 + STEP_DOWN) || length(fwd) < 0.5 {
+            return;
+        }
+        self.up = up;
+        self.fwd = fwd;
+        self.pos = add(self.pos, scale(up, self.height as f32 - p.lift));
+        let hit = Hit { dist: 0.0, obj: p.obj, poly: p.poly, flags: sim.frame_flags(p.obj, p.poly), normal: up };
+        self.ground = Some(self.contact(sim, &hit));
     }
 
     fn place(&mut self, at: V3, heading: i32) {
@@ -652,7 +690,11 @@ impl Creature {
     /// camera. The brain is never restored: he keeps what he learnt.
     fn finish_vanishing(&mut self, then: After, sim: &mut Sim, mesh: &mut WorldMesh) {
         match then {
-            After::Teleport(at, h) => self.place(at, h),
+            After::Teleport(at, h) => {
+                self.place(at, h);
+                let on = self.teleport_on.take();
+                self.settle(on, sim);
+            }
             After::Respawn => {
                 if sim.restore_snapshot(mesh) {
                     sim.events.push(sim::HostEvent { kind: sim::EV_CAMERA_SNAP, a: 0, b: 0, c: 0 });
@@ -715,7 +757,7 @@ impl Creature {
     /// *current* pose. All objects count, including those of sleeping
     /// folders: a folder only stops updates, its floor is still there.
     fn gather(&self, sim: &Sim, centre: V3, radius: f32) -> Near {
-        self.gather_masked(sim, centre, radius, SOLID | HAZARD)
+        self.gather_masked(sim, centre, radius, SOLID | FLOOR | HAZARD)
     }
 
     fn gather_masked(&self, sim: &Sim, centre: V3, radius: f32, mask: u32) -> Near {
@@ -730,7 +772,14 @@ impl Creature {
                 if lp.points.len() < 3 || length(sub(sim::apply(&m, lp.centre), centre)) > radius + lp.radius {
                     continue;
                 }
-                let flags = sim.frame_flags(i, p);
+                // A floor is a floor whatever frame its flip-book shows this
+                // tick: the arrival pad #83 cycles through three frames of
+                // which only the first carries bit 1 (inferred: the
+                // original's mover stays on its surface between frames).
+                // Appearance *states* do change floors: section 0's start
+                // disc #57 hands the floor down its stack of four polygons,
+                // then to the docked capsule #3.
+                let flags = sim.frame_flags(i, p) | (sim.state_flags(i, p) & FLOOR);
                 if flags & mask == 0 {
                     continue;
                 }
@@ -910,9 +959,9 @@ impl Creature {
 
     /// Airborne, he turns back to the world's up (inferred).
     fn level_out(&mut self) {
-        let mut f = [self.fwd[0], 0.0, self.fwd[2]];
+        let mut f = [self.fwd[0], self.fwd[1], 0.0];
         if length(f) < 1e-3 {
-            f = [-self.up[0], 0.0, -self.up[2]];
+            f = [-self.up[0], -self.up[1], 0.0];
         }
         self.fwd = if length(f) < 1e-3 { heading_dir(0) } else { normalize(f) };
         self.up = UP;
@@ -954,14 +1003,14 @@ impl Creature {
         self.air = add(self.air, scale(DOWN, GRAVITY as f32));
         self.air_ticks += 1;
         let mut next = add(self.pos, self.air);
-        if self.clearance(near, [next[0], self.pos[1], next[2]]).0 < 1.0 {
-            next = [self.pos[0], next[1], self.pos[2]];
-            self.air = [0.0, self.air[1], 0.0];
+        if self.clearance(near, [next[0], next[1], self.pos[2]]).0 < 1.0 {
+            next = [self.pos[0], self.pos[1], next[2]];
+            self.air = [0.0, 0.0, self.air[2]];
         }
         // Probe from where he was (height-wise) to below his feet at `next`.
-        let from = [next[0], self.pos[1] - PROBE_UP, next[2]];
-        let reach = (next[1] - from[1]).max(0.0) + self.stance_height as f32;
-        if self.air[1] > 0.0 {
+        let from = [next[0], next[1], self.pos[2] + PROBE_UP];
+        let reach = (from[2] - next[2]).max(0.0) + self.stance_height as f32;
+        if self.air[2] < 0.0 {
             if let Some(h) = near.cast(from, DOWN, reach, is_ground(UP, None)) {
                 let foot = add(from, scale(DOWN, h.dist));
                 self.height = self.stance_height;
@@ -1108,7 +1157,7 @@ impl Creature {
     /// not ported).
     fn surface_events(&mut self) {
         let f = self.surface;
-        let fell_out = self.air_ticks > MAX_FALL_TICKS || self.pos[1] > self.floor_limit;
+        let fell_out = self.air_ticks > MAX_FALL_TICKS || self.pos[2] < self.floor_limit;
         if f & LETHAL == 0 && !fell_out {
             if self.ground.is_some() {
                 self.delay = DELAY_TICKS;
@@ -1149,7 +1198,8 @@ impl Creature {
             }
             sim.mark_dirty(r.first, r.first + r.count);
         }
-        let rot = [0, -self.heading(), 0];
+        // inferred: a turn about the world's up (Z) by his heading.
+        let rot = [0, 0, self.heading()];
         sim.set_pose(i, self.pos.map(|c| c as i32), rot, mesh);
     }
 
@@ -1185,25 +1235,14 @@ impl Creature {
         }
     }
 
-    /// For the host's chase camera (not in the original, whose camera
-    /// collides through `0x413d43` with the same mask): the clear fraction
-    /// (0..=1) of the segment from `from` to `eye`, against polygons whose
-    /// flags have 0x102, seen from either side.
-    pub fn camera_clearance(&self, sim: &Sim, from: V3, eye: V3) -> f32 {
-        let d = sub(eye, from);
-        let len = length(d);
-        if len < 1.0 {
-            return 1.0;
-        }
-        let dir = scale(d, 1.0 / len);
-        let near = self.gather_masked(sim, from, len, 0x102);
-        let mut best = len;
-        for t in &near.0 {
-            if let Some(h) = ray_tri(from, dir, t) {
-                best = best.min(h);
-            }
-        }
-        best / len
+    /// For `camera.rs` (`Camera_Collide` @ 0x413cb0): the nearest polygon
+    /// with flags 0x102 crossing the segment `from → to`, as (a point of
+    /// its plane, its unit world normal). Front faces only, like `cast`.
+    pub fn camera_probe(&self, sim: &Sim, from: V3, to: V3) -> Option<(V3, V3)> {
+        let near = self.gather_masked(sim, from, length(sub(to, from)), 0x102);
+        let h = near.segment(from, to, |_| true)?;
+        let t = near.0.iter().find(|t| t.obj == h.obj && t.poly == h.poly)?;
+        Some((t.a, t.normal))
     }
 
     /// Ray against his posed mesh. Returns `Some(true)` for a hit on his
@@ -1340,9 +1379,9 @@ impl Creature {
         self.build_vertices();
     }
 
-    /// inferred: the exe only learns about save pads through its hull probe
-    /// (mask 0x100, `0x418595`), yet every save-pad polygon on the CD is
-    /// flagged 0x22, never solid. So we also test, both ways, whether his
+    /// inferred: the exe learns about save pads through its contacts. Every
+    /// save-pad polygon on the CD is flagged 0x22, a floor (bit 1) but not
+    /// a wall (0x100), so standing on one sets `surface`; we also test, both ways, whether his
     /// hull segments or a vertical segment through his body cross a 0x20
     /// polygon: "Mendel is walking on it" as the readme says.
     fn touches_save_pad(&self, sim: &Sim) -> bool {
@@ -1570,22 +1609,40 @@ mod tests {
         ever
     }
 
-    /// The real introduction: the `Strt` portal spawns Mendel in a tube
-    /// high above section 0 after ~14 s; he must land inside it (the tube
-    /// faces inwards), walk, and not fall out of the world.
+    /// The real introduction, start to finish. The `Strt` portal #57
+    /// spawns Mendel after ~14 s *on* its disc, the floor of the birth
+    /// tube #54 (a polygon facing +z), standing upright. The disc hands
+    /// its floor down its stack of four polygons, then the docked capsule
+    /// #3 takes him, rolls him through the sky, and drops him on the
+    /// arrival pad #83 after ~133 s. He never falls out of the world.
     #[test]
     fn mendel_is_born_in_section0() {
         let Some(d) = data() else { return };
         let (mut sim, mut mesh) = world(&d, 0);
-        run(&mut sim, &mut mesh, 60, None);
+        let (mut on_disc, mut on_capsule, mut on_pad) = (None, None, None);
+        for t in 0..150 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            let c = sim.creature.as_ref().unwrap();
+            if c.mode != Mode::Alive {
+                continue;
+            }
+            match c.ground().map(|g| g.0 + 1) {
+                Some(57) if on_disc.is_none() => on_disc = Some((t, c.up, c.pos)),
+                Some(3) if on_capsule.is_none() => on_capsule = Some(t),
+                Some(83) if on_pad.is_none() => on_pad = Some((t, c.up)),
+                _ => {}
+            }
+        }
         let c = sim.creature.as_ref().unwrap();
-        println!("intro: {:?} at {:?}, walked {}, {:?}", c.mode, c.pos.map(|v| v as i32), c.stats.walked as i32, c.stats);
-        assert!(c.stats.ticks_alive > 30 * sim::TICKS_PER_SECOND, "spawned by the Strt portal");
+        println!("intro: disc {on_disc:?}, capsule at {on_capsule:?}, pad {on_pad:?}; then {:?} at {:?}, {:?}", c.mode, c.pos.map(|v| v as i32), c.stats);
+        let (_, up, pos) = on_disc.expect("born standing on the Strt disc");
+        assert!(up[2] > 0.99, "upright on a floor facing +z: up {up:?}");
+        assert!((pos[2] - (-284148.0 + c.stance_height as f32)).abs() < 30.0, "his origin floats his stance height above the disc, z = {}", pos[2]);
+        assert!(on_capsule.is_some(), "the capsule picks him up");
+        let (t, up) = on_pad.expect("the capsule delivers him to the arrival pad");
+        assert!(up[2] > 0.99, "upright on the pad: up {up:?}");
+        assert!((120..145).contains(&(t / sim::TICKS_PER_SECOND)), "after a ride of about 133 s, not {t} ticks");
         assert_eq!(c.stats.deaths, 0, "never fell out of the world");
-        // By now the capsule (#3) has docked around the tube and is flying
-        // him towards the main area: he must be standing on one of the two.
-        let (obj, _) = c.ground().expect("standing on something");
-        assert!(obj + 1 == 54 || obj + 1 == 3, "on the tube or in the capsule, not on #{}", obj + 1);
         assert!(c.stats.walked > 2000.0, "he walks");
         assert!(c.stats.touches_posted > 0);
     }
@@ -1600,12 +1657,17 @@ mod tests {
         let (mut sim, mut mesh) = world(&d, 0);
         run(&mut sim, &mut mesh, 10, Some(5));
         let c = sim.creature.as_ref().unwrap();
-        println!("skip: {:?} at {:?} on {:?}", c.mode, c.pos.map(|v| v as i32), c.ground());
+        println!("skip: {:?} at {:?} on {:?} up {:?}", c.mode, c.pos.map(|v| v as i32), c.ground(), c.up);
         assert!(c.stats.ticks_alive > 8 * sim::TICKS_PER_SECOND, "spawned by the arrival pad");
         assert!(matches!(c.ground(), Some((o, _)) if o + 1 == 92 || o + 1 == 83), "standing on the pad");
+        // On *top* of it, not clinging to a side: its floors are the top
+        // (polygon 9, z = 5180) and two gentle ramps (3 and 6, normal
+        // z = 0.98) that run down to z = 4440; its sides are walls (0x340).
+        let (_, poly) = c.ground().unwrap();
+        assert!([3, 6, 9].contains(&poly) && c.up[2] > 0.95 && c.pos[2] > 4440.0, "upright on top of the pad, poly {poly}, z = {}", c.pos[2]);
         assert!(!sim.visible()[160 - 1], "the upper level sleeps");
 
-        sim.creature.as_mut().unwrap().place([-1110.0, -19100.0, 3959.0], 0); // above platform #77
+        sim.creature.as_mut().unwrap().place([-1110.0, -19100.0, 3959.0], 0); // into the lift platform #77
         let mut woke = None;
         for t in 0..3 * sim::TICKS_PER_SECOND {
             sim.step(&mut mesh);
@@ -1621,7 +1683,31 @@ mod tests {
         let c = sim.creature.as_ref().unwrap();
         println!("then: {:?} at {:?}, {:?}", c.mode, c.pos.map(|v| v as i32), c.stats);
         assert!(c.stats.walked > 2000.0, "walked {}", c.stats.walked);
-        assert!(c.pos[1].abs() < 40_000.0, "inside the level, y = {}", c.pos[1]);
+        assert!(c.pos[2].abs() < 40_000.0, "inside the level, z = {}", c.pos[2]);
+    }
+
+    /// After the skip, a minute of walking around the main area: whatever
+    /// he stands on is a floor polygon (bit 1) facing up, +z.
+    #[test]
+    fn mendel_walks_on_floors_facing_up_in_section0() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 0);
+        run(&mut sim, &mut mesh, 10, Some(5));
+        let (mut grounded, mut upright, mut floors) = (0, 0, 0);
+        for _ in 0..60 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            let c = sim.creature.as_ref().unwrap();
+            let Some(g) = c.ground else { continue };
+            grounded += 1;
+            upright += (c.up[2] > 0.9) as u32;
+            floors += (sim.state_flags(g.obj, g.poly) & FLOOR != 0) as u32;
+        }
+        let c = sim.creature.as_ref().unwrap();
+        println!("{grounded} grounded ticks, {upright} upright, {floors} on floor polygons; walked {}", c.stats.walked as i32);
+        assert!(grounded > 50 * sim::TICKS_PER_SECOND, "mostly on the ground");
+        assert_eq!(floors, grounded, "always on a floor polygon");
+        assert!(upright * 10 >= grounded * 9, "upright (up ≈ +z) at least 90% of the time");
+        assert_eq!(c.stats.deaths, 0);
     }
 
     #[test]
@@ -1643,9 +1729,9 @@ mod tests {
 
     #[test]
     fn ray_hits_a_triangle() {
-        let t = Tri { a: [0.0; 3], e1: [10.0, 0.0, 0.0], e2: [0.0, 0.0, 10.0], normal: DOWN, obj: 0, poly: 0, flags: SOLID };
-        assert_eq!(ray_tri([1.0, -5.0, 1.0], DOWN, &t), Some(5.0));
-        assert_eq!(ray_tri([11.0, -5.0, 1.0], DOWN, &t), None);
+        let t = Tri { a: [0.0; 3], e1: [10.0, 0.0, 0.0], e2: [0.0, 10.0, 0.0], normal: UP, obj: 0, poly: 0, flags: SOLID };
+        assert_eq!(ray_tri([1.0, 1.0, 5.0], DOWN, &t), Some(5.0));
+        assert_eq!(ray_tri([11.0, 1.0, 5.0], DOWN, &t), None);
     }
 
     /// One minute of section 0 after the skip: the world and Mendel make

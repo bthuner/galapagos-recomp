@@ -13,8 +13,9 @@
 // Camera: drag to orbit, wheel to zoom, shift-drag (or middle-drag) to pan.
 // A left click (press and release without dragging) becomes a world-space
 // ray handed to `onPick` (the objects' picker); a right click goes to
-// `onTouch` (touching Mendel). In follow mode the camera chases Mendel from
-// behind and above; dragging orbits around him for a while.
+// `onTouch` (touching Mendel). In follow mode we show the original game
+// camera, which the engine runs (crates/engine/src/camera.rs); dragging
+// orbits around Mendel for a while, then hands the view back.
 
 const VS = `#version 300 es
 layout(location=0) in vec3 aPos;
@@ -83,12 +84,22 @@ function compile(gl, vs, fs) {
 
 const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
-// Follow camera, not in the original (whose camera jumps between per-floor
-// keys, docs/re/objects.md §6): a chase cam that eases towards a point
-// behind and above Mendel. Distances are world units (Mendel is ~900 long).
-const CHASE = { dist: 2600, pitch: 0.32, lift: 250, ease: 2.5, yawEase: 1.6, idle: 2.5 };
+// The original's field of view: 110° in `View_Init` @ 0x4033bb, turned
+// into a focal length of width / tan(55°) with square pixels (0x403580).
+// inferred: "width" is the full viewport width, which makes the vertical
+// field 2·atan(0.375·tan 55°) ≈ 56° on a 4:3 screen.
+const ORIGINAL_FOV = 2 * Math.atan(0.375 * Math.tan((55 * Math.PI) / 180));
+// Drag-to-look in follow mode (not in the original): how long the user's
+// view stays after the last drag, and how long it takes to hand back.
+const LOOK = { idle: 2.5, back: 1.2 };
 
-export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {}, onTouch = () => {}, onFollowChange = () => {}, clearance = () => 1 } = {}) {
+const v3 = {
+  lerp: (a, b, t) => a.map((x, i) => x + (b[i] - x) * t),
+  norm: (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); },
+  cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+};
+
+export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {}, onTouch = () => {}, onFollowChange = () => {}, camera = () => null } = {}) {
   const gl = canvas.getContext("webgl2", { antialias: true });
   if (!gl) throw new Error("WebGL2 is not available");
   const prog = compile(gl, VS, FS);
@@ -114,14 +125,18 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 7 * 4, off * 4);
   }
 
-  // Orbit camera state. Galapagos' Y axis points *down*, like screen
-  // coordinates (checked visually: with Y-up, every tower hangs from the
-  // sky), so "up" is -Y.
-  const cam = { yaw: 0.8, pitch: 0.5, dist: 1, target: [0, 0, 0], up: -1 };
+  // Orbit camera state. Galapagos is Z-up: floors face +z, gravity pulls
+  // along -z, and the original renderer uses camera z as screen-up
+  // (0x4302e0). `yaw` turns about +z, `pitch` lifts the eye towards +z.
+  // (Our first viewer guessed Y-down from a distant orbit view; the
+  // camera port and the 1997 footage proved Z-up.)
+  const UP = [0, 0, 1];
+  const cam = { yaw: 0.8, pitch: 0.5, dist: 1, target: [0, 0, 0], flip: 1 };
   let radius = 1;
   let fadeFar = 1;
-  // Follow mode: `creature()` returns the engine's creature state.
-  const follow = { on: false, creature: null, userYaw: 0, userPitch: 0, dist: CHASE.dist, idle: 0, snap: true };
+  // Follow mode: the engine's camera, and an optional user look-around
+  // (`look`: an orbit around Mendel that fades back to the original).
+  const follow = { on: false, creature: null, look: null, cut: false };
   let lastTime = performance.now();
 
   function load(world) {
@@ -153,8 +168,8 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   }
 
   // The camera basis of the last frame, for turning clicks into rays.
-  let eyeNow = [0, 0, 0], basis = null, viewProj = null;
-  const FOV = 1.0;
+  let basis = null, viewProj = null;
+  const ORBIT_FOV = 1.0;
 
   function draw() {
     const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -174,25 +189,20 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     const now = performance.now();
     const dt = Math.min(0.1, (now - lastTime) / 1000);
     lastTime = now;
-    if (follow.on) chase(dt);
-    const { yaw, pitch, dist, target } = cam;
-    const eye = [
-      target[0] + dist * Math.cos(pitch) * Math.sin(yaw),
-      target[1] + cam.up * dist * Math.sin(pitch),
-      target[2] + dist * Math.cos(pitch) * Math.cos(yaw),
-    ];
+    // Run the simulation first: the camera we draw is the one it produced.
+    const alpha = onFrame() ?? 1;
+    const view = (follow.on && engineView(alpha, dt)) || orbitView();
     // Close to Mendel the near plane must be close too.
     const near = follow.on ? 40 : radius / 500;
-    const proj = perspective(FOV, w / h, near, radius * 8);
-    eyeNow = eye;
-    basis = { target, aspect: w / h };
+    const fov = follow.on ? ORIGINAL_FOV : ORBIT_FOV;
+    const proj = perspective(fov, w / h, near, radius * 8);
+    basis = { ...view, aspect: w / h, fov };
     gl.useProgram(prog);
-    viewProj = mul(proj, lookAt(eye, target, [0, cam.up, 0]));
+    viewProj = mul(proj, lookAt(view.eye, view.eye.map((e, i) => e + view.forward[i]), view.up));
     gl.uniformMatrix4fv(uViewProj, false, viewProj);
     gl.uniform1f(uFar, fadeFar);
     gl.uniform1f(uBright, brightness);
     gl.bindVertexArray(vao);
-    onFrame();
     // Upload only what the simulation patched (appearance changes).
     const dirty = current.takeDirty?.();
     if (dirty) {
@@ -217,48 +227,72 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     }
   }
 
-  // The chase: ease the orbit target onto Mendel and the orbit angle to
-  // "behind him". Exponential easing (k = 1 - e^(-rate·dt)) is frame-rate
-  // independent. After a drag the user's offset fades back to zero.
-  function chase(dt) {
-    const c = follow.creature?.();
-    if (!c || c.mode === "absent") return;
-    const [x, y, z] = c.position;
-    const goal = [x, y - CHASE.lift, z]; // -Y is up
-    const h = (c.heading / 1024) * 2 * Math.PI;
-    // The eye sits at target + dist·(cos p·sin yaw, …, cos p·cos yaw): put
-    // it opposite his forward (cos h, 0, sin h).
-    const behind = Math.atan2(-Math.cos(h), -Math.sin(h));
-    if (!drag) follow.idle += dt;
-    if (follow.idle > CHASE.idle) {
-      const k = 1 - Math.exp(-dt * 0.8);
-      follow.userYaw -= follow.userYaw * k;
-      follow.userPitch -= follow.userPitch * k;
+  // The orbit camera: eye on a sphere around `cam.target`.
+  function orbitAt(target, yaw, pitch, dist) {
+    const eye = [
+      target[0] + dist * Math.cos(pitch) * Math.sin(yaw),
+      target[1] + dist * Math.cos(pitch) * Math.cos(yaw),
+      target[2] + cam.flip * dist * Math.sin(pitch),
+    ];
+    const forward = v3.norm(target.map((t, i) => t - eye[i]));
+    const right = v3.norm(v3.cross(forward, UP.map((u) => u * cam.flip)));
+    return { eye, forward, up: v3.cross(right, forward) };
+  }
+  const orbitView = () => orbitAt(cam.target, cam.yaw, cam.pitch, cam.dist);
+
+  // The original camera, from the engine: it moves at 24 Hz, so we draw
+  // the previous tick's view blended towards the current one by `alpha`,
+  // the fraction of the next tick already elapsed. not in the original:
+  // it rendered whatever the last tick left (its tick takes a sub-tick
+  // fraction argument, 0x4070b0, but Game_Tick passes a full tick).
+  function engineView(alpha, dt) {
+    const s = camera();
+    if (!s) return null;
+    const a = follow.cut ? 1 : Math.max(0, Math.min(1, alpha));
+    follow.cut = false;
+    let v = {
+      eye: v3.lerp(s.prev.eye, s.cur.eye, a),
+      forward: v3.norm(v3.lerp(s.prev.forward, s.cur.forward, a)),
+      up: v3.norm(v3.lerp(s.prev.up, s.cur.up, a)),
+    };
+    const look = follow.look;
+    if (look) {
+      // not in the original: the user's look-around, an orbit around
+      // Mendel that fades back into the original camera when left alone.
+      const c = follow.creature?.();
+      if (!drag) look.idle += dt;
+      if (look.idle > LOOK.idle) look.weight -= dt / LOOK.back;
+      if (!c || look.weight <= 0) {
+        follow.look = null;
+      } else {
+        const o = orbitAt(c.position, look.yaw, look.pitch, look.dist);
+        const k = look.weight * look.weight * (3 - 2 * look.weight); // smoothstep
+        v = {
+          eye: v3.lerp(v.eye, o.eye, k),
+          forward: v3.norm(v3.lerp(v.forward, o.forward, k)),
+          up: v3.norm(v3.lerp(v.up, o.up, k)),
+        };
+      }
     }
-    const wantYaw = behind + follow.userYaw;
-    const wantPitch = Math.max(-0.2, Math.min(1.4, CHASE.pitch + follow.userPitch));
-    // Too far behind (a long fall, a teleport): cut instead of chasing.
-    if (Math.hypot(...goal.map((g, i) => g - cam.target[i])) > 5000) follow.snap = true;
-    if (follow.snap) {
-      cam.target = goal;
-      cam.yaw = wantYaw;
-      cam.pitch = wantPitch;
-      cam.dist = follow.dist;
-      follow.snap = false;
-      return;
+    return v;
+  }
+
+  // Start (or keep) looking around Mendel from where the camera is now.
+  function lookAround() {
+    if (!follow.look) {
+      const c = follow.creature?.();
+      if (!c || !basis) return null;
+      const d = basis.eye.map((e, i) => e - c.position[i]);
+      const dist = Math.max(600, Math.hypot(...d));
+      follow.look = {
+        yaw: Math.atan2(d[0], d[1]),
+        pitch: Math.asin(Math.max(-1, Math.min(1, d[2] / (cam.flip * dist)))),
+        dist, idle: 0, weight: 1,
+      };
     }
-    const k = 1 - Math.exp(-dt * CHASE.ease);
-    cam.target = cam.target.map((t, i) => t + (goal[i] - t) * k);
-    // Shortest way round the circle.
-    const dy = Math.atan2(Math.sin(wantYaw - cam.yaw), Math.cos(wantYaw - cam.yaw));
-    cam.yaw += dy * (1 - Math.exp(-dt * CHASE.yawEase));
-    cam.pitch += (wantPitch - cam.pitch) * k;
-    // Walls between Mendel and the eye pull the camera in (fast), then it
-    // drifts back out (slowly) once the view is clear.
-    const dir = [Math.cos(cam.pitch) * Math.sin(cam.yaw), cam.up * Math.sin(cam.pitch), Math.cos(cam.pitch) * Math.cos(cam.yaw)];
-    const free = clearance(cam.target, cam.target.map((t, i) => t + dir[i] * follow.dist));
-    const want = Math.max(350, follow.dist * free - 150);
-    cam.dist += (want - cam.dist) * (want < cam.dist ? 1 - Math.exp(-dt * 12) : k);
+    follow.look.idle = 0;
+    follow.look.weight = 1;
+    return follow.look;
   }
 
   // Input: orbit / pan / zoom.
@@ -284,31 +318,31 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     const ny = 1 - ((e.clientY - r.top) / r.height) * 2;
     const norm = (a) => { const l = Math.hypot(...a); return a.map((v) => v / l); };
     const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-    const fwd = norm(basis.target.map((t, i) => t - eyeNow[i]));
-    const right = norm(cross(fwd, [0, cam.up, 0]));
+    const fwd = norm(basis.forward);
+    const right = norm(cross(fwd, basis.up));
     const up = cross(right, fwd);
-    const k = Math.tan(FOV / 2);
+    const k = Math.tan(basis.fov / 2);
     const dir = norm(fwd.map((f, i) => f + nx * k * basis.aspect * right[i] + ny * k * up[i]));
-    return [eyeNow, dir];
+    return [basis.eye, dir];
   }
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointermove", (e) => {
     if (!drag) return;
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     [drag.x, drag.y] = [e.clientX, e.clientY];
-    follow.idle = 0;
     if (drag.pan) {
       // Panning means "I want to look elsewhere": leave follow mode.
       if (follow.on) setFollow(false);
       const s = cam.dist / canvas.clientHeight;
       cam.target[0] -= (Math.cos(cam.yaw) * dx) * s;
-      cam.target[2] += (Math.sin(cam.yaw) * dx) * s;
-      cam.target[1] += cam.up * dy * s;
+      cam.target[1] += (Math.sin(cam.yaw) * dx) * s;
+      cam.target[2] += cam.flip * dy * s;
     } else if (follow.on) {
-      follow.userYaw -= dx * 0.005;
-      follow.userPitch += dy * 0.005;
-      cam.yaw -= dx * 0.005;
-      cam.pitch = Math.max(-1.5, Math.min(1.5, cam.pitch + dy * 0.005));
+      const look = lookAround();
+      if (look) {
+        look.yaw -= dx * 0.005;
+        look.pitch = Math.max(-1.5, Math.min(1.5, look.pitch + dy * 0.005));
+      }
     } else {
       cam.yaw -= dx * 0.005;
       cam.pitch = Math.max(-1.5, Math.min(1.5, cam.pitch + dy * 0.005));
@@ -316,15 +350,25 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   });
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
-    if (follow.on) follow.dist = Math.max(600, Math.min(40000, follow.dist * Math.exp(e.deltaY * 0.001)));
-    else cam.dist *= Math.exp(e.deltaY * 0.001);
+    const look = follow.on && lookAround();
+    if (look) look.dist = Math.max(600, Math.min(40000, look.dist * Math.exp(e.deltaY * 0.001)));
+    else if (!follow.on) cam.dist *= Math.exp(e.deltaY * 0.001);
   }, { passive: false });
 
   function setFollow(on) {
     if (follow.on === on) return;
     follow.on = on;
-    follow.snap = on;
-    follow.userYaw = follow.userPitch = 0;
+    follow.look = null;
+    follow.cut = true;
+    // Leaving follow mode: orbit around where the camera was looking.
+    if (!on && basis) {
+      const c = follow.creature?.();
+      if (c) cam.target = [...c.position];
+      const d = basis.eye.map((e, i) => e - cam.target[i]);
+      cam.dist = Math.max(600, Math.hypot(...d));
+      cam.yaw = Math.atan2(d[0], d[1]);
+      cam.pitch = Math.asin(Math.max(-1, Math.min(1, d[2] / (cam.flip * cam.dist))));
+    }
     onFollowChange(on);
   }
 
@@ -343,9 +387,7 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     // Where the camera is and where it looks, for the audio listener.
     listener() {
       if (!basis) return null;
-      const d = basis.target.map((t, i) => t - eyeNow[i]);
-      const l = Math.hypot(...d) || 1;
-      return { eye: eyeNow, forward: d.map((v) => v / l), up: [0, cam.up, 0] };
+      return { eye: basis.eye, forward: v3.norm(basis.forward), up: v3.norm(basis.up) };
     },
     // World point → CSS pixel coordinates in the page (null if behind).
     project(p) {
@@ -366,15 +408,17 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       cam.dist = dist;
     },
     // Flip the up axis, for exploring the geometry upside down.
-    flipUp() { cam.up = -cam.up; },
-    // Chase Mendel: `creature` returns engine.creature.state().
+    flipUp() { cam.flip = -cam.flip; },
+    // Show the original camera; `creature` returns engine.creature.state()
+    // (drag-to-look orbits around him).
     follow(on, creature = follow.creature) {
       follow.creature = creature;
       setFollow(on);
     },
     get following() { return follow.on; },
-    // Jump straight to the chase position (teleports, camera-snap pads).
-    snap() { follow.snap = true; },
+    // A camera cut (teleports, camera-snap pads): no blending this frame,
+    // and drop any look-around.
+    snap() { follow.cut = true; follow.look = null; },
     stop() { running = false; },
   };
 }

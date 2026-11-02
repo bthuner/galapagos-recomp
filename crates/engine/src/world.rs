@@ -14,9 +14,11 @@
 //!   coordinates (0,127), (0,0), (127,0): v1 is the origin, u runs along
 //!   v1→v2 and v runs along v1→v0. That defines an affine map over the
 //!   polygon's plane; a quad's fourth vertex lands on (127,127).
-//! * `layer` indexes a TEXTURE_2D_ARRAY; -1 means "untextured" and -2
-//!   "hidden in the current appearance state" (kept in the buffer so a
-//!   state change can reveal it by rewriting one float per vertex).
+//! * `layer` indexes a TEXTURE_2D_ARRAY; -1 means "untextured" (no
+//!   appearance data) and -2 "not drawn in the current appearance state"
+//!   (disabled, or a negative texture number: invisible collision
+//!   geometry), kept in the buffer so a state change can reveal it by
+//!   rewriting one float per vertex.
 //! * Vertices are *object-local*. Each object carries a 4×4 transform, so
 //!   the simulation can move a platform by changing 16 floats instead of
 //!   rebuilding geometry. The renderer draws one range per object.
@@ -153,10 +155,15 @@ impl WorldMesh {
     /// surfaces scroll. Returns the patched vertex range.
     pub fn apply_frame(&mut self, draw: usize, poly: usize, frame: Option<&PolyFrame>) -> Option<DrawRange> {
         let r = *self.poly_ranges.get(draw)?.get(poly)?;
+        // Negative texture numbers (-2..-5) are not drawn. Observed: the
+        // birth tube #54 (-4/-5) and the large box #96 (-3) are collision
+        // geometry; the 1997 footage shows Mendel on the start disc with
+        // no tube around him. inferred: -4/-5 may also select a special
+        // render mode (objects.md); until that is known, they are hidden.
         let layer = match frame {
-            Some(f) if f.enabled == 0 => -2.0,
-            Some(f) if f.texture >= 0 => f.texture as f32,
-            _ => -1.0,
+            Some(f) if f.enabled == 0 || f.texture < 0 => -2.0,
+            Some(f) => f.texture as f32,
+            None => -1.0,
         };
         let (du, dv) = frame.map_or((0.0, 0.0), |f| (f.u as f32 / TEX, f.v as f32 / TEX));
         for v in r.first..r.first + r.count {
