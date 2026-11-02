@@ -140,7 +140,9 @@ void tick_all(registry R) {
   for (id = next(0); id <= R.count; id = next(id))   // next(i) = i + R.skip[i] + 1
     R.object[id]->Update(dt);                         // slot 0x28, see 4
   R.picked = NULL;                                    // the click lasts one tick
-  // pass 2: apply what fired
+  // pass 2: apply what fired; next(id) reads skip[id] AFTER applying id,
+  // so a folder switching off here hides its subtree from this very pass
+  // (their queued actions wait until it wakes up)
   for (id = next(0); id <= R.count; id = next(id))
     StateMachine_ApplyPending(R.object[id]);          // 0x42ce70
 }
@@ -159,7 +161,7 @@ void StateMachine_ApplyPending(obj o) {               // 0x42ce70
     S = o.states[o.pending.goto];                     // overwrite enabled slots;
     o.pending.merge(S.entry);                         // a target with its own goto
   }                                                   // chains exactly one level
-  if (goto)      SetState(goto);                      // order of the calls:
+  if (goto)      SetState(goto);                      // 0x42cfd0; order of the calls:
   if (shape)     SelectShape(shape - 1);              //   state, shape, appearance,
   if (appear)    SelectAppearance(appear - 1);        //   sound, motion, trigger,
   if (sound)     PlayEmitter(sound - 1);              //   timer reset
@@ -172,8 +174,53 @@ void StateMachine_ApplyPending(obj o) {               // 0x42ce70
 
 Because evaluation and application are two passes, every object sees the
 world as it was at the start of the tick: a lever and the bridge it controls
-switch in the same tick, never half-way. The initial state is queued at load
-time, so each object's first entry actions run on the very first tick.
+switch in the same tick, never half-way.
+
+`SetState` (`CStateMachine_SetState` @ `0x42cfd0`, slot `0x04`, shared by
+every class: `Objt`, `Fldr` and the portals all point there) stores the
+state number, its record, its `state_flag` (slot `0x20`, `+0x28`) and the
+registry entry (`0x4283b0`). It does **not** reset the tick counter
+`+0x2c`; only the actions' reset flag does. Observed. (The port used to
+reset it on every state change.)
+
+### Level load: every initial state is entered before the first tick — observed
+
+The object reader `World_Read` @ `0x4222d0` (called by `0x408d90` from the
+section loader `0x41cc20`):
+
+```c
+ObjectRegistry_Init(&R, count);        // 0x428430: state[], object[], skip[] zeroed
+for (k = 0; k < count; k++)             // read every record through the
+  Register(CreateByFourCC(...)->Read()) //   factory; StateMachine_Read
+                                        //   queues the initial state (0x42ce50)
+for (id = 1; id <= count; id++)         // 0x422372..0x422396
+  if (R.object[id]) StateMachine_ApplyPending(R.object[id]);
+level_ticks = 0;                        // +0x17ee80
+```
+
+So the **initial state is entered at load**, in list order and *without*
+folder skipping: `SetState` writes it into the registry and the entry
+actions (appearance, sound, motion, class trigger such as a folder
+switching itself off, timer reset) all run before `Game_Tick` evaluates
+anything. The first tick then evaluates every enabled object in its real
+initial state with a tick counter of 0. Only after the loader returns does
+the section change code take the level-start snapshot (`0x41caf3` →
+`Game_TakeSnapshot` @ `0x41d170`). The `Save` variables live in the archive
+object (`Game+0x17efb0`), created before the read, so a `Save` read-back in
+an initial state already sees them.
+
+Why it matters — section 2: folder #193 (holding `Strt` #194, Mendel's
+start pad) starts in state 0 (entry: switch on) with one transition "#178
+in state 0 → state 1" (entry: switch off its 9 descendants). #178 is a
+folder that sits in state 1 and drops to 0 while Mendel touches its
+subtree (events 1); its initial state is 1. Applied at load (exe), #193 stays on and #194 spawns
+Mendel after 100 ticks; with the initial states merely queued until the
+first tick's apply pass (the port before this fix), #193 read #178 in state
+0 on tick 0 and switched off for good, so Mendel only appeared with the
+debug "wake every machine". The same mistake made many objects evaluate
+state 0's transitions once on tick 0 (e.g. section 2's #24..#45 jumped from
+initial state 3 to 1), and let children of folders that disable themselves
+at load run one tick.
 
 `StateMachine::evaluate` / `resolve` and `Condition::eval` in `logic.rs`
 implement exactly this against a `LogicView` trait.
@@ -546,8 +593,8 @@ designed around **24 ticks per second** (inferred; the idle handler
 `App_IdleTick` @ `0x4218d0` calls the tick when `GetTickCount()` passes
 `last + period`, but the period's setter was not found).
 
-**Level start**: load the section (objects, initial states queued) → first
-tick runs every object's entry actions → the `Strt` object's state machine
+**Level start**: load the section (objects read, then every initial state
+entered with its entry actions, §2 "Level load") → snapshot → ticks → the `Strt` object's state machine
 fires its trigger (after e.g. 100 ticks or on an event), which spawns
 Mendel at `Strt.position + offset` facing `heading` (`Game_SpawnCreature`
 sets `+0x17eff8`, sets his floor contact to (the portal, `ints[0]`) and runs `Camera_Init`, §6; the
