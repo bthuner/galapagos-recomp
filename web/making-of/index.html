@@ -336,6 +336,22 @@ pos = first_stream_with_valid_crc(overlay)
           floors are cruel: each is also a delayed lethal floor, so Mendel spends eighty ticks frantic before he
           dies.
         </p>
+        <h3>When the footage disagrees with the code</h3>
+        <p>
+          Two things in the video still looked different from ours: the intro's white light panels, which the video
+          shows as grids of square panes and we drew as single large soft panels, and Mendel's legs, lavender there
+          and teal here. This time the answer was mostly "measure before you fix".
+        </p>
+        <ul class="strings">
+          <li><b>The legs</b><span>averaged over the pixels around them, the hue is 225–229° in the footage and 227–230° in ours. Same colour. The "lavender" is the video's chroma blur mixing his fine violet and teal streaks; run our frame through the same 4:2:0 subsampling and it turns lavender too</span></li>
+          <li><b>The panels</b><span>each light wall is one quad with one texture: a white tile split in four by a dark cross. The exe gives every polygon the same texels, (0,127), (0,0), (127,0), at load (<code>0x42320d</code>), and never changes them; the Direct3D path solves the texture map from exactly those (<code>0x40b2f0</code>). One copy per wall, which is what we draw</span></li>
+          <li><b>The video</b><span>textures at a fixed density instead, about one texel per 16 world units. A test render with that rule reproduces the panel grids, the pillar's stripes and the floor grid almost exactly. But the CD's own geometry is built for the exe's rule: in World 1, 128 of 283 neighbouring same-texture polygons line up under it, and only 2 or 3 under a fixed density. We keep what this CD's exe does; the footage seems to come from a different build</span></li>
+        </ul>
+        <p>
+          The search did turn up one real bug. In 1997 Direct3D sampled textures bilinearly with no mipmaps
+          (<code>0x40a640</code>). We used trilinear mipmaps and a <code>fract()</code> for wrapping, which drew thin dashed
+          seams across panels and floors. Plain bilinear with the sampler's own repeat removes them.
+        </p>
         <h3>Seven ways to leave the world</h3>
         <p>
           Until now, when Mendel died or a predator vanished, our port just blinked them. In 1997 these moments
@@ -820,6 +836,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> The original lighting: per-polygon levels from materials, Direct3D diffuse plus specular, per-vertex fog (white in World 1), and Brightness as the palette adjustment it really was.</li>
           <li><time>2026‑11‑02</time> Mendel's per-face texture offsets (his glowing head) and front-face culling as the exe does it, glass excepted.</li>
           <li><time>2026‑11‑02</time> The seven transition effects (fade, burst, squash, jolt, melt, stretch, shatter) replace the blinking, for Mendel and the predators; gates white out before the level changes.</li>
+          <li><time>2026‑11‑02</time> Textures sampled like Direct3D (bilinear, no mipmaps): no more dashed seams. Mendel's legs and the light panels measured against the footage: the legs match, and the panels follow this CD's exe.</li>
           <li><time>2026‑11‑02</time> The bounce response (<code>0x408c50</code>) ported exactly, for predators and the camera: a perpendicular push only when the probe went behind the wall, plus the stored normal's nudge.</li>
           <li><time>2026‑11‑02</time> Level load enters every initial state before the first tick, as <code>0x4222d0</code> does: World 2 (and World 1) now spawn Mendel without "Wake every machine".</li>
           <li><time>2026‑11‑02</time> Blinking reported again: traced to a browser serving the pre-fix engine from its cache. Checked against the footage; the engine is now always revalidated before use.</li>

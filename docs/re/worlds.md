@@ -188,6 +188,24 @@ textures (marble, lava, water, alien skins...); each goes to
 `Renderer_AddTexture128` @ `0x405580`, which allows at most 40 — matching
 `"Not a vaild texture index"` (`0x40f4ca`, asserts `index < 0x28`).
 
+**Direct3D upload** (observed). With Direct3D on, the reader hands each
+texture to the renderer's vtable `+0x20` = `0x40adc0` together with a
+palette built *once, from the raw section palette* (`0x42eba0`: bytes 1,
+3, 5 of each 6-byte entry, the high bytes of red, green, blue in that
+order, into `+0x17e958`, 4 bytes an entry). The brightness preference's
+working palette (`+0x127a50`, `0x403130`) is not used there, so in
+Direct3D the preference does not touch the 3-D textures (the port's
+shader still applies it: a known deviation, harmless at "Standard").
+`0x40adc0` creates a 128 × 128 system-memory texture surface (64 × 64,
+every other texel, when `0x40ad00` found fewer than ten 128 × 128 video
+textures) in the display's 16-bit pixel format and fills it texel by
+texel: `(R >> 3) << rshift | (G >> 2 or 3) << gshift | (B >> 3) <<
+bshift`, masks and shifts read from the primary surface by `0x40a940`
+(5-6-5 or 5-5-5; which one depends on the card). That truncation is the
+only colour change on the way: at most −7/255 per channel, no channel
+swap, no rounding that turns a hue (Mendel's leg skin, averaged: hue 237° → 235°).
+`0x40b0f0` pages the surfaces into a small cache of video textures.
+
 ### 5.3 Colour ramps are materials; how a polygon is lit — decoded
 
 `Renderer_ReadColorRamps` @ `0x42ece0`: `u16 count` (62 in every section),
@@ -391,10 +409,74 @@ vertex_count x { i16 x, i16 y, i16 z }               local space
 World space = `position + vertex` (verified by rendering a wireframe of every
 object of section 1: towers, walkways and bridges line up). There are **no UVs
 on disk**. The in-memory polygon (0x68 bytes) starts with default texture
-coordinates (0,127), (0,0), (127,0) for its first three vertices — the whole
-128x128 texture stretched across the polygon (inferred from the initialiser at
-`0x42320d`); `GameObject_ComputePolyTextureBasis` @ `0x41d6d0` derives a plane
+coordinates (0,127), (0,0), (127,0) for its first three vertices
+(`0x42320d`: floats at `+0x44..+0x58`, `0x42fe0000` = 127.0) — the whole
+128x128 texture stretched across the polygon, see "Texture coordinates"
+below; `GameObject_ComputePolyTextureBasis` @ `0x41d6d0` derives a plane
 basis from those vertices for scrolling textures.
+
+#### Texture coordinates and sampling — observed
+
+Nothing ever rewrites the polygon's `+0x44..+0x58` texels for a world
+mesh (no other store to those fields in the exe; the only other mesh
+reader, Mendel's `0x426c50`, fills them from his file UVs). The Direct3D
+renderer turns them into one `(u, v)` per vertex when it first meets a
+mesh (`0x40c130` → `0x40b2f0`, again whenever the mesh is marked
+changed): it rotates the polygon into its plane (`0x431ea0` cross
+product, `0x430ff0` rotation, `0x431a60`), solves the affine map that
+sends vertices 0, 1, 2 to the three texels, and evaluates it at **every**
+vertex, divided by 128 (`0x40b62e..0x40b6b1`, constant `0x45f368` =
+128.0). That answers the old question for polygons of more than four
+vertices: same affine map, any `n` (concave ones are ear-clipped into
+triangles by `0x40be00`, `+0x168/+0x16c` of the per-polygon record, with
+the same per-vertex coordinates). Polygons crossing the screen edge or
+the near plane are clipped with a camera-space copy of the same map
+(`0x40b750`, used by `0x40e850` / `0x40e020`). `0x40e850` adds the frame
+offset, `(u & 0x1ff) / 128` (an integer number of textures away from the
+raw `u / 128` the port adds, so the same picture), and `0x40c330` copies
+the result into the `D3DTLVERTEX` unchanged. The software renderer does
+the same from the same texels (`0x404100`, offset `& 0x7f`). So **one
+copy of the texture covers the parallelogram of the first three
+vertices**, whatever the polygon's size. The port does exactly this
+(`world.rs`, `emit_object`); test
+`birth_room_light_panels_are_one_copy_of_texture_9_when_data_present`.
+
+Sampling (`0x40a640`, render states): `TEXTUREMAG` (0x11) and `TEXTUREMIN`
+(0x12) both `D3DFILTER_LINEAR` (2), i.e. bilinear **without mip-maps**;
+`TEXTUREPERSPECTIVE` (4) on; `TEXTUREADDRESS` (3) is set nowhere (not
+there, not in the draw loop `0x40f000`), so it stays Direct3D's `WRAP`. The port built mip-maps (`LINEAR_MIPMAP_LINEAR`) and wrapped with
+`fract()` in the shader; at every repeat boundary `fract` jumps, the
+derivative explodes, the smallest mip level is picked, and a dashed grey
+seam appeared (across the light panels, floors). It now samples like the
+exe: `LINEAR`, no mip-maps, the sampler's `REPEAT`.
+
+**The 1997 footage disagrees on texel density** (measured, unresolved).
+In the reference video the birth room's white light panels (#60, #61,
+#63, #65: one 17,841 × 12,817 quad each, texture 9, a white tile cut in
+four by a dark cross, material 41 = level 15, plain texture, no specular)
+show a *grid* of white squares; the rule above puts a single copy on each
+wall, shifted by the offset (−66, −1224) → 446/128, 312/128 textures so
+that the cross lands on the edges: one big rounded white panel, which is
+what the port draws. It is not the specular wash (level 15 has none,
+`0x40c330`), not mip-mapping (the walls are magnified) and not the
+texture index. The same holds everywhere the footage can be measured:
+the pillar under the start pad (#58, sides 850 × 6,223, texture 12) shows
+in the footage a bright bar about every 2,000 world units along its
+length (intensity profile of the 0:10 frame: three bright bars over the
+6,223-unit side), i.e. about three copies, where the
+rule gives one; its octagonal top (765-unit edges) shows one copy of
+texture 15 where the rule gives about 2.4; the floor around the room shows
+a cyan grid that the rule spreads too thin to see. A test render that
+replaces 127 texels per reference edge by *edge length / 16* (one texel
+per 16 world units, 2,048 units a texture) reproduces all of these at
+once (scratch comparisons `05-…`, `06-…`). The exe on this CD cannot
+produce that: the texels are the constant 127 and nothing scales them.
+The footage (an old-games.ru recording) therefore comes from a build or
+data set that mapped textures at a fixed world density; the CD's own data
+were made for the stretch rule (of 283 pairs of coplanar, same-texture
+neighbours sharing an edge in section 1, 128 have continuous texture
+coordinates under the stretch rule with their stored offsets, 2–3 under
+a fixed density of 8–32 units per texel). The port keeps the CD exe's rule.
 
 #### Appearance — `PolyAppearance_Read` @ `0x42e180` — observed
 
@@ -494,8 +576,10 @@ polygon counts equal to mesh polygon counts, and the four sound qualities.
   (§5.3); the other is presumably the fog step the software renderer
   applies when a span's material has `m5` (`0x404660`), towards the
   background colour (`0x402d82` reads it while building the table).
-* Exact UV rule for polygons with more than 4 vertices, and the meaning of the
-  appearance `flags` bits.
+* The meaning of the appearance `flags` bits. (The UV rule for polygons of
+  more than 4 vertices is settled: "Texture coordinates and sampling".)
+* Which build the reference footage shows: its texel density (one texel
+  per ≈ 16 world units) is not what this CD's exe computes.
 * The `folder` and `flags` object fields, the camera key
   fields, the 468-byte trailer.
 * Why there are 8 sections when the readme talks about 5 worlds (the overlay

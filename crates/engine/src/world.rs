@@ -606,6 +606,48 @@ mod tests {
         }
     }
 
+    /// The white light panels around the birth tube (section 0, objects
+    /// #60, #61, #63, #65): one 17,841 × 12,817 quad each, texture 9 (a
+    /// white tile cut in four by a dark cross), material 41, texel offset
+    /// (−66, −1224). Material 41 reaches the middle row whatever the light
+    /// (level 15: the plain texture, no specular wash, `0x40c330`), and the
+    /// exe's rule (texels (0,127), (0,0), (127,0) at the first three
+    /// vertices, `0x42320d`, solved over the polygon by `0x40b2f0`) puts
+    /// *one* copy of the texture on the whole wall: the offset, 446/128 and
+    /// 312/128 textures, slides the dark cross to the edges, which is the
+    /// one big rounded panel the port draws. The 1997 footage shows a grid
+    /// of squares instead (see docs/re/worlds.md, "Texture coordinates").
+    #[test]
+    fn birth_room_light_panels_are_one_copy_of_texture_9_when_data_present() {
+        let Some(d) = data() else { return };
+        let s = Archive::parse(&d).unwrap().world(0).unwrap();
+        let m = WorldMesh::build(&s);
+        for (id, poly) in [(60, 4), (61, 4), (63, 3), (65, 3)] {
+            let Object::World(w) = &s.objects[id - 1] else { panic!("#{id} is a world object") };
+            let f = w.appearance.as_ref().unwrap()[0].polygons[poly][0];
+            assert_eq!((f.texture, f.shade, f.u, f.v), (9, 41, -66, -1224), "#{id}");
+            let mat = material(s.color_ramps[41]);
+            for n in [[0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]] {
+                assert_eq!(light_level(mat, &m.light, n), 15, "material 41 is the plain texture");
+            }
+            assert_eq!(d3d_colour(15, false), (255, 0), "full diffuse, no specular");
+            let r = m.poly_ranges[m.draw_of_object[id - 1].unwrap()][poly];
+            let uv: Vec<[f32; 2]> = (r.first..r.first + r.count)
+                .map(|i| {
+                    let o = i as usize * FLOATS_PER_VERTEX;
+                    [m.vertices[o + 3], m.vertices[o + 4]]
+                })
+                .collect();
+            for k in 0..2 {
+                let lo = uv.iter().map(|t| t[k]).fold(f32::MAX, f32::min);
+                let hi = uv.iter().map(|t| t[k]).fold(f32::MIN, f32::max);
+                assert!((hi - lo - 127.0 / 128.0).abs() < 1e-3, "#{id}: one copy across the wall ({lo}..{hi})");
+            }
+            let base = [(-66 & 0x1ff) as f32 / 128.0, (-1224 & 0x1ff) as f32 / 128.0];
+            assert_eq!(base, [446.0 / 128.0, 312.0 / 128.0]);
+        }
+    }
+
     /// The backface flag of the glass (`culls_glass`): the intro capsule
     /// #3 ends with glass (polygons 20..=31), so its veil is seen from
     /// inside and outside; the arrival pad #83 has none and is culled.
