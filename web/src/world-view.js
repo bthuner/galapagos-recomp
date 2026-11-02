@@ -1,6 +1,7 @@
 // A WebGL2 viewer for one world section.
 //
-// The engine gives us a flat array of triangles (x, y, z, u, v, layer, light)
+// The engine gives us a flat array of triangles (x, y, z, u, v, layer,
+// light, nx, ny, nz)
 // and a stack of 128×128 textures. WebGL2's TEXTURE_2D_ARRAY holds the whole
 // stack in one object, so no texture switches are needed. Vertices are local
 // to their object, and each object is drawn with its own model matrix, which
@@ -17,57 +18,105 @@
 // camera, which the engine runs (crates/engine/src/camera.rs); dragging
 // orbits around Mendel for a while, then hands the view back.
 
+// Lighting, as the 1997 Direct3D renderer did it (crates/engine/src/world.rs
+// has the Rust reference of every step, with the exe's addresses):
+//
+// 1. light level (0x401b70), per polygon, every frame, with the normal
+//    turned by the object's current rotation:
+//      L = base − m3·intensity·(n·l) if n·l < 0      (base = m0 + m2·ambient)
+//      level = trunc((min(L/2, 0.5) + m1, at most 1) · 31)
+// 2. Direct3D colours (0x40c3e2): below row 16 a diffuse grey level/15 that
+//    darkens the texture; from row 16 full texture plus a white specular
+//    (level − 16)/16 added on top. Glass: half the diffuse, no specular.
+// 3. vertex fog (0x40c4d3): factor 1 − m5 · min(view depth, 24000)/24000,
+//    towards black, or white in a section with a white background.
+//
+// The vertex `light` float is the polygon's material (an index into uMat);
+// a negative one is pre-lit (Mendel): level −1 − light, fog amount in nx.
 const VS = `#version 300 es
 layout(location=0) in vec3 aPos;
 layout(location=1) in vec2 aUV;
 layout(location=2) in float aLayer;
 layout(location=3) in float aLight;
+layout(location=4) in vec3 aNormal;
 uniform mat4 uViewProj;
 uniform mat4 uModel;
-out vec2 vUV; flat out float vLayer; out float vLight; out float vDepth;
+// The section's materials: m0 + m2·ambient, m1, m3·intensity, m5.
+uniform vec4 uMat[64];
+uniform vec3 uLightDir; // unit vector, the direction light travels
+out vec2 vUV; flat out float vLayer; flat out vec2 vColour; out float vFog;
 void main() {
-  vUV = aUV; vLayer = aLayer; vLight = aLight;
+  vUV = aUV; vLayer = aLayer;
+  float level, m5;
+  if (aLight >= 0.0) {
+    vec4 m = uMat[int(aLight)];
+    float d = dot(mat3(uModel) * aNormal, uLightDir);
+    float L = d < 0.0 ? m.x - m.z * d : m.x;
+    level = floor(min(min(L / 2.0, 0.5) + m.y, 1.0) * 31.0);
+    m5 = m.w;
+  } else {
+    level = -aLight - 1.0;
+    m5 = aNormal.x;
+  }
+  float diffuse = 255.0, specular = 0.0;
+  if (level < 16.0) diffuse = min(floor(level / 15.0 * 255.0), 255.0);
+  else specular = min(floor((level - 16.0) / 16.0 * 255.0), 255.0);
+  if (aLayer > -4.5 && aLayer < -3.5) { diffuse = floor(diffuse / 2.0); specular = 0.0; }
+  vColour = vec2(diffuse, specular) / 255.0;
   gl_Position = uViewProj * uModel * vec4(aPos, 1.0);
-  vDepth = gl_Position.w;
+  // Direct3D's 1/rhw is the view depth, which is our clip w.
+  float z = min(floor(max(gl_Position.w, 0.0)), 24000.0);
+  vFog = floor(255.0 - z / 24000.0 * m5 * 255.0) / 255.0;
 }`;
 
 const FS = `#version 300 es
 precision highp float;
 precision highp sampler2DArray;
 uniform sampler2DArray uTex;
-uniform float uFar;
-uniform float uBright; // Preferences ▸ Brightness, 1.0 = Standard
+// Preferences ▸ Brightness (0x42ea40 → 0x403130): every palette channel
+// moves towards white (> 0) or black (< 0) by this much, except a channel
+// already at the other end (black stays black when lightening).
+uniform float uBright;
+uniform vec3 uFog; // fog colour: black, or white (world.rs fog_white)
 // The palette flash (flash.rs): each channel becomes lo + c * (hi - lo).
 uniform vec3 uTintLo;
 uniform vec3 uTintHi;
 // 0: the opaque pass (glass skipped); 1: the glass pass (only glass).
 uniform int uGlass;
-in vec2 vUV; flat in float vLayer; in float vLight; in float vDepth;
+in vec2 vUV; flat in float vLayer; flat in vec2 vColour; in float vFog;
 out vec4 color;
+vec3 brighten(vec3 c) {
+  if (uBright > 0.0) return c + (1.0 - c) * uBright * step(0.5 / 255.0, c);
+  if (uBright < 0.0) return c + c * uBright * (1.0 - step(254.5 / 255.0, c));
+  return c;
+}
 void main() {
-  // Layer -4 is glass (world.rs GLASS): in 1997 an untextured grey, added
-  // onto what's behind (Direct3D blend ONE, ONE). The engine computed that
-  // grey from the polygon's material and passes it in u.
+  // Layer -4 is glass (world.rs GLASS): an untextured grey, added onto
+  // what's behind (Direct3D blend ONE, ONE).
   bool glass = vLayer > -4.5 && vLayer < -3.5;
   if (glass != (uGlass == 1)) discard;
   if (glass) {
-    if (vUV.x <= 0.0) discard; // level 0: the exe skips it
-    vec3 g = vec3(vUV.x * (1.0 - 0.85 * clamp(vDepth / uFar, 0.0, 1.0)));
+    if (vColour.x <= 0.0) discard; // level 0: the exe skips it
+    vec3 g = mix(uFog, vec3(vColour.x), vFog);
     // Additive light takes only the flash's scale, not its offset.
     color = vec4(clamp(g * (uTintHi - uTintLo), 0.0, 1.0), 1.0);
     return;
   }
   if (vLayer < -1.5) discard; // hidden in the current appearance state
   // Textures repeat, as in the original's wrap-around texel addressing.
-  vec3 c = vLayer < 0.0 ? vec3(0.55) : texture(uTex, vec3(fract(vUV), vLayer)).rgb;
-  // Depth cueing: surfaces fade to black with distance, as the original's
-  // shade table did (visible in gameplay footage).
-  c *= uBright * vLight * (1.0 - 0.85 * clamp(vDepth / uFar, 0.0, 1.0));
+  vec3 t = vLayer < 0.0 ? vec3(0.55) : texture(uTex, vec3(fract(vUV), vLayer)).rgb;
+  // MODULATE by the diffuse grey, add the specular, then fog.
+  vec3 c = min(brighten(t) * vColour.x + vColour.y, 1.0);
+  c = mix(uFog, c, vFog);
   // The 1997 game remapped its 8-bit palette for a flash; we remap the
   // final colour the same way.
-  c = clamp(uTintLo + clamp(c, 0.0, 1.0) * (uTintHi - uTintLo), 0.0, 1.0);
+  c = clamp(uTintLo + c * (uTintHi - uTintLo), 0.0, 1.0);
   color = vec4(c, 1.0);
 }`;
+
+// Preferences ▸ Brightness, Darkest … Lightest: the palette shift the exe
+// picks for each (0x42ea40: 2 = towards black, 1 = towards white).
+const BRIGHTNESS = [-0.3, -0.2, -0.1, 0, 0.05, 0.1, 0.15];
 
 // ——— tiny matrix kit (column-major, like WebGL expects) ———
 function perspective(fovY, aspect, near, far) {
@@ -102,6 +151,10 @@ function compile(gl, vs, fs) {
   return p;
 }
 
+// Floats per vertex, and where each attribute sits (world.rs).
+const STRIDE = 10;
+const ATTRIBUTES = [[0, 3, 0], [1, 2, 3], [2, 1, 5], [3, 1, 6], [4, 3, 7]];
+
 const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
 // The original's field of view: 110° in `View_Init` @ 0x4033bb, turned
@@ -124,14 +177,17 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   if (!gl) throw new Error("WebGL2 is not available");
   const prog = compile(gl, VS, FS);
   const uViewProj = gl.getUniformLocation(prog, "uViewProj");
-  const uFar = gl.getUniformLocation(prog, "uFar");
   const uBright = gl.getUniformLocation(prog, "uBright");
+  const uFog = gl.getUniformLocation(prog, "uFog");
+  const uMat = gl.getUniformLocation(prog, "uMat");
+  const uLightDir = gl.getUniformLocation(prog, "uLightDir");
   const uTintLo = gl.getUniformLocation(prog, "uTintLo");
   const uTintHi = gl.getUniformLocation(prog, "uTintHi");
   const uGlass = gl.getUniformLocation(prog, "uGlass");
-  // Preferences: brightness multiplier and render resolution. `pixels` is
-  // the canvas height in device pixels to aim for (0 = native).
-  let brightness = 1, pixels = 0;
+  // Preferences: brightness shift (BRIGHTNESS) and render resolution.
+  // `pixels` is the canvas height in device pixels to aim for (0 = native).
+  let brightness = 0, pixels = 0;
+  let fog = 0;
   const uModel = gl.getUniformLocation(prog, "uModel");
   let current = null;
   const vao = gl.createVertexArray();
@@ -143,9 +199,9 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   const mvbo = gl.createBuffer();
   gl.bindVertexArray(mvao);
   gl.bindBuffer(gl.ARRAY_BUFFER, mvbo);
-  for (const [loc, size, off] of [[0, 3, 0], [1, 2, 3], [2, 1, 5], [3, 1, 6]]) {
+  for (const [loc, size, off] of ATTRIBUTES) {
     gl.enableVertexAttribArray(loc);
-    gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 7 * 4, off * 4);
+    gl.vertexAttribPointer(loc, size, gl.FLOAT, false, STRIDE * 4, off * 4);
   }
 
   // Orbit camera state. Galapagos is Z-up: floors face +z, gravity pulls
@@ -156,7 +212,6 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   const UP = [0, 0, 1];
   const cam = { yaw: 0.8, pitch: 0.5, dist: 1, target: [0, 0, 0], flip: 1 };
   let radius = 1;
-  let fadeFar = 1;
   // Follow mode: the engine's camera, and an optional user look-around
   // (`look`: an orbit around Mendel that fades back to the original).
   const follow = { on: false, creature: null, look: null, cut: false };
@@ -166,14 +221,16 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     gl.bindVertexArray(vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
     gl.bufferData(gl.ARRAY_BUFFER, world.vertices, gl.STATIC_DRAW);
-    const stride = 7 * 4;
-    const attr = (loc, size, off) => {
+    for (const [loc, size, off] of ATTRIBUTES) {
       gl.enableVertexAttribArray(loc);
-      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, stride, off * 4);
-    };
-    attr(0, 3, 0); attr(1, 2, 3); attr(2, 1, 5); attr(3, 1, 6);
-    count = world.vertices.length / 7;
+      gl.vertexAttribPointer(loc, size, gl.FLOAT, false, STRIDE * 4, off * 4);
+    }
+    count = world.vertices.length / STRIDE;
     current = world;
+    gl.useProgram(prog);
+    gl.uniform4fv(uMat, world.materials.subarray(0, 64 * 4));
+    gl.uniform3fv(uLightDir, world.lightDir);
+    fog = world.fogColour;
 
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
     const layers = Math.max(1, world.textureCount);
@@ -186,8 +243,6 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     cam.target = [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2];
     radius = Math.hypot(x1 - x0, y1 - y0, z1 - z0) / 2;
     cam.dist = radius * 1.6;
-    // A far clip of 999999 means "no limit"; fall back to the world's size.
-    fadeFar = world.farClip > 0 && world.farClip < 900000 ? world.farClip : radius * 4;
   }
 
   // The camera basis of the last frame, for turning clicks into rays.
@@ -204,7 +259,8 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       canvas.style.imageRendering = pixels ? "pixelated" : "auto";
     }
     gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.clearColor(0, 0, 0, 1);
+    // The exe clears to its fog colour (0x40f5d7).
+    gl.clearColor(fog, fog, fog, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.enable(gl.DEPTH_TEST);
     if (!count) return;
@@ -223,8 +279,8 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     gl.useProgram(prog);
     viewProj = mul(proj, lookAt(view.eye, view.eye.map((e, i) => e + view.forward[i]), view.up));
     gl.uniformMatrix4fv(uViewProj, false, viewProj);
-    gl.uniform1f(uFar, fadeFar);
     gl.uniform1f(uBright, brightness);
+    gl.uniform3f(uFog, fog, fog, fog);
     const t = current.tint?.() ?? [0, 255, 0, 255, 0, 255];
     gl.uniform3f(uTintLo, t[0] / 255, t[2] / 255, t[4] / 255);
     gl.uniform3f(uTintHi, t[1] / 255, t[3] / 255, t[5] / 255);
@@ -234,7 +290,7 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     if (dirty) {
       gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
       const [a, b] = dirty;
-      gl.bufferSubData(gl.ARRAY_BUFFER, a * 7 * 4, current.liveVertices().subarray(a * 7, b * 7));
+      gl.bufferSubData(gl.ARRAY_BUFFER, a * STRIDE * 4, current.liveVertices().subarray(a * STRIDE, b * STRIDE));
     }
     const { draws } = current;
     const transforms = current.transforms();
@@ -255,7 +311,7 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       gl.bindBuffer(gl.ARRAY_BUFFER, mvbo);
       gl.bufferData(gl.ARRAY_BUFFER, mendel, gl.DYNAMIC_DRAW);
       gl.uniformMatrix4fv(uModel, false, IDENTITY);
-      gl.drawArrays(gl.TRIANGLES, 0, mendel.length / 7);
+      gl.drawArrays(gl.TRIANGLES, 0, mendel.length / STRIDE);
     }
     // Glass last, over everything it covers (Mendel in the capsule too):
     // depth-tested but not depth-writing, added onto the picture, as the
@@ -425,7 +481,8 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
 
   return {
     load,
-    setBrightness(b) { brightness = b; },
+    // Preferences ▸ Brightness: 0 Darkest … 3 Standard … 6 Lightest.
+    setBrightness(i) { brightness = BRIGHTNESS[i] ?? 0; },
     // Render height in pixels (240, 480), or 0 for the display's native.
     setResolution(h) { pixels = h; },
     // Where the camera is and where it looks, for the audio listener.

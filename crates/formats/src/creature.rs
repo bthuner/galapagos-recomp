@@ -168,6 +168,8 @@ pub struct Face {
     pub uv: Vec<[f32; 2]>,
     /// Absolute texture slot in the current section (16..=19).
     pub texture: u16,
+    /// The section colour ramp (material) of the polygon (4 or 8).
+    pub color_ramp: u16,
 }
 
 impl CreatureBody {
@@ -247,7 +249,7 @@ impl CreatureBody {
                     idx.reverse();
                 }
                 let uv = polygon_uvs(&vertices, &idx, &part.uv[i]);
-                faces.push(Face { indices: idx, uv, texture: part.attrs[i].texture + TEXTURE_BASE });
+                faces.push(Face { indices: idx, uv, texture: part.attrs[i].texture + TEXTURE_BASE, color_ramp: part.attrs[i].color_ramp });
             }
         }
         PosedMesh { vertices, faces }

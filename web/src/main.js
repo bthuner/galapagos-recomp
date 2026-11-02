@@ -170,7 +170,7 @@ async function boot(files) {
     engine.sim.wakeAll($("wake-all").checked);
     picker.querySelectorAll("button").forEach((b, j) => b.classList.toggle("is-on", j === i));
     summary =
-      `Section ${i}: ${w.objects} objects, ${w.vertices.length / 21} triangles, ${w.textureCount} textures, simulated at ${hz} Hz. ` +
+      `Section ${i}: ${w.objects} objects, ${w.vertices.length / 30} triangles, ${w.textureCount} textures, simulated at ${hz} Hz. ` +
       "Drag to orbit, wheel to zoom, shift- or middle-drag to pan. Click objects to trigger them, " +
       "right-click Mendel to touch him, hold Space to skip the introduction.";
     status("");
@@ -202,7 +202,7 @@ async function boot(files) {
     applyPrefs(p) {
       view.setResolution([240, 480, 0][p.resolution]);
       $("world").style.setProperty("--view-size", VIEW_SIZES[p.viewSize]);
-      view.setBrightness(0.55 + p.brightness * 0.15); // Darkest 0.55 … Standard 1.0 … Lightest 1.45
+      view.setBrightness(p.brightness); // Darkest 0 … Standard 3 … Lightest 6
       volume.gain.value = VOLUMES[p.volume];
       engine.setSoundQuality(p.fidelity + 1);
       sfx.flush();

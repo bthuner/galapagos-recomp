@@ -38,7 +38,7 @@ use crate::walker::{
     add, cross, dot, length, local_polys, normalize, ray_tri, scale, sub, turns, Drive, Faces, Frame, LocalPoly, Mover, Near, Tri,
     FLOOR, HAZARD, IDENTITY, SOLID, UP, V3,
 };
-use crate::world::{WorldMesh, FLOATS_PER_VERTEX};
+use crate::world::{self, Light, WorldMesh, FLOATS_PER_VERTEX};
 use galapagos_formats::creature::{Brain, CreatureBody, Lcg};
 use galapagos_formats::worlds::Section;
 
@@ -211,7 +211,10 @@ pub struct Creature {
     rng: Lcg,
     polys: Vec<Vec<LocalPoly>>,
     menc: Option<usize>,
-    light: V3,
+    /// The section's light and materials: his polygons are lit by the
+    /// section colour ramps their records name (4 or 8).
+    light: Light,
+    materials: Vec<[u16; 6]>,
     pub mode: Mode,
 
     /// The polygon walker (`creature+0x50`), walker.rs.
@@ -328,7 +331,6 @@ impl Creature {
         by_x.sort_by(|a, b| b.0.cmp(&a.0));
         let eyes = core::array::from_fn(|k| by_x.get(k).map_or(0, |e| e.1));
         let afflictions = Afflictions::new(rest.faces.len(), eyes);
-        let l = section.environment.light_direction;
         // Engine's load-time pose: SetPose(128, 1, 128, 0, 0).
         let stance = 128;
         let mut c = Creature {
@@ -337,7 +339,8 @@ impl Creature {
             rng: Lcg(1), // inferred: the engine-wide LCG's seed at load is not known
             polys,
             menc,
-            light: normalize([l[0] as f32, l[1] as f32, l[2] as f32]),
+            light: Light::of(&section.environment),
+            materials: section.color_ramps.clone(),
             mode: Mode::Absent,
             mover: Mover::default(),
             pos: [0.0; 3],
@@ -991,7 +994,9 @@ impl Creature {
 
 
     /// The posed body in world space: shell plus both leg sides, real UVs,
-    /// texture layers 16..19, flat Lambert light like the world's.
+    /// texture layers 16..19, lit like the world's polygons
+    /// ([`world::light_level`] of his world-space normals), so the shader
+    /// gets them pre-lit: `light = -1 - level`, the fog amount in `nx`.
     fn build_vertices(&mut self) {
         self.vertices.clear();
         let visible = match self.mode {
@@ -1011,19 +1016,30 @@ impl Creature {
                 continue;
             }
             let p = |k: usize| world[f.indices[k] as usize];
+            // (v1 − v0) × (v2 − v0) is the exe's (v2 − v1) × (v0 − v1).
             let n = normalize(cross(sub(p(1), p(0)), sub(p(2), p(0))));
-            // An affliction's colour ramp: 0x7fff is the normal ramp, less
-            // darkens it (`0x406110`: × 2v/65535), more whitens it.
-            // inferred: whitening drawn as a brighter light, up to × 1.5.
-            let b = *look.bright.get(k).unwrap_or(&NORMAL) as f32;
-            let ramp = if b < 32768.0 { b / 32767.0 } else { 1.0 + (b - 32767.0) / 65535.0 };
-            let light = (0.7 + 0.3 * dot(n, self.light).abs()) * ramp;
+            // Each polygon has its own copy of its section material, which
+            // the affliction manager restores every tick (0x405fc0). An
+            // affliction's brightness `v` rewrites the copy's first two
+            // terms (`0x406110`): below 0x8000 `m0 = 2v/65535, m1 = 0`,
+            // above it `m0 = 1, m1 = (v − 0x7fff)/2 / 65535` (whiter).
+            let mut m = world::material(self.materials.get(f.color_ramp as usize).copied().unwrap_or([0xffff, 0, 0, 0, 0, 0]));
+            let b = *look.bright.get(k).unwrap_or(&NORMAL);
+            if b != NORMAL {
+                (m[0], m[1]) = if b < 0x8000 {
+                    ((b as u32 * 2) as f32 / 65535.0, 0.0)
+                } else {
+                    (1.0, ((b as u32 - 0x7fff) / 2) as f32 / 65535.0)
+                };
+            }
+            let level = world::light_level(m, &self.light, n);
+            let (light, fog) = (-1.0 - level as f32, m[5]);
             let texture = look.texture.map_or(f.texture as f32, |t| t as f32);
             for k in 1..f.indices.len() - 1 {
                 for j in [0, k, k + 1] {
                     let v = p(j);
                     let [u, t] = f.uv[j];
-                    self.vertices.extend_from_slice(&[v[0], v[1], v[2], u / 128.0, t / 128.0, texture, light]);
+                    self.vertices.extend_from_slice(&[v[0], v[1], v[2], u / 128.0, t / 128.0, texture, light, fog, 0.0, 0.0]);
                 }
             }
         }

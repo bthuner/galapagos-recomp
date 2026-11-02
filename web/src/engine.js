@@ -54,7 +54,7 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
           const textureCount = wasm.world_texture_count();
           const mem = wasm.memory.buffer;
           return {
-            vertices: new Float32Array(mem, wasm.world_vertices_ptr(), verts * 7).slice(),
+            vertices: new Float32Array(mem, wasm.world_vertices_ptr(), verts * 10).slice(),
             textureCount,
             textures: new Uint8Array(mem, wasm.world_textures_ptr(), textureCount * 128 * 128 * 4).slice(),
             bounds: [...new Float32Array(mem, wasm.world_bounds_ptr(), 6)],
@@ -65,10 +65,17 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
             // returning a fresh view each frame (memory may have grown).
             transforms: () =>
               new Float32Array(wasm.memory.buffer, wasm.world_transforms_ptr(), wasm.world_draw_count() * 16),
-            liveVertices: () => new Float32Array(wasm.memory.buffer, wasm.world_vertices_ptr(), verts * 7),
+            liveVertices: () => new Float32Array(wasm.memory.buffer, wasm.world_vertices_ptr(), verts * 10),
             // Objects hidden by a -5 appearance frame (fresh view each frame).
             visible: () => new Uint8Array(wasm.memory.buffer, wasm.world_visible_ptr(), wasm.world_draw_count()),
             farClip: wasm.world_far_clip(),
+            // Lighting (crates/engine/src/world.rs, `light_level`): the
+            // section's materials (4 floats each, indexed by a vertex's
+            // `light`), the light's direction, and the fog / clear colour
+            // (0 black, 1 white).
+            materials: new Float32Array(mem, wasm.world_materials_ptr(), wasm.world_material_count() * 4).slice(),
+            lightDir: [...new Float32Array(mem, wasm.world_light_ptr(), 3)],
+            fogColour: wasm.world_fog_colour(),
           };
         },
       };
@@ -130,11 +137,11 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
     },
 
     // Mendel (see crates/engine/src/creature.rs). His posed mesh is rebuilt
-    // in world space every tick, in the world's 7-float vertex layout.
+    // in world space every tick, in the world's 10-float vertex layout.
     creature: {
       // A fresh view each call: memory may have grown, and the vertex
       // count changes (0 while he is absent or blinking).
-      vertices: () => new Float32Array(wasm.memory.buffer, wasm.creature_vertices_ptr(), wasm.creature_vertex_count() * 7),
+      vertices: () => new Float32Array(wasm.memory.buffer, wasm.creature_vertices_ptr(), wasm.creature_vertex_count() * 10),
       state() {
         const s = new Float32Array(wasm.memory.buffer, wasm.creature_state(), 16);
         return {
