@@ -837,6 +837,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> Mendel's per-face texture offsets (his glowing head) and front-face culling as the exe does it, glass excepted.</li>
           <li><time>2026‑11‑02</time> The seven transition effects (fade, burst, squash, jolt, melt, stretch, shatter) replace the blinking, for Mendel and the predators; gates white out before the level changes.</li>
           <li><time>2026‑11‑02</time> Textures sampled like Direct3D (bilinear, no mipmaps): no more dashed seams. Mendel's legs and the light panels measured against the footage: the legs match, and the panels follow this CD's exe.</li>
+          <li><time>2026‑11‑02</time> Rotation conditions now read the motion-key axes (rx, ry, rz), not field offsets. All 37 on the CD test rz in World 5, so nothing visible changes.</li>
           <li><time>2026‑11‑02</time> The bounce response (<code>0x408c50</code>) ported exactly, for predators and the camera: a perpendicular push only when the probe went behind the wall, plus the stored normal's nudge.</li>
           <li><time>2026‑11‑02</time> Level load enters every initial state before the first tick, as <code>0x4222d0</code> does: World 2 (and World 1) now spawn Mendel without "Wake every machine".</li>
           <li><time>2026‑11‑02</time> Blinking reported again: traced to a browser serving the pre-fix engine from its cache. Checked against the footage; the engine is now always revalidated before use.</li>

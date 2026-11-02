@@ -134,9 +134,11 @@ pub enum Condition {
     /// 0x0a..0x0f: position component (0 = x, 1 = y, 2 = z) `>=` / `<=` n.
     PositionAtLeast(u8, i32),
     PositionAtMost(u8, i32),
-    /// 0x10..0x15: rotation `& 0x3ff` `>=` / `<=` n. Axis order follows the
-    /// vtable getters: opcodes 0x10/0x11 read rotation[1], 0x12/0x13
-    /// rotation[0], 0x14/0x15 rotation[2].
+    /// 0x10..0x15: rotation `& 0x3ff` `>=` / `<=` n, in motion-key order
+    /// `(rx, ry, rz)`: 0x10/0x11 read `rx`, 0x12/0x13 `ry`, 0x14/0x15 `rz`.
+    /// (The getters at vtable `+0x38/+0x3c/+0x40`, 0x42d2xx, return the
+    /// object's `+0xf2/+0xf0/+0xf4`, which is exactly where the pose
+    /// setters put `rx/ry/rz`; see `sim.rs` "transforms".)
     RotationAtLeast(u8, i32),
     RotationAtMost(u8, i32),
     /// 0x16: object `id` (1-based object-list index) is in state `state`.
@@ -160,8 +162,10 @@ impl Condition {
         }
         let v = c.u32()?;
         let axis_pos = |o: u16| ((o - 0x0a) / 2) as u8;
-        // rotation getters: 0x38 -> +0xf2, 0x3c -> +0xf0, 0x40 -> +0xf4
-        let axis_rot = |o: u16| [1u8, 0, 2][((o - 0x10) / 2) as usize];
+        // Rotation getters: vtable 0x38 -> +0xf2 (0x423510), 0x3c -> +0xf0
+        // (0x423500), 0x40 -> +0xf4 (0x423520), i.e. key rx, ry, rz. We
+        // once indexed these by field offset ([1, 0, 2]) instead of by key.
+        let axis_rot = |o: u16| ((o - 0x10) / 2) as u8;
         Ok(match op {
             0x01 => Condition::Clicked,
             0x02 => Condition::NotClicked,
@@ -221,7 +225,8 @@ pub trait LogicView {
     fn random(&self) -> u32;
     /// Current animated position (world units).
     fn position(&self) -> [i32; 3];
-    /// Current animated rotation (1024ths of a turn, not wrapped).
+    /// Current animated rotation (1024ths of a turn, not wrapped), in
+    /// motion-key order `(rx, ry, rz)`.
     fn rotation(&self) -> [i16; 3];
     /// Current state of the object with 1-based list index `id`.
     fn state_of(&self, id: u16) -> u16;
@@ -744,6 +749,20 @@ mod tests {
         assert_eq!((a.goto_state, a.appearance), (Some(0), Some(1)));
         assert!(Condition::EventEnded(1).eval(&v));
         assert!(Condition::RotationAtMost(1, 5).eval(&v));
+    }
+
+    /// Opcodes 0x10..0x15 read the rotation in key order (rx, ry, rz):
+    /// the getters return `+0xf2`, `+0xf0`, `+0xf4`, where the pose setters
+    /// store rx, ry, rz.
+    #[test]
+    fn rotation_conditions_read_key_order() {
+        for (op, axis) in [(0x10u16, 0u8), (0x11, 0), (0x12, 1), (0x13, 1), (0x14, 2), (0x15, 2)] {
+            let mut b = op.to_le_bytes().to_vec();
+            b.extend_from_slice(&7u32.to_le_bytes());
+            let c = Condition::read(&mut Cursor::new(&b)).unwrap();
+            let want = if op % 2 == 0 { Condition::RotationAtLeast(axis, 7) } else { Condition::RotationAtMost(axis, 7) };
+            assert_eq!(format!("{c:?}"), format!("{want:?}"), "opcode {op:#x}");
+        }
     }
 
     #[test]
