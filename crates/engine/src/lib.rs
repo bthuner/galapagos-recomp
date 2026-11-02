@@ -1021,3 +1021,11 @@ pub extern "C" fn sound_set_quality(q: u32) {
 pub extern "C" fn world_visible_ptr() -> *const u8 {
     with_mesh(|m| m.visible.as_ptr(), core::ptr::null())
 }
+
+/// One byte per draw: 1 when the object's glass loses its back faces too
+/// (the mesh backface flag `+0x2a`, see `world::culls_glass`), else 0.
+/// Textured polygons always lose theirs.
+#[no_mangle]
+pub extern "C" fn world_cull_ptr() -> *const u8 {
+    with_mesh(|m| m.cull.as_ptr(), core::ptr::null())
+}

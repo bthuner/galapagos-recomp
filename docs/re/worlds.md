@@ -285,10 +285,53 @@ The port: `crates/engine/src/world.rs` (`light_level`, `d3d_colour`,
 `fog_factor`, `fog_white`) is the Rust reference; the vertex shader in
 `web/src/world-view.js` evaluates it per frame with each object's model
 matrix. Mendel's polygons use the section materials their records name
-(4 or 8, see mendel.md); an affliction's brightness `v` rewrites the first two
+(4 or 8, see mendel.md §1.3); an affliction's brightness `v` rewrites the first two
 terms of his per-polygon copy (`0x406110`: below 0x8000 `m0 = 2v/65535,
 m1 = 0`, else `m0 = 1, m1 = (v − 0x7fff)/2/65535`), restored every tick by
 `0x405fc0`.
+
+**Which faces are drawn** (observed). The polygon normal of `0x4019a0`,
+`(v2 − v1) × (v0 − v1)` from the on-disk vertex order, marks the front,
+and two tests keep only the front:
+
+* the mesh draw `0x402490` (both renderers): when the mesh's flag `+0x2a`
+  is set, a polygon is skipped if `n · v0 ≥ 0` in camera space, `v0` its
+  first vertex seen from the eye at the origin (`0x402508..0x4025c6`).
+  The flag is 1 from the mesh constructor (`0x402150`); `0x4022f0` sets
+  it. The world-object frame appliers set it to `glass == 0` for the
+  frame they applied **last**, i.e. the object's last polygon
+  (`0x4237e8`, `0x4239c0`): an object ending with glass (the intro capsule
+  #3) loses the test entirely. Four effect set-ups save it at their
+  `+0x38` and override it (`0x411640`, `0x416850`, `0x429bc0` clear it,
+  `0x40fa50` sets it to its flags `& 4`; inferred: the break-up and
+  materialise effects); `0x429cf0` restores the saved value.
+* Direct3D: the draw loop `0x40f000` sets `CULLMODE` (render state
+  `0x16`) to 3 (counter-clockwise) for the texture buckets and 1 (none)
+  for the glass bucket `0x27`. It fans a polygon backwards from its last
+  vertex, triangles `(n−1, k+1, k)` (`0x40f325..0x40f390`), and projects
+  camera x to the right and camera z up with screen y down (`0x401640`).
+  inferred: the camera basis is a rotation of the world's (right-handed),
+  so a front polygon, counter-clockwise on screen in its own order, is
+  clockwise once reversed, and `CULL_CCW` removes back faces only — as it
+  must, since the world shows on the footage.
+
+So every textured polygon is one-sided, whatever the flag, and glass is
+one-sided unless its object ends with glass (3 objects in section 0, 18
+in section 7, none elsewhere; one glass polygon of section 5 sits in a
+culled mesh). Panels meant to be seen from both sides are modelled
+twice: 84 polygons on the CD have a reversed twin in their own mesh
+(8 in section 0, 66 in section 5, 10 in section 7). Mendel's body is a
+mesh like the others (flag 1) and is culled too. The port enables
+WebGL's back-face culling with counter-clockwise fronts (our fans
+`(0, k, k+1)` keep the polygon's order and our view is right-handed);
+`WorldMesh::cull` carries the flag for the glass pass. Verified: Mendel
+always stands on the drawn side of his floor polygon (test
+`mendel_stands_on_the_drawn_side_of_his_floors`, section 0 and section
+2's upside-down start), the pad #83 winds counter-clockwise seen from
+above, and frame-by-frame comparisons of the original camera with and
+without culling differ only where the camera looks through the back of
+a wall: in the intro the camera rides behind the white light panels and
+now sees the capsule through them, as the footage does (0:55).
 
 ### 5.4 The world sound set — observed
 
@@ -394,7 +437,9 @@ alpha blending on with the start-up factors `ONE, ONE` (`0x40a640`), no
 texture and no culling (render state `CULLMODE` 1; every other bucket
 uses 3 = counter-clockwise), skipping polygons whose level is 0; its grey
 is half the usual diffuse, with no highlight (`0x40c478`), and it is
-fogged like any polygon. The software renderer (`0x404660`) never lets
+fogged like any polygon. Glass loses its back faces only through the
+mesh's own test, which is off when the object's last polygon is glass
+(see "Which faces are drawn", §5.3). The software renderer (`0x404660`) never lets
 glass hide a span: it adds the glass level to the light level of the
 surface behind. Section 0's intro capsule #3 is glass: material 49 (level
 0, invisible) while docked, 17–19 during the ride. `-5` hides the
@@ -449,8 +494,6 @@ polygon counts equal to mesh polygon counts, and the four sound qualities.
   (§5.3); the other is presumably the fog step the software renderer
   applies when a span's material has `m5` (`0x404660`), towards the
   background colour (`0x402d82` reads it while building the table).
-* Direct3D culls counter-clockwise triangles outside the glass bucket
-  (`0x40f000`); the port still draws both faces.
 * Exact UV rule for polygons with more than 4 vertices, and the meaning of the
   appearance `flags` bits.
 * The `folder` and `flags` object fields, the camera key
