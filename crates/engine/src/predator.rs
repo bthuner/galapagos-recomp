@@ -342,7 +342,7 @@ impl Predator {
             off[k / 2] = if k % 2 == 0 { t.probe as f32 } else { -t.probe as f32 };
             let from = out.map(|c| c as f32);
             let to = sim::apply(&m, off);
-            let Some(hit) = sim.creature.as_ref().and_then(|c| c.probe(sim, from, to, PROBE_MASK, self.obj)) else { continue };
+            let Some(hit) = sim.creature.as_ref().and_then(|c| c.probe(sim, from, to, PROBE_MASK, self.obj, t.shift)) else { continue };
             self.contact = true;
             // `WorldObject_PostEvent` with the predator's flags; MEnc
             // forwards them to Mendel (0x426150 → 0x41cb80).
@@ -352,12 +352,9 @@ impl Predator {
                     c.react(t.flags);
                 }
             }
-            // inferred: the response of `0x408c50` is approximated by
-            // pulling the probe tip back onto the surface; the exe then adds
-            // the hit normal (×1024) >> shift, which we keep.
-            let n = hit.normal;
-            let depth = hit.depth;
-            let push = [0, 1, 2].map(|i| (n[i] * depth) as i32 + ((n[i] * 1024.0) as i32 >> t.shift));
+            // The bounce (`0x408c50` + the stored normal >> shift): only
+            // when the probe's tip went behind the polygon.
+            let Some(push) = hit.push else { continue };
             for i in 0..3 {
                 out[i] += push[i];
                 self.mover.pos[i] += push[i];

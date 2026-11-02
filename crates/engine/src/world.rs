@@ -218,6 +218,11 @@ pub struct WorldMesh {
     blinking: Vec<bool>,
     /// One byte per draw: 1 = drawn, 0 = hidden by a -5 frame.
     pub visible: Vec<u8>,
+    /// One byte per draw: the mesh's backface flag (`+0x2a`, set by
+    /// `0x4022f0`). 1 (the mesh constructor's default, `0x402150`) unless
+    /// the frame last applied to the object's *last* polygon was glass
+    /// (`0x4237e8`, `0x4239c0`). See [`culls_glass`].
+    pub cull: Vec<u8>,
     /// For each draw and polygon: its current material (the last frame
     /// shade number `>= 0`; `0x402450` stores it at polygon `+0x60`).
     material: Vec<Vec<i16>>,
@@ -241,6 +246,27 @@ pub struct WorldMesh {
     pub far_clip: f32,
     /// The fog and clear colour, 0 (black) or 1 (white): see [`fog_white`].
     pub fog: f32,
+}
+
+/// Which faces are drawn (observed). Two tests, both keeping the side the
+/// polygon normal `(v2 − v1) × (v0 − v1)` (`0x4019a0`) points to:
+///
+/// * the mesh draw `0x402490` skips a polygon when the mesh's flag
+///   `+0x2a` is set and `n · v0 >= 0` in camera space (eye at the
+///   origin, `0x402508..0x4025c6`): the normal points away from the eye.
+///   Both renderers go through it.
+/// * Direct3D: the draw loop `0x40f000` sets `CULLMODE` (render state
+///   `0x16`) to 3, counter-clockwise, for every texture bucket and to 1,
+///   none, for the glass bucket `0x27`. It fans each polygon from its last
+///   vertex backwards, `(n−1, k+1, k)` (`0x40f325..0x40f390`), and the
+///   camera maps its z to screen-up with y down on screen (`0x401640`),
+///   so a front face lands clockwise and only back faces are culled.
+///
+/// Every textured polygon therefore loses its back face. Glass is only
+/// subject to the first test, which the frame appliers turn off for an
+/// object whose last polygon is glass (`0x423730`, `0x423810`).
+pub fn culls_glass(last_polygon_is_glass: bool) -> bool {
+    !last_polygon_is_glass
 }
 
 /// The Direct3D fog colour, which is also the colour the screen is
@@ -334,6 +360,7 @@ impl WorldMesh {
         let base_uv = vertices.chunks_exact(FLOATS_PER_VERTEX).flat_map(|v| [v[3], v[4]]).collect();
         let hides_object = poly_ranges.iter().map(|p| vec![false; p.len()]).collect();
         let visible = vec![1; draws.len()];
+        let cull = vec![1; draws.len()];
         let blinking = vec![false; draws.len()];
         let material = poly_ranges.iter().map(|p| vec![0; p.len()]).collect();
         let light = Light::of(&section.environment);
@@ -346,7 +373,7 @@ impl WorldMesh {
             })
             .collect();
         let mut mesh = WorldMesh {
-            vertices, draws, draw_of_object, poly_ranges, hides_object, blinking, visible, material, materials, light,
+            vertices, draws, draw_of_object, poly_ranges, hides_object, blinking, visible, cull, material, materials, light,
             base_uv, transforms, textures, texture_count, bounds, objects_drawn, far_clip, fog,
         };
         // Apply each polygon's initial appearance frame (layer, UV offset).
@@ -408,6 +435,13 @@ impl WorldMesh {
         if let Some(h) = self.hides_object.get_mut(draw).and_then(|h| h.get_mut(poly)) {
             *h = frame.is_some_and(|f| f.texture == -5);
             self.refresh_visible(draw);
+        }
+        // The frame appliers keep the glass test of the polygon they set
+        // last and hand it to the mesh's backface flag after the loop
+        // (`0x4237e8`: `cull = glass == 0`), so only the last polygon
+        // decides (see `culls_glass`).
+        if poly + 1 == self.poly_ranges[draw].len() {
+            self.cull[draw] = culls_glass(frame.is_some_and(|f| f.texture == -4)) as u8;
         }
         // A shade of -1 keeps the material (0x423730 calls 0x402450 only
         // for shade >= 0). Like -2/-3 textures, "kept" is resolved from the
@@ -545,6 +579,48 @@ mod tests {
 
     fn data() -> Option<Vec<u8>> {
         std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../originals/mounted/install/data/worlds")).ok()
+    }
+
+    /// The winding the renderer culls by: the top of section 0's arrival
+    /// pad #83 (polygon 9, z = 5180, the floor Mendel lands on) has the
+    /// exe's normal `(v2 − v1) × (v0 − v1)` pointing up, and every fan
+    /// triangle we emit for it turns counter-clockwise seen from above,
+    /// so WebGL's front faces are the exe's: floors stay drawn from above
+    /// and vanish from below, as in the 1997 game.
+    #[test]
+    fn floors_face_up_and_wind_counter_clockwise_from_above() {
+        let Some(d) = data() else { return };
+        let m = WorldMesh::build(&Archive::parse(&d).unwrap().world(0).unwrap());
+        let draw = m.draw_of_object[83 - 1].unwrap();
+        let r = m.poly_ranges[draw][9];
+        assert!(r.count >= 3);
+        let v = |i: u32| {
+            let o = i as usize * FLOATS_PER_VERTEX;
+            [m.vertices[o], m.vertices[o + 1], m.vertices[o + 2]]
+        };
+        for t in (r.first..r.first + r.count).step_by(3) {
+            let n = [m.vertices[t as usize * FLOATS_PER_VERTEX + 7], m.vertices[t as usize * FLOATS_PER_VERTEX + 8], m.vertices[t as usize * FLOATS_PER_VERTEX + 9]];
+            assert!(n[2] > 0.99, "the pad's top faces +z: {n:?}");
+            let w = normalize(cross(sub(v(t + 1), v(t)), sub(v(t + 2), v(t))));
+            assert!(dot(w, n) > 0.99, "triangle {t} winds counter-clockwise around the normal: {w:?}");
+        }
+    }
+
+    /// The backface flag of the glass (`culls_glass`): the intro capsule
+    /// #3 ends with glass (polygons 20..=31), so its veil is seen from
+    /// inside and outside; the arrival pad #83 has none and is culled.
+    #[test]
+    fn glass_culling_follows_the_last_polygon() {
+        let Some(d) = data() else { return };
+        let a = Archive::parse(&d).unwrap();
+        let m = WorldMesh::build(&a.world(0).unwrap());
+        assert_eq!(m.cull[m.draw_of_object[3 - 1].unwrap()], 0, "capsule: two-sided glass");
+        assert_eq!(m.cull[m.draw_of_object[83 - 1].unwrap()], 1, "pad: culled");
+        for s in 0..a.sections.len() {
+            let m = WorldMesh::build(&a.world(s).unwrap());
+            let two_sided = m.cull.iter().filter(|&&c| c == 0).count();
+            println!("section {s}: {two_sided} of {} objects end with glass", m.cull.len());
+        }
     }
 
     /// `0x401b70` on made-up materials: the directional term only counts

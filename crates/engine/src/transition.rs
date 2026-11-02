@@ -69,7 +69,11 @@ pub struct Frame {
     /// Model-space corners, polygon by polygon.
     pub polys: Vec<Vec<[i32; 3]>>,
     /// Object `+0x2a`: back faces culled. Kinds 2, 5, 6, 7 draw both
-    /// sides; kind 1 culls only with flag 4.
+    /// sides; kind 1 culls only with flag 4. That flag drives the software
+    /// renderer's test (`0x402490`) and the Direct3D *glass* bucket only:
+    /// textured buckets are always culled counter-clockwise (`0x40f000`),
+    /// so in the Direct3D look we draw (the footage's), Mendel's and the
+    /// predators' textured shards stay one-sided whatever this says.
     pub culling: bool,
 }
 

@@ -36,7 +36,7 @@ use crate::sim::save::{Reader, Writer};
 use crate::sim::{self, Request, Sim};
 use crate::transition::{self, Transition};
 use crate::walker::{
-    add, cross, dot, length, local_polys, normalize, ray_tri, scale, sub, turns, Drive, Faces, Frame, LocalPoly, Mover, Near, Tri,
+    self, add, cross, dot, length, local_polys, normalize, ray_tri, scale, sub, turns, Drive, Faces, Frame, LocalPoly, Mover, Near, Tri,
     FLOOR, HAZARD, IDENTITY, SOLID, UP, V3,
 };
 use crate::world::{self, Light, WorldMesh, FLOATS_PER_VERTEX};
@@ -142,13 +142,12 @@ impl Actuator {
 
 // ——— Probes for the other modules ————————————————————————————————————
 
-/// What a predator's probe touched: the object, the polygon's unit normal
-/// and how far the probe went past it.
+/// What a predator's probe touched: the object, and the push that moves
+/// the predator out of it (`None` when `0x408c50` refuses the hit).
 #[derive(Clone, Copy, Debug)]
 pub struct ProbeHit {
     pub obj: usize,
-    pub normal: V3,
-    pub depth: f32,
+    pub push: Option<[i32; 3]>,
 }
 
 /// What an eye sees (`Creature_CastIrRay` @ 0x4190f0): the nearest polygon
@@ -1036,15 +1035,34 @@ impl Creature {
     }
 
 
-    /// A predator's probe (`World_Cast` @ 0x4089e0 on the segment `a → b`)
-    /// against polygons whose flags meet `mask`, ignoring object `skip`.
-    /// inferred: front faces only (the predator code's own tests on the
-    /// hit were not traced).
-    pub(crate) fn probe(&self, sim: &Sim, a: V3, b: V3, mask: u32, skip: usize) -> Option<ProbeHit> {
+    /// A predator's probe (`0x4160d0`): `World_Cast` @ 0x4089e0 on the
+    /// segment `a → b` against polygons whose flags meet `mask`, ignoring
+    /// object `skip`. The cast takes the nearest polygon whichever way it
+    /// faces, and the touch counts either way; only the push is one-sided
+    /// (see [`Creature::push_out`], `shift` = the class's `+0x344`).
+    pub(crate) fn probe(&self, sim: &Sim, a: V3, b: V3, mask: u32, skip: usize, shift: u32) -> Option<ProbeHit> {
         let len = length(sub(b, a));
         let near = Near::gather(&self.polys, sim, a, len, mask);
-        let h = near.segment(a, b, Faces::Front, |t| t.obj != skip)?;
-        Some(ProbeHit { obj: h.obj, normal: h.normal, depth: len - h.dist })
+        let h = near.segment(a, b, Faces::Both, |t| t.obj != skip)?;
+        Some(ProbeHit { obj: h.obj, push: self.push_out(&h, b, shift) })
+    }
+
+    /// The bounce response shared by the predators' probes (`0x4160d0`)
+    /// and the camera's wall probes (`0x413cb0`):
+    ///
+    /// * `0x408c50` casts a 0x400-long segment from the probe's tip along
+    ///   the hit polygon's normal (rotated into the world, `0x409880`),
+    ///   against that polygon alone (`0x408670`, `0x407740`). If it
+    ///   crosses (the tip is behind the polygon, at most 1,024 deep) it
+    ///   returns `crossing − tip`: the perpendicular way back onto the
+    ///   plane, [`walker::behind`]. Otherwise there is no push at all.
+    /// * The caller adds the polygon's normal as stored in its record
+    ///   (`puVar3[0xc]`: object-local, ×1024, *not* rotated) shifted right
+    ///   by `shift`: 5 or 7 for predators, 7 for the camera (8 units).
+    pub(crate) fn push_out(&self, hit: &walker::Hit, tip: V3, shift: u32) -> Option<[i32; 3]> {
+        let back = walker::behind(hit, tip)?;
+        let n = self.polys.get(hit.obj)?.get(hit.poly)?.normal;
+        Some([0, 1, 2].map(|i| back[i] as i32 + ((n[i] * 1024.0) as i32 >> shift)))
     }
 
     // ——— MEnc and rendering ———
@@ -1115,11 +1133,14 @@ impl Creature {
             let level = world::light_level(m, &self.light, n);
             let (light, fog) = (-1.0 - level as f32, m[5]);
             let texture = look.texture.map_or(f.texture as f32, |t| t as f32);
+            // The polygon's texel offset (+0x5c/+0x5e), added by the
+            // Direct3D draw as `(offset & 0x1ff) / 128` (0x40e850).
+            let [du, dv] = f.offset.map(|o| (o & 0x1ff) as f32);
             for k in 1..f.indices.len() - 1 {
                 for j in [0, k, k + 1] {
                     let v = p(j);
                     let [u, t] = f.uv[j];
-                    self.vertices.extend_from_slice(&[v[0], v[1], v[2], u / 128.0, t / 128.0, texture, light, fog, 0.0, 0.0]);
+                    self.vertices.extend_from_slice(&[v[0], v[1], v[2], (u + du) / 128.0, (t + dv) / 128.0, texture, light, fog, 0.0, 0.0]);
                 }
             }
         }
@@ -1127,12 +1148,12 @@ impl Creature {
 
 
     /// For `camera.rs` (`Camera_Collide` @ 0x413cb0): the nearest polygon
-    /// with flags 0x102 crossing the segment `from → to`, as (a point of
-    /// its plane, its unit world normal). Front faces only.
-    pub fn camera_probe(&self, sim: &Sim, from: V3, to: V3) -> Option<(V3, V3)> {
+    /// with flags 0x102 crossing the segment `from → to`, either way, and
+    /// the push it gives (shift 7, see [`Creature::push_out`]).
+    pub fn camera_probe(&self, sim: &Sim, from: V3, to: V3) -> Option<[i32; 3]> {
         let near = Near::gather(&self.polys, sim, from, length(sub(to, from)), 0x102);
-        let h = near.segment(from, to, Faces::Front, |_| true)?;
-        Some((h.plane, h.normal))
+        let h = near.segment(from, to, Faces::Both, |_| true)?;
+        self.push_out(&h, to, 7)
     }
 
 
@@ -1628,6 +1649,23 @@ mod tests {
     /// tube #54 (a polygon facing +z), standing upright. The disc hands
     /// its floor down its stack of four polygons, then the docked capsule
     /// #3 takes him, rolls him through the sky, and drops him on the
+    /// The bounce response (`0x408c50` + stored normal >> shift): a probe
+    /// tip 40 units under the start disc's top (#57, facing +z) comes back
+    /// 40 units, plus 1024 >> 7 = 8 along the stored normal; a tip above
+    /// the disc (crossing it from behind) gets no push at all.
+    #[test]
+    fn bounce_response_follows_0x408c50() {
+        let Some(d) = data() else { return };
+        let (sim, _mesh) = world(&d, 0);
+        let c = sim.creature.as_ref().unwrap();
+        let near = Near::gather(&c.polys, &sim, [0.0; 3], f32::MAX, FLOOR);
+        let t = near.0.iter().find(|t| t.obj == 56 && t.normal[2] > 0.99).expect("a floor of #57 facing +z");
+        let c0 = add(t.a, scale(add(t.e1, t.e2), 0.3));
+        let hit = walker::Hit { dist: 0.0, point: c0, obj: t.obj, poly: t.poly, flags: t.flags, normal: t.normal, plane: t.a };
+        assert_eq!(c.push_out(&hit, sub(c0, [0.0, 0.0, 40.0]), 7), Some([0, 0, 48]));
+        assert_eq!(c.push_out(&hit, add(c0, [0.0, 0.0, 40.0]), 7), None);
+    }
+
     /// arrival pad #83 after ~133 s. He never falls out of the world.
     #[test]
     fn mendel_is_born_in_section0() {
@@ -1698,6 +1736,47 @@ mod tests {
         println!("then: {:?} at {:?}, {:?}", c.mode, c.pos.map(|v| v as i32), c.stats);
         assert!(c.stats.walked > 2000.0, "walked {}", c.stats.walked);
         assert!(c.pos[2].abs() < 40_000.0, "inside the level, z = {}", c.pos[2]);
+    }
+
+    /// Culling never hides the floor under him: in section 0 (after the
+    /// skip, a minute of walking) and at section 2's upside-down start,
+    /// the triangles the renderer draws for the polygon he stands on turn
+    /// counter-clockwise seen from his side, i.e. he stands on their front
+    /// (the side `0x402490` and Direct3D keep, world.rs `culls_glass`).
+    #[test]
+    fn mendel_stands_on_the_drawn_side_of_his_floors() {
+        let Some(d) = data() else { return };
+        let front = |sim: &Sim, mesh: &WorldMesh| -> Option<bool> {
+            let c = sim.creature.as_ref().unwrap();
+            let (o, p) = c.ground()?;
+            let r = mesh.poly_ranges[mesh.draw_of_object[o]?][p];
+            let m = sim::transform(sim.pose(o).0, sim.pose(o).1);
+            let v = |i: u32| {
+                let k = i as usize * FLOATS_PER_VERTEX;
+                sim::apply(&m, [mesh.vertices[k], mesh.vertices[k + 1], mesh.vertices[k + 2]])
+            };
+            let (a, b, t) = (v(r.first), v(r.first + 1), v(r.first + 2));
+            Some(dot(cross(sub(b, a), sub(t, a)), sub(c.pos, a)) > 0.0)
+        };
+        let (mut sim, mut mesh) = world(&d, 0);
+        run(&mut sim, &mut mesh, 10, Some(5));
+        let (mut grounded, mut on_front) = (0, 0);
+        for _ in 0..60 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            if let Some(f) = front(&sim, &mesh) {
+                grounded += 1;
+                on_front += f as u32;
+            }
+        }
+        assert!(grounded > 50 * sim::TICKS_PER_SECOND);
+        assert_eq!(on_front, grounded, "always on the drawn side");
+
+        let (mut sim, mut mesh) = world(&d, 2);
+        while sim.creature.as_ref().unwrap().mode == Mode::Absent {
+            sim.step(&mut mesh);
+        }
+        assert!(sim.creature.as_ref().unwrap().up[2] < -0.999, "upside down");
+        assert_eq!(front(&sim, &mesh), Some(true), "under a ceiling that faces him");
     }
 
     /// After the skip, a minute of walking around the main area: whatever
