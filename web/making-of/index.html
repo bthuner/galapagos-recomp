@@ -347,6 +347,10 @@ pos = first_stream_with_valid_crc(overlay)
           <li><b>The panels</b><span>each light wall is one quad with one texture: a white tile split in four by a dark cross. The exe gives every polygon the same texels, (0,127), (0,0), (127,0), at load (<code>0x42320d</code>), and never changes them; the Direct3D path solves the texture map from exactly those (<code>0x40b2f0</code>). One copy per wall, which is what we draw</span></li>
           <li><b>The video</b><span>textures at a fixed density instead, about one texel per 16 world units. A test render with that rule reproduces the panel grids, the pillar's stripes and the floor grid almost exactly. But the CD's own geometry is built for the exe's rule: in World 1, 128 of 283 neighbouring same-texture polygons line up under it, and only 2 or 3 under a fixed density. We concluded the footage came from a different build. <b>That was wrong</b>: see the next section</span></li>
         </ul>
+        <figure class="shot">
+          <img src="img/legs-chroma.jpg" alt="Mendel close up: footage, our port, and our port after video-style chroma subsampling" loading="lazy" />
+          <figcaption>Left: the <a href="https://www.youtube.com/watch?v=QLiZsijShbY">1997 gameplay footage</a> at 0:34. Middle: our port. Right: our port after 4:2:0 chroma subsampling, the way a video encoder blurs colour. The "lavender" legs come from the video.</figcaption>
+        </figure>
         <p>
           The search did turn up one real bug. In 1997 Direct3D sampled textures bilinearly with no mipmaps
           (<code>0x40a640</code>). We used trilinear mipmaps and a <code>fract()</code> for wrapping, which drew thin dashed
@@ -369,6 +373,14 @@ pos = first_stream_with_valid_crc(overlay)
           re-maps every texture in the world before the first frame is drawn. We had drawn every polygon as one
           stretched copy of its texture.
         </p>
+        <figure class="shot">
+          <img src="img/shape-morphs-0020.jpg" alt="Start platform: footage, our port before the shape morphs, and after" loading="lazy" />
+          <figcaption>The start platform at 0:20. Left: the <a href="https://www.youtube.com/watch?v=QLiZsijShbY">1997 gameplay footage</a>. Middle: the screenshot the player reported: no flame curtains, every texture one stretched copy. Right: with shape morphs.</figcaption>
+        </figure>
+        <figure class="shot">
+          <img src="img/shape-morphs-0010.jpg" alt="Birth tube from above: footage, before and after shape morphs" loading="lazy" />
+          <figcaption>Above the birth tube at 0:10. Left: the footage. Middle: before. Right: after: the ribbed pillar, the window grids and the floor pattern at the footage's density.</figcaption>
+        </figure>
         <ul class="strings">
           <li><b>Textures</b><span>with the shape texels, 90 % of the 8,512 textured polygons on the CD sit below 35 world units per texel, most around 16–23. That is the density measured in the footage. The light panels become a 4 × 3 grid of white squares</span></li>
           <li><b>The curtains</b><span>object #70 lies flat and hidden at load. 60 ticks after Mendel is born, a 32-frame shape raises it, one frame per tick, and an appearance turns it red; at 90 ticks a last shape holds it at full height</span></li>
@@ -388,6 +400,10 @@ pos = first_stream_with_valid_crc(overlay)
           zero-width bridge. We cut every polygon into a fan of triangles from its first corner. That's fine for
           convex shapes, but a fan across a ring fills its hole.
         </p>
+        <figure class="shot">
+          <img src="img/save-pad.jpg" alt="Save pad: footage, our port before ear clipping, and after" loading="lazy" />
+          <figcaption>A save pad. Left: the <a href="https://www.youtube.com/watch?v=QLiZsijShbY">1997 gameplay footage</a> at 2:16. Middle: our fan drew a grey lid over the pool. Right: ear-clipped, the shimmering pool shows through the rim.</figcaption>
+        </figure>
         <p>
           The 1997 Direct3D renderer knew better. Once per mesh, <code>0x40be00</code> flattens each polygon,
           tests its corners for convexity (with an f32 tolerance of 800 that also accepts the bridge's flat corners)
@@ -407,6 +423,10 @@ pos = first_stream_with_valid_crc(overlay)
           into the corridor, the intro capsule enters the hall through its hexagonal opening without crossing a
           single solid polygon, and in World 2 the belt carries him through a wall's opening onto the next belt.
         </p>
+        <figure class="shot">
+          <img src="img/wall-window.jpg" alt="A hall window: footage, our port before and after" loading="lazy" />
+          <figcaption>A window in the hall wall. Left: the <a href="https://www.youtube.com/watch?v=QLiZsijShbY">1997 gameplay footage</a> at 2:45. Middle: before: a solid wall, its grey frame flickering against it. Right: after: the opening, and the corridor's lattice ceiling beyond.</figcaption>
+        </figure>
         <h3>The predator that never shipped</h3>
         <p>
           The exe knows a fourth hunter, <code>PMan</code>, and no world on the CD uses it. Its chase
@@ -860,6 +880,10 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           the same field world animation frames use to scroll textures (<code>0x402420</code>). Applied, they slide
           skin 18's bright stripe onto his face and underside. That's the glow.
         </p>
+        <figure class="shot">
+          <img src="img/glowing-head.jpg" alt="Mendel at 7:50: footage, our port before the texel offsets, and after" loading="lazy" />
+          <figcaption>Left: the <a href="https://www.youtube.com/watch?v=QLiZsijShbY">1997 gameplay footage</a> at 7:50. Middle: before the per-face texel offsets. Right: after: the bright stripe of skin 18 lands on his head.</figcaption>
+        </figure>
         <p>
           The same pass settled which side of a polygon is drawn. The software renderer's mesh draw
           (<code>0x402490</code>) skips any polygon whose normal points away from the camera. The Direct3D path
@@ -869,6 +893,10 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           84 such twins. The visible payoff is in the intro: riding behind the white light panels, the camera now
           looks <em>through</em> their backs at the capsule, as in the footage, instead of into a white wall.
         </p>
+        <figure class="shot">
+          <img src="img/culling-capsule.jpg" alt="Capsule ride: footage, culled port, unculled port" loading="lazy" />
+          <figcaption>The capsule ride at 0:55. Left: the <a href="https://www.youtube.com/watch?v=QLiZsijShbY">1997 gameplay footage</a>. Middle: with front-face culling, the camera sees through the panels' backs. Right: without, a white wall.</figcaption>
+        </figure>
         <h3>Turning him the way the exe does</h3>
         <p>
           Until now we drew Mendel by building a frame from his forward, left and up vectors and converting it

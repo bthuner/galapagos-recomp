@@ -113,6 +113,10 @@ code { font: 0.9em var(--mono); background: #0b0f0e0d; padding: 0.05em 0.3em; bo
 .seg--crc { background: var(--lime); width: 2.2rem; }
 figcaption { font-size: 0.85rem; color: var(--mute); margin-top: 0.8rem; }
 
+/* ——— Before / after screenshots ——— */
+figure.shot { margin: 2rem 0; }
+figure.shot img { display: block; width: 100%; height: auto; border-radius: 6px; background: #000; }
+
 .code { background: var(--ink); color: var(--paper); padding: 1.4rem 1.6rem; border-radius: 10px; overflow-x: auto; font: 0.85rem/1.7 var(--mono); }
 .code code { background: none; padding: 0; }
 .code .c { color: #ece6d866; }
