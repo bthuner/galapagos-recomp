@@ -9,7 +9,9 @@
 //! vertex = x, y, z, u, v, layer, light, nx, ny, nz     (10 × f32)
 //! ```
 //!
-//! * Polygons on disk are convex n-gons; we fan them into triangles.
+//! * Polygons on disk are n-gons, mostly convex, which we fan into
+//!   triangles; the few concave ones (rings drawn with a zero-width
+//!   bridge) are ear-clipped as the exe does ([`triangulate`]).
 //! * There are no texture coordinates in the mesh. The engine's polygon
 //!   initialiser (0x42320d) gives the first three vertices the texel
 //!   coordinates (0,127), (0,0), (127,0): v1 is the origin, u runs along
@@ -323,6 +325,141 @@ fn normalize(a: V3) -> V3 {
     if l == 0.0 { a } else { [a[0] / l, a[1] / l, a[2] / l] }
 }
 
+/// The triangles the Direct3D renderer draws for one polygon, as
+/// `[a, b, c]` indices into `pts`, wound like the polygon (the same side
+/// faces the normal `(v2 − v1) × (v0 − v1)`).
+///
+/// Most polygons are convex and are fanned, `(0, k, k + 1)`. But the
+/// artists also drew polygons **with holes**: section 0's save pad #87
+/// polygon 5 is a hexagonal ring, the outer hexagon and the inner one
+/// joined by a zero-width bridge (14 vertices, two of them repeated). A fan
+/// from vertex 0 covers the hole, and with it the shimmering pool (polygon
+/// 7, texture 21) 37 units below. The exe ear-clips such polygons
+/// (`0x40be00`, called with the texel map `0x40b2f0` when the renderer
+/// first meets a mesh, `0x40c130`); the result goes to the per-polygon
+/// record `+0x168` (triangle count) / `+0x16c` (triangles), and `+0x168 ==
+/// 0` means "fan it". Observed, step by step:
+///
+/// 1. Every vertex is moved by `−v1` and turned by the rotation that
+///    sends the polygon normal to `+z` (`0x431ea0`, `0x430ff0`,
+///    `0x431a60`); only `(x, y)` is used.
+/// 2. A vertex is *convex* when `(n − c) ⨯ (p − c)`, with its neighbours
+///    `p` and `n`, computed in `f32` as `(n.y − c.y)(p.x − c.x) − (n.x −
+///    c.x)(p.y − c.y)`, is below `800` (`0x40bab0`): a tolerance that also
+///    accepts flat and zero-area corners (the bridge).
+/// 3. If every vertex is convex the polygon is fanned. Otherwise, walking
+///    from vertex 0 and always on to the next remaining vertex, `cur` is
+///    clipped as the ear `(prev, cur, next)` when it is convex and no other
+///    remaining vertex lies in that triangle (`0x40bd10` → `0x40bb50`: an
+///    inclusive bounding box, then a crossing count over the three edges,
+///    each taken from its lower end, `lo.y <= p.y < hi.y`, crossing when
+///    `ftol(x on the edge) <= ftol(p.x)`, the slope and the x held in
+///    `f32`), until `n − 2` triangles are out. The exe stores `(next, cur,
+///    prev)` and draws it as it draws fans, back to front; here `(prev,
+///    cur, next)` keeps our fans' winding.
+///
+/// inferred: the exe loops forever if no ear can be found; we fan what
+/// remains instead (no polygon of the CD needs it).
+pub fn triangulate(pts: &[V3]) -> Vec<[usize; 3]> {
+    let n = pts.len();
+    let fan = || (1..n.saturating_sub(1)).map(|k| [0, k, k + 1]).collect::<Vec<_>>();
+    if n < 4 {
+        return fan();
+    }
+    let p = plane_xy(pts);
+    let Some(p) = p else { return fan() };
+    let convex = |a: usize, b: usize, c: usize| {
+        let (pa, pb, pc) = (p[a], p[b], p[c]);
+        let v = (pc.1 - pb.1) as f32 * (pa.0 - pb.0) as f32 - (pc.0 - pb.0) as f32 * (pa.1 - pb.1) as f32;
+        v < 800.0
+    };
+    if (0..n).all(|i| convex((i + n - 1) % n, i, (i + 1) % n)) {
+        return fan();
+    }
+    let mut removed = vec![false; n];
+    let mut out = Vec::with_capacity(n - 2);
+    let mut cur = 0;
+    let mut misses = 0;
+    while out.len() < n - 2 {
+        let mut prev = cur;
+        loop {
+            prev = (prev + n - 1) % n;
+            if !removed[prev] {
+                break;
+            }
+        }
+        let mut next = cur;
+        loop {
+            next = (next + 1) % n;
+            if !removed[next] {
+                break;
+            }
+        }
+        let tri = [p[prev], p[cur], p[next]];
+        let ear = convex(prev, cur, next) && (0..n).all(|s| removed[s] || s == prev || s == cur || s == next || !in_triangle(tri, p[s]));
+        if ear {
+            out.push([prev, cur, next]);
+            removed[cur] = true;
+            misses = 0;
+        } else {
+            misses += 1;
+            if misses > n {
+                // inferred: see above. Fan the remaining vertices.
+                let rest: Vec<usize> = (0..n).filter(|&i| !removed[i]).collect();
+                out.extend((1..rest.len() - 1).map(|k| [rest[0], rest[k], rest[k + 1]]));
+                break;
+            }
+        }
+        cur = next;
+    }
+    out
+}
+
+/// `(x, y)` of every vertex in the polygon's plane, as `0x40be00` sees
+/// them: `v − v1` turned by the rotation `0x430ff0` builds from the normal
+/// `(v2 − v1) × (v0 − v1)` (`0x431ea0`), applied by `0x431a60`. With `n̂ =
+/// n / |n|`, `c = n̂.z`, `s = √(n̂.x² + n̂.y²)` and `(a, b)` the unit
+/// horizontal direction of `n` (`(0, 1)` when `n` is vertical), the rows
+/// it uses are `x = (c·a² + b², (c − 1)·a·b, −s·a)` and `y = ((c − 1)·a·b,
+/// c·b² + a², −s·b)`. `None` for a degenerate first corner.
+fn plane_xy(pts: &[V3]) -> Option<Vec<(f64, f64)>> {
+    let d: Vec<[f64; 3]> = pts.iter().map(|q| [0, 1, 2].map(|k| q[k] as f64 - pts[1][k] as f64)).collect();
+    let (v2, v0) = (d[2], d[0]);
+    let nv = [v2[1] * v0[2] - v0[1] * v2[2], v0[0] * v2[2] - v2[0] * v0[2], v2[0] * v0[1] - v0[0] * v2[1]];
+    let len = (nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2]).sqrt();
+    if len == 0.0 {
+        return None;
+    }
+    let r = (nv[0] * nv[0] + nv[1] * nv[1]).sqrt();
+    let (c, s) = (nv[2] / len, r / len);
+    let (a, b) = if r == 0.0 { (0.0, 1.0) } else { (nv[0] / r, nv[1] / r) };
+    let rx = [c * a * a + b * b, (c - 1.0) * a * b, -s * a];
+    let ry = [(c - 1.0) * a * b, c * b * b + a * a, -s * b];
+    Some(d.iter().map(|v| (v[0] * rx[0] + v[1] * rx[1] + v[2] * rx[2], v[0] * ry[0] + v[1] * ry[1] + v[2] * ry[2])).collect())
+}
+
+/// `0x40bb50`: is `q` inside the triangle `t` (see [`triangulate`])?
+fn in_triangle(t: [(f64, f64); 3], q: (f64, f64)) -> bool {
+    let (xs, ys) = (t.map(|p| p.0), t.map(|p| p.1));
+    if !(ys.iter().any(|&y| y <= q.1) && ys.iter().any(|&y| q.1 <= y) && xs.iter().any(|&x| x <= q.0) && xs.iter().any(|&x| q.0 <= x)) {
+        return false;
+    }
+    let mut odd = false;
+    for i in 0..3 {
+        let (u, w) = (t[i], t[(i + 1) % 3]);
+        let (lo, hi) = if w.1 < u.1 { (w, u) } else { (u, w) };
+        if lo.1 <= q.1 && q.1 < hi.1 {
+            let slope = ((hi.0 - lo.0) / (hi.1 - lo.1)) as f32;
+            let x = ((q.1 - lo.1) * slope as f64 + lo.0) as f32;
+            // __ftol truncates towards zero.
+            if (x as i32) <= (q.0 as i32) {
+                odd = !odd;
+            }
+        }
+    }
+    odd
+}
+
 /// Coordinates (s, t) of `p` in the basis (e1, e2) anchored at the
 /// polygon's first vertex, solved by least squares (2×2 normal equations).
 fn affine_st(p: V3, e1: V3, e2: V3) -> (f32, f32) {
@@ -520,8 +657,8 @@ impl WorldMesh {
             let n = normalize(cross(sub(pts[2], pts[1]), sub(pts[0], pts[1])));
             let uv = polygon_uvs(&pts, texels.get(p).copied().unwrap_or(DEFAULT_TEXELS));
             let mut v = r.first as usize;
-            for k in 1..pts.len() - 1 {
-                for i in [0, k, k + 1] {
+            for tri in triangulate(&pts) {
+                for i in tri {
                     if v >= (r.first + r.count) as usize {
                         break;
                     }
@@ -575,8 +712,8 @@ fn emit_object(obj: &WorldObject, out: &mut Vec<f32>, bounds: &mut [f32; 6]) -> 
         // (0x4019a0). The material (`light`) is written by `apply_frame`.
         let [nx, ny, nz] = normalize(cross(sub(pts[2], pts[1]), sub(pts[0], pts[1])));
         let uv = polygon_uvs(&pts, DEFAULT_TEXELS);
-        for k in 1..pts.len() - 1 {
-            for &i in &[0, k, k + 1] {
+        for tri in triangulate(&pts) {
+            for i in tri {
                 let p = pts[i];
                 for a in 0..3 {
                     bounds[a] = bounds[a].min(origin[a] + p[a]);
@@ -648,6 +785,151 @@ mod tests {
 
     fn data() -> Option<Vec<u8>> {
         std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../originals/mounted/install/data/worlds")).ok()
+    }
+
+    /// Twice the signed area of a triangle in the plane z = 0.
+    fn area2(a: V3, b: V3, c: V3) -> f32 {
+        (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])
+    }
+
+    /// A square ring drawn as one polygon, the outer square and the inner
+    /// one joined by a zero-width bridge, the way the artists drew section
+    /// 0's save pad: a fan from vertex 0 covers the hole, `0x40be00`'s ear
+    /// clipping leaves it open.
+    #[test]
+    fn rings_are_ear_clipped_not_fanned() {
+        // Outer 0..1000 counter-clockwise from above, bridge at (0, 0) to
+        // (300, 300), inner square clockwise.
+        let pts: Vec<V3> = [
+            (0., 0.), (1000., 0.), (1000., 1000.), (0., 1000.), (0., 0.),
+            (300., 300.), (300., 700.), (700., 700.), (700., 300.), (300., 300.),
+        ]
+        .iter()
+        .map(|&(x, y)| [x, y, 0.0])
+        .collect();
+        // Winding: the normal (v2 − v1) × (v0 − v1) points up (+z).
+        assert!(cross(sub(pts[2], pts[1]), sub(pts[0], pts[1]))[2] > 0.0);
+        let fan_covers_hole = (1..pts.len() - 1).any(|k| {
+            let t = [pts[0], pts[k], pts[k + 1]];
+            let c = [600.0, 400.0, 0.0];
+            area2(t[0], t[1], c) > 0.0 && area2(t[1], t[2], c) > 0.0 && area2(t[2], t[0], c) > 0.0
+        });
+        assert!(fan_covers_hole, "the fan the port used to draw fills the hole");
+        let tris = triangulate(&pts);
+        assert_eq!(tris.len(), pts.len() - 2);
+        let total: f32 = tris.iter().map(|t| area2(pts[t[0]], pts[t[1]], pts[t[2]])).sum::<f32>() / 2.0;
+        assert_eq!(total, 1000.0 * 1000.0 - 400.0 * 400.0, "exactly the ring");
+        for t in &tris {
+            assert!(area2(pts[t[0]], pts[t[1]], pts[t[2]]) >= 0.0, "{t:?} keeps the polygon's winding");
+        }
+        // A convex polygon is still fanned.
+        let quad: Vec<V3> = vec![[0., 0., 0.], [10., 0., 0.], [10., 10., 0.], [0., 10., 0.]];
+        assert_eq!(triangulate(&quad), vec![[0, 1, 2], [0, 2, 3]]);
+    }
+
+    /// The save pad of section 0 (#84, the invisible `0x22` hexagon) sits on
+    /// #87: a ring (polygon 5, texture 1, the dark circuit board) around a
+    /// pool 37 units lower (polygon 7, texture 21, the blue clouds) whose
+    /// flip-book slides the texture by (+4, +4) texels a tick (32 frames,
+    /// looping). The footage shows the blue pool shimmering inside its
+    /// frame; fanned, the ring hid it under a grey lid. Ear-clipped, the
+    /// ring leaves the pool's centre open and the pool scrolls.
+    #[test]
+    fn save_pad_ring_shows_the_shimmering_pool_when_data_present() {
+        let Some(d) = data() else { return };
+        let s = Archive::parse(&d).unwrap().world(0).unwrap();
+        let mut m = WorldMesh::build(&s);
+        let mut sim = crate::sim::Sim::new(&s, &mut m);
+        let draw = m.draw_of_object[87 - 1].unwrap();
+        let vert = |m: &WorldMesh, i: u32| -> [f32; 10] {
+            let o = i as usize * FLOATS_PER_VERTEX;
+            m.vertices[o..o + FLOATS_PER_VERTEX].try_into().unwrap()
+        };
+        let ring = m.poly_ranges[draw][5];
+        assert_eq!(ring.count, 12 * 3, "14 vertices, 12 triangles");
+        assert_eq!(vert(&m, ring.first)[5], 1.0, "the ring is texture 1");
+        // The pool's centre, object-local.
+        let c = [0.0, 185.0, 0.0];
+        let mut area = 0.0;
+        for t in 0..12 {
+            let p: Vec<V3> = (0..3).map(|k| vert(&m, ring.first + t * 3 + k)).map(|v| [v[0], v[1], 0.0]).collect();
+            let inside = area2(p[0], p[1], c) > 0.0 && area2(p[1], p[2], c) > 0.0 && area2(p[2], p[0], c) > 0.0;
+            assert!(!inside, "ring triangle {t} covers the pool");
+            area += area2(p[0], p[1], p[2]) / 2.0;
+        }
+        // Outer hexagon minus inner hexagon (shoelace over the mesh).
+        let Object::World(w) = &s.objects[87 - 1] else { panic!() };
+        let mesh = w.mesh.as_ref().unwrap();
+        let shoelace = |poly: &[u16]| -> f32 {
+            let q: Vec<[f32; 3]> = poly.iter().map(|&i| mesh.vertices[i as usize].map(|c| c as f32)).collect();
+            (0..q.len()).map(|i| area2([0.0; 3], q[i], q[(i + 1) % q.len()])).sum::<f32>() / 2.0
+        };
+        assert!((area - shoelace(&mesh.polygons[5])).abs() < 1.0, "ring area {area}");
+        assert!((area - (shoelace(&mesh.polygons[5][8..]).abs() - shoelace(&mesh.polygons[7]).abs())).abs() < 1.0, "outer hexagon minus the pool");
+        // Still a save pad: a click straight down on it hits #84's `0x22`
+        // hexagon (the pick, `World_Pick` @ 0x4089e0, is not the renderer's
+        // triangulation).
+        let hit = sim.pick_hit([-1110.0, 1110.0, 5000.0], [0.0, 0.0, -1.0]);
+        assert!(hit.is_some_and(|(id, flags)| id == 84 && flags & 0x20 != 0), "{hit:?}");
+        // The pool: texture 21, its offset sliding 4 texels a tick on both axes.
+        let pool = m.poly_ranges[draw][7];
+        assert_eq!(vert(&m, pool.first)[5], 21.0, "the pool is texture 21");
+        let uv = |m: &WorldMesh| {
+            let v = vert(m, pool.first);
+            (v[3], v[4])
+        };
+        // The pad lives in folder #81 < #80 < #74 (97 objects, the second
+        // room), which switches its subtree's updates off on tick 2 while
+        // Mendel is elsewhere (`NoEvent(1)`, capsule #3 and #72 in state 0)
+        // and back on as soon as he touches it: the flip-book only runs
+        // while he is around, as every object's does. Keep it awake here.
+        sim.wake_all = true;
+        let mut prev = uv(&m);
+        for _ in 0..40 {
+            sim.step(&mut m);
+            let now = uv(&m);
+            assert_eq!(vert(&m, pool.first)[5], 21.0);
+            // Frame 31 → 0 jumps back 124 texels: the same picture, as the
+            // offset counts modulo one texture (128 texels).
+            let step = (((now.0 - prev.0) * 128.0).rem_euclid(128.0), ((now.1 - prev.1) * 128.0).rem_euclid(128.0));
+            assert!((step.0 - 4.0).abs() < 1e-2 && (step.1 - 4.0).abs() < 1e-2, "pool slides (+4, +4) a tick, not {step:?}");
+            prev = now;
+        }
+    }
+
+    /// Over the whole CD, the triangles cover each polygon exactly
+    /// (their areas add up to the polygon's own, measured in its plane),
+    /// and 816 polygons (in every section) need the ear clipper.
+    #[test]
+    fn triangles_tile_every_polygon_when_data_present() {
+        let Some(d) = data() else { return };
+        let a = Archive::parse(&d).unwrap();
+        let mut clipped = Vec::new();
+        for si in 0..a.sections.len() {
+            let s = a.world(si).unwrap();
+            for (i, o) in s.objects.iter().enumerate() {
+                let Object::World(w) = o else { continue };
+                let Some(mesh) = &w.mesh else { continue };
+                for (pi, poly) in mesh.polygons.iter().enumerate() {
+                    let pts: Vec<V3> = poly.iter().filter_map(|&k| mesh.vertices.get(k as usize)).map(|v| v.map(|c| c as f32)).collect();
+                    if pts.len() < 4 {
+                        continue;
+                    }
+                    let tris = triangulate(&pts);
+                    assert_eq!(tris.len(), pts.len() - 2);
+                    if tris.iter().enumerate().any(|(k, t)| *t != [0, k + 1, k + 2]) {
+                        let Some(xy) = plane_xy(&pts) else { continue };
+                        let p: Vec<V3> = xy.iter().map(|&(x, y)| [x as f32, y as f32, 0.0]).collect();
+                        let sum: f32 = tris.iter().map(|t| area2(p[t[0]], p[t[1]], p[t[2]]).abs()).sum::<f32>() / 2.0;
+                        let own = (0..p.len()).map(|k| area2([0.0; 3], p[k], p[(k + 1) % p.len()])).sum::<f32>().abs() / 2.0;
+                        assert!((sum - own).abs() <= own * 1e-3 + 1.0, "section {si} #{} polygon {pi}: {sum} vs {own}", i + 1);
+                        clipped.push((si, i + 1, pi, pts.len()));
+                    }
+                }
+            }
+        }
+        println!("ear-clipped polygons: {clipped:?}");
+        assert!(clipped.contains(&(0, 87, 5, 14)), "section 0's save-pad ring");
     }
 
     /// The winding the renderer culls by: the top of section 0's arrival

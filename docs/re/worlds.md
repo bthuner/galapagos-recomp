@@ -466,6 +466,53 @@ belong to vertices 0, 1, 2 in file order: with the reversed order
 Mendel's own UVs use (n−1, n−2, n−3) coplanar neighbours lose their
 continuity instead of gaining it (measured, not kept as a test).
 
+#### Concave polygons and rings — observed
+
+The mesh's polygons are **not all convex**: the CD has 816 concave
+ones (test `triangles_tile_every_polygon_when_data_present` lists them),
+among them *rings*: an outer outline and an inner one joined by a
+zero-width bridge, two vertices repeated. Section 0's save pad is one:
+`#87` polygon 5 (texture 1, the dark circuit board) is a hexagonal ring
+(14 vertices) 37 units above polygon 7, the pool (texture 21, the blue
+clouds, a looping 32-frame flip-book sliding the offset (+4, +4) texels a
+tick); `#84` above them is the invisible `0x22` pad itself. The
+Direct3D renderer triangulates each polygon once, when it first meets
+the mesh (`0x40c130` → `0x40be00`, right after the texel map
+`0x40b2f0`):
+
+1. vertices are moved by `−v1` and rotated so that the normal `(v2 − v1)
+   × (v0 − v1)` (`0x431ea0`) becomes `+z` (`0x430ff0` builds the matrix,
+   `0x431a60` applies it); only `(x, y)` is kept;
+2. a corner is convex when `(n.y − c.y)(p.x − c.x) − (n.x − c.x)(p.y −
+   c.y) < 800` in `f32` (`0x40bab0`, with its previous and next remaining
+   vertices): flat and zero-area corners (the bridge) count as convex;
+3. all convex → `+0x168 = 0`, the draw loop fans the polygon; otherwise
+   ear clipping from vertex 0, always moving on to the next remaining
+   vertex: `cur` is cut off as `(prev, cur, next)` when it is convex and
+   no other remaining vertex is inside that triangle (`0x40bd10` →
+   `0x40bb50`: inclusive bounding box, then a crossing count over the
+   three edges taken from their lower end, `lo.y <= p.y < hi.y`, counted
+   when `ftol(x on the edge) <= ftol(p.x)`), until `n − 2` triangles are
+   stored at `+0x16c` (`(next, cur, prev)` each, mesh indices and polygon
+   positions).
+
+The port fanned every polygon, so `#87`'s ring became a filled hexagon:
+a grey lid over the pool, and the "shimmer" ran unseen underneath (the
+bug report "the save pad's animation is wrong"). `world.rs`
+`triangulate` reproduces `0x40be00` (inferred: if no ear is ever found,
+where the exe would loop forever, it fans the rest; no CD polygon needs
+it). Every concave polygon of the CD comes out tiled exactly (triangle
+areas add up to the polygon's own). Clicks (`World_Pick` → `0x4076d0` →
+`0x407830`) test the polygon's own edges, so a ring's hole is a hole
+there too; `Sim::pick_hit` now uses the same triangles, and a click in
+the pool reaches the save pad `#84` instead of the ring.
+
+The flip-book itself was right: it runs while the pad's folder chain
+(`#81` < `#80` < `#74`, the second room) is awake. `#74` switches its
+97 descendants off on tick 2 while Mendel is elsewhere and back on when
+he touches it, so far from him the pool shows a still frame, as every
+object of a sleeping folder does.
+
 Scrolling floors: `0x41d9e0` puts the object's current shape frame on the
 mesh (slot `0x70`; at build, state 0, frame 0) right before `0x41d6d0`
 reads `+0x44`, so the conveyor basis comes from the shape texels too.

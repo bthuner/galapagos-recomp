@@ -379,6 +379,23 @@ pos = first_stream_with_valid_crc(overlay)
           the code, the reading is the first suspect. "The footage must be another version" should be the last
           explanation, reached only after everything else has failed, and we reached it too early.
         </p>
+        <h3>A ring is not a fan</h3>
+        <p>
+          Next the player noticed that the save pads didn't shimmer. In the video the pad is a pool of bright blue
+          clouds sliding under a circuit-patterned rim; ours was a dark, still floor. The animation code was
+          innocent. The pool's 32-frame flip-book was running all along, 37 units underneath a grey lid we had drawn
+          ourselves. The rim is a single 14-vertex polygon: an outer and an inner hexagon joined by an invisible,
+          zero-width bridge. We cut every polygon into a fan of triangles from its first corner. That's fine for
+          convex shapes, but a fan across a ring fills its hole.
+        </p>
+        <p>
+          The 1997 Direct3D renderer knew better. Once per mesh, <code>0x40be00</code> flattens each polygon,
+          tests its corners for convexity (with an f32 tolerance of 800 that also accepts the bridge's flat corners)
+          and clips ears off concave ones, checking each ear with a point-in-triangle test. Only when every corner is
+          convex does it fall back to the fan. We now cut polygons the same way. 816 polygons on the CD are concave,
+          so every world gains holes and notches it never had in our port. Clicking uses the real outline too: a click
+          in the pool now reaches the invisible save pad underneath and offers to save, as it should.
+        </p>
         <h3>The predator that never shipped</h3>
         <p>
           The exe knows a fourth hunter, <code>PMan</code>, and no world on the CD uses it. Its chase
@@ -900,6 +917,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> Rotation conditions now read the motion-key axes (rx, ry, rz), not field offsets. All 37 on the CD test rz in World 5, so nothing visible changes.</li>
           <li><time>2026‑11‑02</time> Mendel turned by the exe's own render angles (<code>0x412180</code>), the capsule's lean included, and the shield's sliding skin.</li>
           <li><time>2026‑11‑03</time> Correction: the objects' shape morphs were never ported. They carry each polygon's texture coordinates, so the whole world was mis-textured, and they raise the start room's flame curtains. With them, the intro matches the footage. The "different build" verdict of the day before is withdrawn.</li>
+          <li><time>2026‑11‑03</time> Concave polygons ear-clipped as <code>0x40be00</code> does: the save pads' rims no longer cover their shimmering pools, and 816 polygons across the CD regain their holes.</li>
           <li><time>2026‑11‑02</time> <code>PMan</code>, the unused fourth predator, ported and tested on a re-classed fork; the shared chase now holds its heading between re-aims, and predators face their prey.</li>
           <li><time>2026‑11‑02</time> The bounce response (<code>0x408c50</code>) ported exactly, for predators and the camera: a perpendicular push only when the probe went behind the wall, plus the stored normal's nudge.</li>
           <li><time>2026‑11‑02</time> Level load enters every initial state before the first tick, as <code>0x4222d0</code> does: World 2 (and World 1) now spawn Mendel without "Wake every machine".</li>
