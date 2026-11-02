@@ -116,9 +116,9 @@ are over the whole CD.
 | 0x07 / 0x08 | rising / falling edge of `m` (this tick vs the previous) | 0 / 0 |
 | 0x09 | `rand() % 100 <= n` | 166 |
 | 0x0a..0x0f | position x, y, z `>=` / `<=` n (pairs) | 144..49 |
-| 0x10, 0x11 | rotation[1] `& 0x3ff` `>=` / `<=` n | 0 / 0 |
-| 0x12, 0x13 | rotation[0] `& 0x3ff` | 0 / 0 |
-| 0x14, 0x15 | rotation[2] `& 0x3ff` | 10 / 27 |
+| 0x10, 0x11 | key `rx` (`+0xf2`, getter vtable `+0x38` = `0x423510`) `& 0x3ff` `>=` / `<=` n | 0 / 0 |
+| 0x12, 0x13 | key `ry` (`+0xf0`, `+0x3c` = `0x423500`) `& 0x3ff` | 0 / 0 |
+| 0x14, 0x15 | key `rz` (`+0xf4`, `+0x40` = `0x423520`) `& 0x3ff` | 10 / 27 |
 | 0x16 | object `id` is in state `s` | 2195 |
 | 0x17 | object `id` is not in state `s` | 368 |
 
