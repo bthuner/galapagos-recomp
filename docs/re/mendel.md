@@ -397,6 +397,116 @@ last save pad and put Mendel back on it** (the brain is *not* restored: he
 keeps what he learned), 4/5 = level transitions. Then mode 1 (rematerialise)
 → 2 (alive). `Game_TeleportCreature` @ `0x41c590` stores the respawn point.
 
+### 2.3.1 The transition effect (`+0x8ec`) — observed
+
+Port: `crates/engine/src/transition.rs` (the tables there are verbatim).
+
+**Timeline** (`Creature_Update` @ `0x417da0`, asm, the decompiler lost
+it): mode 2 runs `0x419550`, which on a lethal touch calls
+`0x424870(kind, variant, creature+0x7d4)` (`+0xb0` = stance height − 10,
+the effect's "floor" in model space, y down) and `0x4249b0` (start), and
+sets mode 0. Every later tick, mode 0 calls the effect's update (vtable
+slot 1, `0x424960`); the tick it returns 0 it calls `0x41c700(reason)`,
+ends (reason 3) or ticks the affliction manager, starts the same effect
+**backwards** (`0x4248c0`) and sets mode 1 — and mode 1's first update
+runs that same tick (`0x417e8e`); when it returns 0, mode 2. Modes 0/1
+never pose him (the effect works on a frozen copy); the mover still runs.
+
+**Who starts which effect** (CD scan: `transition_probe`):
+
+| Source | Kind, variant |
+|---|---|
+| lethal floors (`0xf000`, `(f>>16)&7`) | 1 v0 (s0), 1 v1 (s5), 2 v0 (most common), 2 v4, 2 v6, 3 v0 (s4), 3 v1 (the delayed agitating floors), 4 v0, 5 v0 (s4), 7 v0 (s1) |
+| falling too long (`0x181000`) | 1 v0 |
+| portal reactions (`0x41b140`) | kind 1 teleport `0xf1000` → 1 v7; kind 2 `0x161000` → 1 v6; gate (3) `0x251000` → 1 v5, reason 4; kind 5 `0x2d1000` → 1 v5, reason 5; kind 6 `0x1b2000` → 2 v3, reason 3; kind 7 `0x151000` → 1 v5 |
+| spawn (`0x41c590` args 7/8 = `Strt` `ints[5..6]`, via `0x4198f0`: start + backwards, mode 1) | 3 v3 (s0 #57, the birth: plays as 3 v0x43), 1 v6 (s0 #83); every other `Strt`: kind 0 = no effect, mode stays 2 (the creature's initial `+0x8fa`) |
+| predator bites (predators.md) | `PBal` 2 v3, `PFrk` 2 v0; section 7's `Pred` walls 2 v4, 4 v0 |
+
+Kind 6 is never used.
+
+**Manager** (`0x424520`, 0xb4 bytes): `+4` owner, `+8/+0xa` pre/post
+delay, `+0xc/+0xe` kind/variant, `+0x10/+0x12` queued follow-up,
+`+0x14` current sub-effect, `+0x18..+0x30` the seven sub-effects (kinds
+1, 2 at `+0x1c`, 3, 4, 5, 6, 7), `+0x38` the pending sound cue (a copy of
+the template `+0x74`: sound, bank `Game+0x17ee7a` = the world bank,
+pitch 1.0, distances 3000/30000, volume 256), `+0xb0` floor. `0x4248c0`
+(backwards): variant + 0x40; kind 3 → v0x40 unless v0x43; 4 → 2 v0x41;
+5 → 2 v0x44; 6 → v0x40; 7 → 2 v0x40.
+
+**Sub-effect base** (`0x425680`, vtable `0x460ba0`): start `0x4256f0(n)`
+copies the owner's polygons and vertices into a private mesh (`0x4105d0`:
+one vertex per polygon corner, one material per polygon, reset from the
+section material `0x4056d0`) and swaps it into the object (`0x402280..`);
+update `0x425800` = `pre` idle ticks, `n` steps (the pending cue plays
+before the first, `0x4255a0`), `post` idle ticks, then `0x425790` gives
+the object its own mesh back and the update returns 0. Per-polygon
+material writes: `0x4111b0(b)` (m0/m1, the affliction encoding),
+`0x411290` (m2), `0x411300` (m3); `0x411340` shows/hides (`+0x64`, which
+the draw `0x402490` tests); object `+0x2a` = back-face culling.
+
+| Kind | Start (args) | Step | What it does |
+|---:|---|---|---|
+| 1 fade | `0x40fa50(rate, n, flags)`, duration `N·rate + n − 1` | `0x40fd40` / `0x40fe50` (flag 2, backwards) / `0x40ff60` (flag 0x100) | every `rate` ticks the next polygon (order: flag 1 random, 0x10/0x20/0x40 sorted by its highest x/y/z, 0x80 descending) starts at brightness `0x7fff<<1` (whiter than normal) and loses `0x7fff/n` a tick; below 5000 it is hidden. Backwards: hidden, then shown and brightened from black. Flag 8: dithered (random 0 or 0xffff against the value). Flag 4: back faces culled. **Bug**: the sorted lists store `i + 1` (`0x40f780`), so polygon 0 is never picked and the last pick writes past the array |
+| 2 burst | `0x411640(dur, a, b, spin_v, spin_a, flags, floor)` | `0x411810` | every polygon moves out from its centre `c` (mean of its corners + `rand&0xff − 0x7f` per axis; flag 8: `(0, ȳ − floor, 0)`) to `c·k/256`, `k = A + (r·(A − 256) >> 5)`, `r = rand & 0xff` per polygon, `A` from 256 to `a` (8.8); flag 4: tumbling by `rnd(0..511)·(B − 256) >> 8`; flag 0x20: vertical spread / 8; flag 0x10: all white (m0..m3 = 0xffff) on the first step (backwards: the last); flag 2: random flicker; flag 1: backwards (from `a` to 256). Spins the owner's heading (`0x410f70` writes `*(creature+0xa0)` = the mover's `+0x50`): speed and acceleration ×256; backwards it starts `n·v + n²·a/2` ahead and comes back to n·a/512 off. Culling off |
+| 3 squash | `0x409cb0(dur, flags, floor)` | `0x409da0` → `0x409e90(s, axes, about_floor)` | flag 2: y scaled from 256 to 0 about the floor; 0/4/8: flat at once; 1 (backwards): `s = 256·(1 − cos 6v · e^−v)`, `v` 0 → 5, a springy rise; 0x10: all axes 0 → 256 about the origin plus random flicker |
+| 4 jolt | `0x4113b0(dur, mask, 0)` | `0x4113e0` | every corner `+ (rand & mask) − mask/2` per axis each tick; brightness alternates `rand + 0x7fff` / `rand` (m0..m3); the last two ticks 0x6000, mask 0x1f. v0..v2 queue a burst (2 v4 / 2 v3 / 2 v0) |
+| 5 melt | `0x416850(45, floor)` (base runs 47) | `0x416980` | brightness `+60000/45` a tick up to 0xea60 (white glow) for 45 ticks; then sound 0x24 and every polygon tumbles about its centre (`rand&0xf − 8` per axis × t, frozen at its first floor contact) and drops (speed +1 a tick); below the floor its speed halves and turns up; the base is held at 2 ticks until every speed is in −1..1 |
+| 6 stretch | `0x42dc00(dur, flags, floor)` | `0x42dca0` → `0x42dd80(s)` | y by `s/256` about the floor, x and z by `√(256/s)`; flag 1 a damped `1 + sin(9x)/(2x²)` wobble; flag 2 hides everything (v1). Not on the CD |
+| 7 shatter | `0x429bc0(g, dA, dB, flags, clink delay, floor)`, base 4 | `0x429d10` | polygons fly from `(0, ȳ − 4·floor, 0)` outward (`A += dA`), tumbling (`B += dB`), falling (`vy += g`); a corner below the floor lands the polygon (state 1 → frozen), is clamped to it, and plays sound 0x22 at pitch 0xb000 ± 0.25 once the clink delay ran out; held alive until all landed. Post 30 |
+
+**Variant tables** (`0x424ab0`, `0x424e20` + jump table `0x4250f8`,
+`0x425140`, `0x425280`, `0x425370`, `0x425480`) — sound (1-based world
+bank) / flash (`0x438830(id, 200)`):
+
+* kind 1: v0 (0.3, 8, 0xd) 1/3; v1 (0.0001, 8, 5) 2/–; v2 (0.14, 4, 0x190)
+  3/–; v5 (0.7, 12, 0xa4) sound 6 at once (pitch 0xd000, 10000/20000) /
+  4 (hold 40, then **white**, which stays); v6 (0.3, 10, 0x24) 7/–; v7 (0.1,
+  6, 0x94) 8/–; 0x40 (0.3, 8, 0xf) 1/3; 0x41 (0.0001, 8, 7) 2/–; 0x42
+  (0.1, 3, 0x192); 0x45 (0.7, 20, 0xa6) **pre 50**, sound 6 (0xb000,
+  volume 190) / 5 (white → normal); 0x46 (0.3, 10, 0x26) 7; 0x47 (0.1, 6,
+  0x96) 9.
+* kind 2 (dur, a, b, spin v, spin a, flags) sound/flash: v0 (100, 2000,
+  2000, 0, 0, 0x16) 10/6; v1 (60, 700, 1200, –, –, 0x14) 11/7; v2 (100,
+  1400, 800, 0x34) 12/8; v3 (60, 2000, 500, 0x32) 13/9; v4 (80, 1800, 1,
+  0x32) 14/10; v5 (40, 300, 500, 6.0, 0, 0x14) 15/11; v6 (80, 1500, 800,
+  0x1e) 16/12; backwards all sound 18, no flash: 0x40 (60, 600, 500, 0,
+  0.5, 0x19), 0x41 (60, 300, 500, 0x0d), 0x42 (60, 500, 800, 10.0, 0,
+  0x31), 0x43 (60, 500, 400, 0.4, 0, 0x37), 0x44 (60, 500, 800, 0, 0.5,
+  0x37), 0x45 (60, 300, 600, 0, 0.5, 0x15), 0x46 (60, 400, 600, 0x1d).
+  Every kind 2 cue has pitch variation 0x4000.
+* kind 3 (dur, flags): v0 (2, 0) 0x13/0xd post 50; v1 (60, 2) 0x14 post 40;
+  v2 (40, 4) 0x15/0xe; v3 (1, 8); 0x40 (70, 1) 0x17; 0x43 (60, 0x10).
+* kind 4 (dur, mask): v0 (30, 0x3f) 0x18/0xf → 2 v4; v1 (62, 0x1f)
+  0x19/0x10 → 2 v3; v2 (21, 0x7f) 0x1a/0x11 → 2 v0; v3 (38, 0x3f) 0x18/0xf
+  post 60.
+* kind 5 v0: sound 0x23 (then 0x24 when it collapses).
+* kind 6: v0 (65, 0) 0x1c → 6 v1; v1 (0, 2) 0x1e/0x13 post 60; 0x40/0x41
+  (100, 1) 0x1d/0x12.
+* kind 7 (g, dA, dB, flags, delay) post 30: v0 (6, 8, 5, 0, 30) 0x1f/0x14;
+  v1 (30, 16, 5, 0, 12) 0x20/0x15; v2 (8, 2, 5, 4, 6) 0x21/0x16; v3 (1, 3,
+  1, 4, 6) 0x1f/0x16.
+
+The flash scripts 0x00..0x16 are in `flash.rs` (`Palette_InitScripts` @
+`0x438290`).
+
+**Durations that matter** (ticks of 1/24 s): lethal 2 v0 = 100 + 60
+back; 3 v1 (agitating floors) = 100 + 70; the gate's 1 v5 ≈ `0.7·N + 11`
+(N = his ~80 visible faces: 65 ticks), the screen white from tick ~50.
+
+**Footage** (QLiZsijShbY, section 0): the gate at the end (t ≈ 593.5 s)
+bleaches the screen to white over ~0.5 s (flash 4's 10 frames), holds it
+~0.7 s, then the time screen fades in (flash 0) — the port's 51 → 65
+ticks match. The birth (t ≈ 15.2 s): a small, flat-shaded violet Mendel
+grows in the beam (3 v0x43: scale 0 → 1 with random flicker). No death
+by a lethal floor is in the video.
+
+inferred (port): the per-polygon rotation of `0x410f90` (matrix
+`0x430430`, angles in 1024ths) uses the object rotation formula; kind
+1's sort keys are taken at the start (the exe: when the creature is
+built); `m2`/`m3` writes are not modelled (only the m0/m1 brightness); a
+saved game keeps no running effect (it ends at the load); when the host
+loads a section after a gate the effect's reverse is moot.
+
 Two more rules at the top of `0x419550` (observed):
 
 * under affliction 1, a surface with bit 22 (`0x400000`) loses its lethal
@@ -784,8 +894,9 @@ Running Mendel in the live simulation confirmed or corrected:
   (stale caches written mid-evolution, or non-zero third input at
   authoring time?).
 * Camera profile fields `a, b, c, d`; the `u32 1520`.
-* The transition effect (`+0x8ec`, `0x424520`: kinds 1..7, variants) and
-  what `+0x5c += 8` does to a polygon (affliction 1).
+* What `+0x5c += 8` does to a polygon (affliction 1). (The transition
+  effect is §2.3.1; open there: the exact matrix of `0x430430`, and the
+  meaning of the cue's `+0x22` that kind 7 sets to `50 − rand & 31`.)
 * Scroll record on the first tick of a new state: the exe's "previous"
   offset is the old state's frame (unless the texture changed); the port
   takes the new list's last frame (looping) to avoid saving the record.
