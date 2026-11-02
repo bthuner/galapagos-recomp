@@ -222,7 +222,7 @@ pub extern "C" fn worlds_open(ptr: *mut u8, len: usize) -> i32 {
 }
 
 /// Build render buffers for section `i`. Returns the number of vertices
-/// (7 floats each, see world.rs), or -1 on a parse error.
+/// (10 floats each, see world.rs), or -1 on a parse error.
 #[no_mangle]
 pub extern "C" fn world_build(i: usize) -> i32 {
     WORLDS.with(|w| w.borrow_mut().as_mut().map_or(-1, |worlds| build_section(worlds, i)))
@@ -321,6 +321,33 @@ pub extern "C" fn world_object_count() -> u32 {
 #[no_mangle]
 pub extern "C" fn world_far_clip() -> f32 {
     with_mesh(|m| m.far_clip, 0.0)
+}
+
+/// The fog and clear colour of the current section: 0 black, 1 white
+/// (`world::fog_white`).
+#[no_mangle]
+pub extern "C" fn world_fog_colour() -> f32 {
+    with_mesh(|m| m.fog, 0.0)
+}
+
+/// Number of section materials (colour ramps) at [`world_materials_ptr`].
+#[no_mangle]
+pub extern "C" fn world_material_count() -> u32 {
+    with_mesh(|m| (m.materials.len() / world::FLOATS_PER_MATERIAL) as u32, 0)
+}
+
+/// The section's materials for the shader, 4 f32 each (`m0 + m2·ambient`,
+/// `m1`, `m3·intensity`, `m5`; see `world::light_level`). A vertex's
+/// `light` float indexes them.
+#[no_mangle]
+pub extern "C" fn world_materials_ptr() -> *const f32 {
+    with_mesh(|m| m.materials.as_ptr(), core::ptr::null())
+}
+
+/// The section's directional light: 3 f32, the unit vector light travels.
+#[no_mangle]
+pub extern "C" fn world_light_ptr() -> *const f32 {
+    with_mesh(|m| m.light.dir.as_ptr(), core::ptr::null())
 }
 
 /// Number of drawn objects; each has a [`world::DrawRange`] (two u32:
@@ -498,7 +525,7 @@ fn with_sim_mut(f: impl FnOnce(&mut sim::Sim)) {
 
 // ——— Mendel ——————————————————————————————————————————————————————————
 //
-// His posed mesh is rebuilt every tick in world space (same 7-float vertex
+// His posed mesh is rebuilt every tick in world space (same 10-float vertex
 // layout as the world, texture layers 16..19), so the renderer draws it
 // with an identity model matrix.
 
@@ -770,7 +797,7 @@ pub extern "C" fn game_section() -> i32 {
     WORLDS.with(|w| w.borrow().as_ref().and_then(|w| w.sim.as_ref()).map_or(-1, |s| s.section as i32))
 }
 
-/// Number of 7-float vertices of the current section's buffer (the value
+/// Number of 10-float vertices of the current section's buffer (the value
 /// `world_build` returned).
 #[no_mangle]
 pub extern "C" fn world_vertex_count() -> u32 {

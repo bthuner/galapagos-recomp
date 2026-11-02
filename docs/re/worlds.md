@@ -160,12 +160,12 @@ Handed to `SoundServices_CreateSoundSample` @ `0x43a2b0`.
 
 | Off | Type    | Example            | Meaning |
 |-----|---------|--------------------|---------|
-| 0   | u32     | 999999 / 60000     | far clip distance (inferred) |
-| 4   | u16[3]  | 0,0,0 / ffff x3    | background/fog colour (48-bit) |
-| 10  | u16     | 0 / 1              | fog on/off (inferred) |
-| 12  | u16     | 50                 | `/65535` then truncated — unknown |
-| 14  | i32[3]  | -128,-128,-128     | directional light vector (→ `0x401470`) |
-| 26  | u16     | 65535              | light intensity `/65535` (→ `0x401510`) |
+| 0   | u32     | 999999 / 60000     | far clip distance (→ renderer `+0x45a0`; Direct3D z = depth / far) |
+| 4   | u16[3]  | 0,0,0 / ffff x3    | background = fog colour (48-bit; observed, see §5.3) |
+| 10  | u16     | 0 / 1              | stored at `+0x128668` and never read again (observed: no other reference) |
+| 12  | u16     | 50                 | ambient light: `trunc(u16 / 65535)` (`0x42e940`, `_ftol`) → `+0x128684`, so 0 on the CD |
+| 14  | i32[3]  | -128,-128,-128     | directional light: the direction light travels, normalised (`0x401470`) |
+| 26  | u16     | 65535              | light intensity `/65535` (`0x401510`, light `+0x38`) |
 
 ### 5.2 Palette, shade table, textures — observed
 
@@ -188,34 +188,107 @@ textures (marble, lava, water, alien skins...); each goes to
 `Renderer_AddTexture128` @ `0x405580`, which allows at most 40 — matching
 `"Not a vaild texture index"` (`0x40f4ca`, asserts `index < 0x28`).
 
-### 5.3 Colour ramps are materials — decoded
+### 5.3 Colour ramps are materials; how a polygon is lit — decoded
 
 `Renderer_ReadColorRamps` @ `0x42ece0`: `u16 count` (62 in every section),
 then `count x u16[6]`, each divided by 65535 and passed in order to
 `0x405620`, which appends them to the renderer's material table (`+0x1864`,
 24 bytes each). A frame's shade number (`+6`, stored at polygon `+0x60` by
-`0x402450`) selects the polygon's material. `0x401b70` turns it into a light
-level (polygon `+0x66`, a row of the 32-row lighting table, `pow(2, 5)` at
+`0x402450`; `-1` keeps the current one) selects the polygon's material.
+
+| field | read by | meaning (section 0's values) |
+| --- | --- | --- |
+| `m0` | `0x401b70` | base light: 0.35 … 1.0 in steps |
+| `m1` | `0x401b70` | over-brightening past the middle row, towards white (0 … 0.23) |
+| `m2` | `0x401b70` | ambient factor (1 or 0); the ambient is 0 on the CD (§5.1) |
+| `m3` | `0x401b70` | directional-light factor (1 for materials 0–16, else 0) |
+| `m4` | — | not read by the lighting or by the Direct3D path |
+| `m5` | `0x40c502` | fog amount (0 for 34–48: lamps that never fade) |
+
+Materials 49–61 (base 0 … 0.41, unlit) are glass materials, see `-4` in §5.5.
+
+**When.** The mesh draw `0x402490` runs every frame for every object; for
+each polygon that survives clipping it calls `0x401b70`, so lighting is
+recomputed every frame, not at load. Polygon normals are object-local
+(`0x4019a0`: `(v2 − v1) × (v0 − v1)`, normalised, recomputed only when the
+mesh changes) and turned into camera space with the object's current
+matrix (`0x401640`); the light vector is turned into camera space by the
+same camera rotation every frame (`0x401520`, called for each light from the
+frame start `0x40f68a`). The dot product is therefore the world-space one:
+a turning object is relit, and a flip-book that changes a polygon's shade
+(capsule #3's lamps, polygon 2: materials 35, 38, 27 → levels 8, 12, 16)
+blinks.
+
+**Level** (`0x401b70`, observed; constants `0x45f030` = 0.0, `0x45f034` = 2.0,
+`0x45f038` = 0.5, `0x45f040` = 1.0; rows = `+0x128680` = 32, `pow(2,5)` at
 `0x40346f`):
 
 ```text
-L     = m0 + m2·ambient − Σ lights m3·intensity·(n·l)   (only n·l < 0 counts)
-t     = min(L / 2, 0.5) + m1, at most 1
-level = trunc(t · 31)
+L     = m0 + m2·ambient
+for each light (one per section, +0x1778 / +0x177c):
+  d = n·l;  if d < 0:  L = L − m3·intensity·d        0x401bc3..0x401c0e
+t     = min(L / 2, 0.5) + m1;  if t > 1: t = 1          0x401c10..0x401c53
+level = trunc(t · (rows − 1))                           0x401c77 (_ftol) → polygon +0x66
 ```
 
-| field | meaning (section 0's values) |
-| --- | --- |
-| `m0` | base light: 0.35 … 1.0 in steps, so `t` reaches the middle row (0.5) at `m0 = 1` |
-| `m1` | over-brightening past the middle row, towards white (0 … 0.23) |
-| `m2` | ambient factor (1 or 0); the ambient itself is `trunc(u16 / 65535)` (`0x42e940`), 0 on the CD |
-| `m3` | directional-light factor (1 for materials 0–16, else 0) |
-| `m5` | read as a per-span switch by the software renderer (`0x404660`); 0 for 34–48 (inferred: fog off) |
+Light travels along `l` (section 0: `(−1, −1, −1)/√3`), so a face is lit
+when it faces against it, and never from behind. With `m0 ≥ 0.43` any
+lit face caps at the middle row 15; turned away it falls back to
+`trunc(m0/2 · 31)`; `m1` pushes past 15 towards 22.
 
-Materials 49–61 (base 0 … 0.41, unlit) are glass materials, see `-4` in §5.5.
-In Direct3D (`0x40c330`) a level below the middle row becomes a grey of
-`level / 16 · 255` that modulates the texture; above it the grey is 255 and
-the rest goes to the specular highlight.
+**Direct3D colours** (`0x40c330`, observed `0x40c3e2..0x40c5b9`; constant
+`0x45f390` = 255.0). Each `D3DTLVERTEX` gets a flat diffuse grey and a flat
+specular grey from the polygon's level, and a per-vertex fog factor in the
+specular alpha:
+
+```text
+level <  16:  diffuse = min(trunc(level / 15 · 255), 255)   specular = 0
+level >= 16:  diffuse = 255   specular = min(trunc((level − 16) / 16 · 255), 255)
+glass (+0x62):  diffuse = diffuse / 2,  specular = 0
+specular += DAT_0048b628, at most 255
+fog (alpha) = trunc(255 − min(trunc(1/rhw), 24000) / 24000 · m5 · 255)   per vertex
+```
+
+Note the divisor 15: row 15 is already the plain texture. The texture stage
+is Direct3D's default `MODULATE`; the specular is added (render state
+`SPECULARENABLE` is never set, so it keeps its DirectX 5 default, inferred
+TRUE: the footage shows the white wash-out of the bright panels). `1/rhw`
+is the vertex's view depth (`0x40c3bb`: `rhw = 1 / z`), clamped to
+`0x5dc0` = 24000 (`0x45f394`), whatever the section's far clip.
+
+`DAT_0048b628` is not a preference: `0x434730` writes the screen ramp's red
+`[0]` into it each time a palette flash or fade is applied (`0x436e00`,
+`0x4371c0`, `0x437350`, `0x4374e0`, `0x437690`): the Direct3D stand-in for
+the palette effects of the 8-bit renderer. It is 0 outside flashes.
+
+**Fog** (observed). `FOGENABLE` is set at start-up (`0x40a640`, render
+state `0x1c`); the frame start sets `FOGCOLOR` (`0x22`, at `0x40f6a6`) from
+`+0x17a560`, which the Direct3D override of the background setter
+(`0x40aa80`, vtable `+0xc`, called by the environment reader) makes white
+(`0xffffff`) when the background's red is non-zero, else black. The frame
+clear (`0x40f5d7`) makes the same choice. Section 1 (background white,
+far clip 75000) is the only white world on the CD.
+
+**Brightness preference** (observed). The help text says the setting
+"controls the ambient light of the scene", but the code does not touch the
+ambient: `0x42ea40` maps the Preferences index 1..7 to the renderer's
+vtable `+0x14` = `0x403a90` (mode, amount): Darkest (2, 0.3), Darker
+(2, 0.2), Dark (2, 0.1), Standard (0, 0), Light (1, 0.05), Lighter (1, 0.1),
+Lightest (1, 0.15). `0x403130` then rebuilds the working palette
+(`+0x127a50`) from the section palette: each 16-bit channel moves towards
+white (mode 1) or black (mode 2), `c + (target − c)·amount`, except a
+channel already at the opposite end. The software shade table (`0x402c91`)
+and the screen palette (`0x42ead9`) are built from that palette (inferred:
+the Direct3D textures too).
+
+The port: `crates/engine/src/world.rs` (`light_level`, `d3d_colour`,
+`fog_factor`, `fog_white`) is the Rust reference; the vertex shader in
+`web/src/world-view.js` evaluates it per frame with each object's model
+matrix. Mendel's polygons use the section materials their records name
+(4 or 8, see mendel.md); an affliction's brightness `v` rewrites the first two
+terms of his per-polygon copy (`0x406110`: below 0x8000 `m0 = 2v/65535,
+m1 = 0`, else `m0 = 1, m1 = (v − 0x7fff)/2/65535`), restored every tick by
+`0x405fc0`.
 
 ### 5.4 The world sound set — observed
 
@@ -318,8 +391,10 @@ only slide the offset (section 1's pad #49 polygon 0: `(8, e1)` then
 `texture == -4` (`0x423791` → `0x4023b0`) and leaves the texture alone.
 Direct3D draws glass in bucket `0x27` of `0x40f000` with depth writes off,
 alpha blending on with the start-up factors `ONE, ONE` (`0x40a640`), no
-texture and no culling, skipping polygons whose level is 0; its grey is
-half the usual (`0x40c330`). The software renderer (`0x404660`) never lets
+texture and no culling (render state `CULLMODE` 1; every other bucket
+uses 3 = counter-clockwise), skipping polygons whose level is 0; its grey
+is half the usual diffuse, with no highlight (`0x40c478`), and it is
+fogged like any polygon. The software renderer (`0x404660`) never lets
 glass hide a span: it adds the glass level to the light level of the
 surface behind. Section 0's intro capsule #3 is glass: material 49 (level
 0, invisible) while docked, 17–19 during the ride. `-5` hides the
@@ -370,7 +445,12 @@ polygon counts equal to mesh polygon counts, and the four sound qualities.
 * The four unknown object blocks (`0x42acc0` class, `0x42b9e0`, `0x428cf0`,
   `0x40a0d0`) and the subclass tails (`Fldr` `0x4287a0`, `PBal/PFrk/PMan`
   `0x416590`, `Pred` `0x42a740`, game objects `0x409070`).
-* What the 32 x 32 axes of the shade table are (light x fog? light x depth?).
+* What the 32 x 32 axes of the shade table are: one is the light level
+  (§5.3); the other is presumably the fog step the software renderer
+  applies when a span's material has `m5` (`0x404660`), towards the
+  background colour (`0x402d82` reads it while building the table).
+* Direct3D culls counter-clockwise triangles outside the glass bucket
+  (`0x40f000`); the port still draws both faces.
 * Exact UV rule for polygons with more than 4 vertices, and the meaning of the
   appearance `flags` bits.
 * The `folder` and `flags` object fields, the camera key

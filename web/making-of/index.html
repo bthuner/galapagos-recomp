@@ -470,7 +470,7 @@ wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></c
         </p>
         <ul class="strings">
           <li><b>Texture coordinates</b><span>none on disk; the exe's polygon initialiser gives the first three vertices texels (0,127), (0,0), (127,0), which defines an affine map across the polygon</span></li>
-          <li><b>Lighting</b><span>a gentle Lambert term, plus fade-to-black with distance up to the section's far-clip, the two jobs the 256 KB shade table did</span></li>
+          <li><b>Lighting</b><span>at first a gentle Lambert term plus a fade-to-black with distance, our stand-in; later replaced by the original's own formulas, see <a href="#lighting">Lighting, the 1997 way</a></span></li>
           <li><b>Which way is up</b><span>Z, floors face +z. Our first guess was "Y points down" (rendered Y-up, every tower hung from the sky, and Y-down looked right from far away); it took the camera port to prove it wrong, see <a href="#up-is-z">Up is Z</a></span></li>
         </ul>
         <p>
@@ -712,6 +712,24 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <code>cache: "no-cache"</code>: the browser still caches it, but checks with the server first, so a
           fixed bug can't come back from the cache.
         </p>
+        <h3 id="lighting">Lighting, the 1997 way</h3>
+        <p>
+          With the materials decoded for the glass, our invented lighting (a soft Lambert term and a guessed
+          distance fade) had no excuse left. The exe lights every polygon every frame, in three steps:
+        </p>
+        <ul class="strings">
+          <li><b>A level</b><span><code>0x401b70</code>: the material's base light, plus the directional light when the face turns towards it, halved and capped at the middle of 32 rows, plus the material's over-brightening. Normals are rotated with their object every frame, so a turning platform is relit as it turns</span></li>
+          <li><b>Two colours</b><span><code>0x40c330</code>: below the middle row the level dims the texture (diffuse grey); above it the texture is full and the rest becomes a <em>specular</em> white added on top. That is why the footage's light panels burn out to white while red stays red</span></li>
+          <li><b>Fog</b><span>per vertex, linear over 24,000 units of view depth, scaled by the material's last field. That field was the "unknown switch": it is the fog amount. The fog colour is black, or white when the section's background has any red (only World 1)</span></li>
+        </ul>
+        <p>
+          Flip-books animate the shade number, so blinking lights now really blink: the capsule's side panel steps
+          through levels 8, 12 and 16. The Brightness preference turned out to be a palette adjustment
+          (<code>0x403130</code>): each step pulls every palette channel a fixed fraction towards black or white,
+          and Standard changes nothing. A byte we'd taken for "brightness" in the colour code is really the red of
+          the current screen flash. The vertex now carries the material and the normal instead of a baked light,
+          and the shader does the rest.
+        </p>
         <h3>The belt that really does throw him off</h3>
         <p>
           Section 2's green belt swept Mendel off its edge at 139 units per tick, and he died. That looked like a
@@ -747,6 +765,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> The original polygon walker replaces our ray-cast controller: Mendel stands on sideways and upside-down pads, rides platforms in their own coordinates, and saves remember places on polygons (GLPS v3). Fixed the object rotation order and the three motion-path modes on the way.</li>
           <li><time>2026‑11‑02</time> The "enabled" byte gates collision flags, not drawing: flip-book polygons (pad #49 and thousands more) stop flickering and stay clickable. Section 2's fast belt checked against the exe: 139 units per tick is the original speed.</li>
           <li><time>2026‑11‑02</time> Glass: <code>−4</code> frames are additive, untextured panes, and the "colour ramps" are materials. The intro capsule turns into the footage's grey veil when its ride starts.</li>
+          <li><time>2026‑11‑02</time> The original lighting: per-polygon levels from materials, Direct3D diffuse plus specular, per-vertex fog (white in World 1), and Brightness as the palette adjustment it really was.</li>
           <li><time>2026‑11‑02</time> Level load enters every initial state before the first tick, as <code>0x4222d0</code> does: World 2 (and World 1) now spawn Mendel without "Wake every machine".</li>
           <li><time>2026‑11‑02</time> Blinking reported again: traced to a browser serving the pre-fix engine from its cache. Checked against the footage; the engine is now always revalidated before use.</li>
         </ol>
