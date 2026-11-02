@@ -149,7 +149,10 @@ pitch = +0x70, roll = +0x74)`: `0x4096a0` builds it with
 direction `Math_VectorAngles` (`0x430c50`, yaw → `+0x72`, pitch →
 `+0x70`) turned it to. Our `sim::transform` reads `rot` as (yaw, pitch,
 roll), so predator.rs keeps `rot` = (`+0x72`, `+0x70`, `+0x74`) for every
-predator and `PPol`. Observed.
+predator and `PPol`. Observed. The motion paths agree: their pose setter
+stores a key crosswise (`0x422f36`–`0x422f68`: key `+0xc` rx → `+0xf2`,
+`+0x10` ry → `+0xf0`, `+0x14` rz → `+0xf4`; the mesh's `+0x70..+0x74`
+are the object's `+0xf0..+0xf4`), so `rot[0]` is the yaw for every object.
 
 ### 3.1 `PMan` — observed
 
@@ -276,10 +279,4 @@ cue 2 = sound 2, pitch 0.5, 5000/500/5000. Host event 9
 
 ## Open questions
 
-* The rotation order outside the predators: `0x402370` stores a pose's
-  three angles at `+0x70, +0x72, +0x74`, and the motion paths put them
-  into our `rot[0..3]` in that order, while `sim::transform` reads
-  `rot[0]` as the yaw, which the exe takes from `+0x72` (§3, Angles).
-  Either the paths' angles are swapped in our objects or their data
-  never exercises it; the predators are now consistent with the exe.
 * Appearing without an effect (no slot `0x9c`, §2) is not ported.
