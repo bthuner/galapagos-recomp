@@ -255,3 +255,6 @@ kbd { font: 0.7rem ui-monospace, monospace; color: var(--mute); border: 1px soli
 }
 .time-screen canvas { width: min(92vw, calc(80vh * 560 / 397)); height: auto; image-rendering: auto; }
 .time-screen p { margin: 0; font-size: 0.75rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--mute); }
+.menu__sounds { display: flex; flex-wrap: wrap; gap: 0.3rem; margin: 1rem 0; max-height: 40vh; overflow: auto; }
+.menu__sounds button { font: 0.72rem ui-monospace, monospace; padding: 0.3rem 0.5rem; border: 1px solid #ffffff22; border-radius: 6px; background: none; color: var(--bone); cursor: pointer; }
+.menu__sounds button:hover { border-color: var(--lime); color: var(--lime); }

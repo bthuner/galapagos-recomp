@@ -79,6 +79,7 @@
           <button data-action="export">Export Mendel NERM…</button>
           <hr />
           <button data-action="prefs">Preferences…</button>
+          <button data-action="sounds">Sound test…</button>
           <button data-action="about">About Galapagos…</button>
           <button data-action="quit">Quit</button>
         </nav>
@@ -109,6 +110,13 @@
           <div class="menu__row"><button type="submit">Save</button><button type="button" class="link" data-action="resume">Cancel</button></div>
         </form>
         <p class="menu__note">If Mendel's body is destroyed, he reappears here and the world is restored to this moment — but not his brain: he keeps what he learnt.</p>
+      </section>
+
+      <section class="menu__panel" data-panel="sounds" hidden>
+        <h2>Sound test</h2>
+        <p class="menu__note">Every sound of this world and Mendel's, as decoded from your CD at the current Fidelity. Hover for rate and length.</p>
+        <div class="menu__sounds"></div>
+        <button class="link" data-action="back">← Back</button>
       </section>
 
       <section class="menu__panel" data-panel="about" hidden>

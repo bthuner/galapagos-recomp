@@ -212,7 +212,9 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     }
     const { draws } = current;
     const transforms = current.transforms();
+    const visible = current.visible?.();
     for (let i = 0; i < draws.length / 2; i++) {
+      if (visible && !visible[i]) continue; // hidden by a -5 appearance frame
       gl.uniformMatrix4fv(uModel, false, transforms.subarray(i * 16, i * 16 + 16));
       gl.drawArrays(gl.TRIANGLES, draws[i * 2], draws[i * 2 + 1]);
     }

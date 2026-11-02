@@ -48,6 +48,11 @@ pub struct WorldMesh {
     /// For each draw: the vertex range of every mesh polygon (count 0 if the
     /// polygon was degenerate), so appearance changes can patch in place.
     pub poly_ranges: Vec<Vec<DrawRange>>,
+    /// For each draw and polygon: is its current frame's texture -5? One
+    /// such polygon hides the whole object (see `apply_frame`).
+    hides_object: Vec<Vec<bool>>,
+    /// One byte per draw: 1 = drawn, 0 = hidden by a -5 frame.
+    pub visible: Vec<u8>,
     /// Texture coordinates before any per-frame offset, 2 per vertex.
     pub base_uv: Vec<f32>,
     /// One column-major 4×4 matrix per drawn object (16 f32 each).
@@ -131,7 +136,12 @@ impl WorldMesh {
         // emit_object wrote un-offset UVs; keep a copy so frame offsets can
         // be re-applied whenever a polygon's appearance frame changes.
         let base_uv = vertices.chunks_exact(FLOATS_PER_VERTEX).flat_map(|v| [v[3], v[4]]).collect();
-        let mut mesh = WorldMesh { vertices, draws, draw_of_object, poly_ranges, base_uv, transforms, textures, texture_count, bounds, objects_drawn, far_clip };
+        let hides_object = poly_ranges.iter().map(|p| vec![false; p.len()]).collect();
+        let visible = vec![1; draws.len()];
+        let mut mesh = WorldMesh {
+            vertices, draws, draw_of_object, poly_ranges, hides_object, visible, base_uv, transforms, textures,
+            texture_count, bounds, objects_drawn, far_clip,
+        };
         // Apply each polygon's initial appearance frame (layer, UV offset).
         for object in &section.objects {
             let Object::World(obj) = object else { continue };
@@ -142,9 +152,7 @@ impl WorldMesh {
                 continue;
             }
             for (p, frames) in state.polygons.iter().enumerate() {
-                if let Some(f) = frames.first() {
-                    mesh.apply_frame(draw, p, Some(f));
-                }
+                mesh.apply_frame(draw, p, frames, 0);
             }
         }
         mesh
@@ -153,18 +161,33 @@ impl WorldMesh {
     /// Writes a polygon's appearance frame into the vertex buffer: texture
     /// layer (or hidden / untextured) and the texel offset that makes
     /// surfaces scroll. Returns the patched vertex range.
-    pub fn apply_frame(&mut self, draw: usize, poly: usize, frame: Option<&PolyFrame>) -> Option<DrawRange> {
+    pub fn apply_frame(&mut self, draw: usize, poly: usize, frames: &[PolyFrame], index: usize) -> Option<DrawRange> {
         let r = *self.poly_ranges.get(draw)?.get(poly)?;
-        // Negative texture numbers (-2..-5) are not drawn. Observed: the
-        // birth tube #54 (-4/-5) and the large box #96 (-3) are collision
-        // geometry; the 1997 footage shows Mendel on the start disc with
-        // no tube around him. inferred: -4/-5 may also select a special
-        // render mode (objects.md); until that is known, they are hidden.
+        let frame = frames.get(index).or(frames.first());
+        // What a frame's texture number does, exactly as the exe's frame
+        // applier (0x423730) reads it:
+        //   >= 0   use that texture;
+        //   -5     hide the *whole object* (a flag passed to 0x4022e0 after
+        //          the polygon loop): start pad #57 and the birth tube #54
+        //          carry it, so their stacks are never drawn;
+        //   -4     an object-level flag (0x4022f0), meaning unknown;
+        //   -2/-3  change nothing: the polygon keeps its previous texture.
+        // On the CD, -2/-3 frames sit inside flip-books (e.g. pad #83:
+        // 9, -3, -3), so "previous" is the last earlier frame of the same
+        // list with a real texture. inferred: resolving it from the list
+        // rather than from render history keeps snapshots reproducible.
+        // Without one, the polygon stays hidden.
+        let previous = frames[..index.min(frames.len())].iter().rev().find(|f| f.texture >= 0).map(|f| f.texture as f32);
         let layer = match frame {
-            Some(f) if f.enabled == 0 || f.texture < 0 => -2.0,
-            Some(f) => f.texture as f32,
+            Some(f) if f.enabled == 0 => -2.0,
+            Some(f) if f.texture >= 0 => f.texture as f32,
+            Some(_) => previous.unwrap_or(-2.0),
             None => -1.0,
         };
+        if let Some(h) = self.hides_object.get_mut(draw).and_then(|h| h.get_mut(poly)) {
+            *h = frame.is_some_and(|f| f.texture == -5);
+            self.visible[draw] = !self.hides_object[draw].iter().any(|&x| x) as u8;
+        }
         let (du, dv) = frame.map_or((0.0, 0.0), |f| (f.u as f32 / TEX, f.v as f32 / TEX));
         for v in r.first..r.first + r.count {
             let i = v as usize;
@@ -259,6 +282,26 @@ mod tests {
                 "section {i}: {} objects, {tris} triangles, {} textures, bounds {:?}",
                 m.objects_drawn, m.texture_count, m.bounds
             );
+        }
+    }
+
+    /// A `-5` frame hides the whole object (0x423730): section 0's start pad
+    /// #57 and birth tube #54 are never drawn, though Mendel stands in them.
+    #[test]
+    fn minus_five_hides_whole_objects_when_data_present() {
+        let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../originals/mounted/install/data/worlds");
+        let Ok(data) = std::fs::read(p) else { return };
+        let archive = Archive::parse(&data).unwrap();
+        for s in 0..archive.sections.len() {
+            let m = WorldMesh::build(&archive.world(s).unwrap());
+            let hidden = m.visible.iter().filter(|&&v| v == 0).count();
+            println!("section {s}: {hidden} of {} objects hidden by -5 frames", m.visible.len());
+            if s == 0 {
+                for id in [57usize, 54] {
+                    let d = m.draw_of_object[id - 1].unwrap();
+                    assert_eq!(m.visible[d], 0, "object #{id} must be hidden");
+                }
+            }
         }
     }
 }
