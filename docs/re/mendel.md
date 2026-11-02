@@ -269,6 +269,57 @@ polygon's flags. A polygon's frame is the record's `+0x28` matrix
 on the polygon's **first vertex**; world = object position + object
 rotation · (v0 + frame · (u, v, h)) (`0x412180`).
 
+**Render angles** (slot 6's second half, `0x412180` from `0x41223c`) —
+observed: the mover keeps three shorts after the world position,
+`+0xb4, +0xb6, +0xb8`. `CreatureMover_Step` (`0x417f40`) hands them with
+the (frame-interpolated) position to his body mesh (`0x402370`: mesh
+`+0x3c, +0x3e, +0x40`) and copies the block to `creature+0xa34`
+(`0x418056`), which `Creature_AttachTouchHull` (`0x417d60`) gives to `MEnc`
+(`0x422a80`: object `+0xe4` block, so `+0xf0 = +0xb4`, `+0xf2 = +0xb6`,
+`+0xf4 = +0xb8`). The mesh draw builds its matrix with `0x4305a0` (float
+tables) from `(+0x3c, +0x3e, +0x40)`; worked out, it is the object
+convention `0x430ce0(+0xf2, +0xf0, +0xf4)` applied as `v · M`, so both
+take `sim::transform` of `[rx, ry, rz] = [+0xb6, +0xb4, +0xb8]` applied
+to the model's (forward, down, left) axes. (An object's `+0x64..+0x77` is
+its mesh's pose: `+0x34` is the mesh, so `+0x70..+0x74` = mesh
+`+0x3c..+0x40`, normally a copy of `+0xf0..+0xf4`.)
+
+* Floor object not turned (its drawn angles `+0x70..+0x74` all zero,
+  `0x409b10`), branch `0x4123bd`: `+0xb6 = poly+0x4c`, `+0xb4 =
+  poly+0x4e + 0x200`, `+0xb8 = heading − poly+0x4c`. The polygon record's
+  `+0x4c`/`+0x4e` (built at `0x4092c5..0x409304` with `0x431cf0`, the
+  `acos` angle between two vectors, rounded) are the normal's azimuth −
+  90° and elevation: the angle from +y to `h = (n.x, n.y, 0)` (`0x400 −`
+  it if `n.x > 0`) and from `h` to `n` (`0x400 −` it if `n.z < 0`). An
+  upright Mendel on a floor facing +z: `[0, 0x300, heading]`.
+* Turned: the record's normal `+0x0` through the object's rotation
+  (`0x409940`) gives (yaw, pitch) (`0x430c50`); `+0xb6 = yaw`, `+0xb4 =
+  pitch + 0x200`; the roll pushes `0x430ce0(0, 0x380, heading)` through
+  the polygon frame `+0x28`, the object matrix (`0x409a40`) and
+  `0x430e40(yaw, pitch + 0x200, 0)` (`0x431b50` three times), `+0xb8 =
+  0x430ab0(m[6], m[8]) + 0x300`.
+* `Mover_Place` (`0x411d85..0x411dc4`) uses a shortcut, the object's
+  angles added to the polygon's: `+0xb6 = +0xf2 + +0x4c`, `+0xb4 = +0xf0
+  + +0x4e + 0x200`, `+0xb8 = heading − +0xf4 − +0x4c`, until slot 6 runs.
+* Slot 6 runs from the grounded integrate (`0x418148`) and the attach;
+  the wall push (grounded) moves the position only. In flight the angles
+  are frozen except `+0xb8 += spin` (`0x418209`); the let-go spin is
+  `+0xb8 − +0xcc` (the previous block's roll, `0x411e94`). The body's
+  roll is drawn interpolated by `frac` (`0x41802b..0x41804f`).
+
+Compared with the frame the port drew him by before (forward = heading in
+the polygon's frame, up = its normal; tests
+`render_angles_agree_with_the_frame`, `intro_render_angles_follow_the_exe`,
+`sideways_and_upside_down_render_angles`): on unturned objects (walking in
+section 0, the sideways pads of section 1, upside down under #194) the two
+agree within 0.25°. On a turned object (the capsule) his up still agrees
+(< 0.6°) but the roll about it is off by up to ~10° between the right
+angles of heading: that is the exe's `0x380` (45°) probe pitch, observed
+at `0x4122a0`; with `0x300` the port's formula agrees within 0.6°, which
+checks the rest of the derivation. inferred: whether the 1997 renderer
+shows it this way is not checked against footage (the capsule ride is
+seen from afar).
+
 **One tick** (`Mover_Step` @ `0x411e10`):
 
 1. *Integrate* (`0x418060`). Grounded: `u += cos[h]·fwd >> 14`,
@@ -442,8 +493,10 @@ Inferred in the port: floating point instead of the exe's integer
 frames; flip-book scroll deltas taken between consecutive frames of the
 list (the exe keeps the last two applied offsets, one frame behind);
 when a polygon's state has no enabled frame after a reload, it keeps
-the flags it had; the click hull `MEnc` is posed from his frame by
-`sim::angles_of` rather than the mover's angle formulas (slot 6).
+the flags it had; the integer normal of a polygon is recomputed from its
+vertices (`0x409430`'s formula); no `frac` interpolation of the roll; our
+saved games do not keep the render angles (recomputed by slot 6's formula
+on load, which drops the roll a spin added in flight).
 
 ### 2.3 Death, shatter, regeneration
 
@@ -617,7 +670,7 @@ game (`Creature_Read` → `0x405f10` at `0x419967`) end it.
 
 | # | ticks | effect class | what changes (where it is read) | start sound / flash |
 |---|---|---|---|---|
-| 1 | 1440 | `0x42b150` | **shield**: lethal surfaces with bit 22 and affliction surfaces with bit 29 are ignored (0x41955b); his ledge ray sees polygons with bit 22 (`flags |= 0xc0`, 0x419290); skin: last texture slot, `+0x5c += 8`, brightness from four triangle-wave oscillators plus noise (`0x42b200`) | 37 / `0x17` (blue flash) |
+| 1 | 1440 | `0x42b150` | **shield**: lethal surfaces with bit 22 and affliction surfaces with bit 29 are ignored (0x41955b); his ledge ray sees polygons with bit 22 (`flags |= 0xc0`, 0x419290); skin: every polygon takes the section's last texture slot (`+0x40 = 0x410ef0() − 1`) and **`+0x5c += 8`** (its texel offset `u`; `v` untouched), so the skin slides 1/16 of a texture a tick along `u`; brightness from four triangle-wave oscillators plus noise (`0x42b200`) | 37 / `0x17` (blue flash) |
 | 2 | 1440 | `0x42db50` | actuator steps (4, 7) (`0x418970`); no visual | — |
 | 3 | 1440 | `0x42cb90` | **speed**: gait 53 (`0x4189c0`), actuator steps (1, 6); visual `0x42cc00` restores ramps every 20..23 ticks (no visible change) | 39 / `0x18` (strobe) |
 | 4 | 4320 | `0x4072b0` | **camouflage**: every polygon takes the texture and ramp of the floor polygon he stands on (`0x407350` via the mover's `0x4124a0`); `PBal` stops chasing (`0x415237`) | 40 / `0x19` |
@@ -643,6 +696,26 @@ then dies. 2, 4, 5, 6, 10..12 are unused.
 **Brain**: afflictions never touch the cost directly; they change what
 the brain senses (5, 6, 1), how fast its muscles move (2, 3, 7..9) and so
 what the cost measures. Pain stays the lethal-surface flag `0x1000000`.
+
+**Skins and texel offsets** — observed. The manager copies all of his
+polygon records (78 × 0x68 bytes) when it is built for a section
+(`0x4059c0`, `+0x18`); ending an affliction (`0x405f10`, also from
+Apply when a different one starts and from the tick when the effect runs
+out) copies them back, so texture `+0x40` and offsets `+0x5c/+0x5e` return
+to the file's. The per-tick reset (`0x405fc0`) restores only the
+materials. Affliction 1's scroll therefore grows by 8 a tick for as long
+as it lasts, through re-arming (1,440 ticks = 11,520), and the Direct3D
+draw adds `(u & 0x1ff) / 128` (`0x40e850`, texture repeat): a full slide
+of the texture every 16 ticks. Camouflage (4, `0x407350`) writes only
+`+0x40` (the floor polygon's texture, `0x402400`) and his material copy
+(`0x402470` → `0x4060f0`): his own UVs and offsets stay, and the floor's
+appearance offsets are not copied. The transition look (`0x410da0`) copies
+the live records, offsets included. No other code writes his `+0x5c`.
+Port: `Look::scroll` (affliction.rs), added to `u` in `build_vertices`;
+test `shield_scrolls_his_skin_along_u`. On the CD the only affliction-1
+surface is section 1's `Objt` #103 (flags `0x02000100`, a wall: he feels
+it through his hull); in a browser, `engine.creature.afflict(1)` shows it
+anywhere.
 
 inferred (port): the start sound and flash are played when the affliction
 starts, not on every Apply (the exe replays them each tick of contact);
@@ -955,15 +1028,16 @@ Running Mendel in the live simulation confirmed or corrected:
 ## Open questions
 
 * Game tick rate (and who calls `Creature_Update` with which `frac`).
-* Polygon attributes `unk0/unk1` (`+0x5c/+0x5e`); exact trig-table scale
+* Exact trig-table scale
   (the tables at `0x472858`/`0x473058` are built at run time).
 * Why only 4 of 15 cached probability tables match a 2-input search
   (stale caches written mid-evolution, or non-zero third input at
   authoring time?).
 * Camera profile fields `a, b, c, d`; the `u32 1520`.
-* What `+0x5c += 8` does to a polygon (affliction 1). (The transition
-  effect is §2.3.1; open there: the exact matrix of `0x430430`, and the
-  meaning of the cue's `+0x22` that kind 7 sets to `50 − rand & 31`.)
+* The transition effect is §2.3.1; open there: the exact matrix of `0x430430`, and the
+  meaning of the cue's `+0x22` that kind 7 sets to `50 − rand & 31`.
+* The render angles' `0x380` roll probe (§2.2): a slip in the original
+  (`0x300` would be exact) or intended? Only visible on turned floors.
 * Scroll record on the first tick of a new state: the exe's "previous"
   offset is the old state's frame (unless the texture changed); the port
   takes the new list's last frame (looping) to avoid saving the record.

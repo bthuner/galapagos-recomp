@@ -26,6 +26,7 @@
 //! integers: normals × 0x400, frames × 0x1000); the algorithm and every
 //! constant are the exe's.
 
+use crate::camera::{self, mat_mul, vec_mat};
 use crate::sim::{self, Sim};
 use galapagos_formats::worlds::{Object, Section};
 
@@ -149,6 +150,13 @@ pub(crate) struct LocalPoly {
     /// `∂(u, v)/∂(s, t)`: how far, in the polygon's frame, one texel of
     /// texture offset moves the image. Row-major 2×2.
     pub texel: [f32; 4],
+    /// The exe's own integer copies, for the render angles (`0x412180`):
+    /// the record's normal `+0x0` (× 1024, `0x409430`), its frame `+0x28`
+    /// (4.12, polygon → object as `v · F`) and the normal's two angles
+    /// `+0x4c` (azimuth − 90°) and `+0x4e` (elevation), built at 0x4092c5.
+    pub normal_i: camera::I3,
+    pub frame_i: camera::M3,
+    pub angles: (i32, i32),
 }
 
 /// Every object's polygons, by object index (cameras have none).
@@ -161,30 +169,123 @@ pub(crate) fn local_polys(section: &Section) -> Vec<Vec<LocalPoly>> {
                 m.polygons
                     .iter()
                     .map(|p| {
-                        let points: Vec<V3> =
-                            p.iter().filter_map(|&k| m.vertices.get(k as usize)).map(|v| v.map(|c| c as f32)).collect();
-                        let n = points.len().max(1) as f32;
-                        let centre = scale(points.iter().fold([0.0; 3], |a, &p| add(a, p)), 1.0 / n);
-                        let radius = points.iter().map(|&p| length(sub(p, centre))).fold(0.0, f32::max);
-                        let (normal, frame, texel) = if points.len() >= 3 {
-                            let normal = normalize(cross(sub(points[1], points[0]), sub(points[2], points[0])));
-                            let frame = sim::frame_from_normal(normal);
-                            // Default texture coordinates (0x42320d): vertex 0
-                            // = (s 0, t 127), vertex 1 = (0, 0), vertex 2 =
-                            // (127, 0); so s runs along v1→v2, t along v1→v0.
-                            let ds = mul_t(&frame, scale(sub(points[2], points[1]), 1.0 / 127.0));
-                            let dt = mul_t(&frame, scale(sub(points[0], points[1]), 1.0 / 127.0));
-                            (normal, frame, [ds[0], dt[0], ds[1], dt[1]])
-                        } else {
-                            (UP, IDENTITY, [0.0; 4])
-                        };
-                        LocalPoly { points, centre, radius, normal, frame, texel }
+                        local_poly(p.iter().filter_map(|&k| m.vertices.get(k as usize)).map(|v| v.map(|c| c as f32)).collect())
                     })
                     .collect()
             }),
             Object::Camera(_) => Vec::new(),
         })
         .collect()
+}
+
+/// One polygon's mover data from its object-local points.
+pub(crate) fn local_poly(points: Vec<V3>) -> LocalPoly {
+    let n = points.len().max(1) as f32;
+    let centre = scale(points.iter().fold([0.0; 3], |a, &p| add(a, p)), 1.0 / n);
+    let radius = points.iter().map(|&p| length(sub(p, centre))).fold(0.0, f32::max);
+    let ints: Vec<camera::I3> = points.iter().map(|p| p.map(|c| c as i32)).collect();
+    let normal_i = if ints.len() >= 3 { camera::polygon_normal(ints[0], ints[1], ints[2]) } else { [0, 0, 1024] };
+    let frame_i = camera::transpose(&camera::frame_from_normal(normal_i));
+    let angles = normal_angles(normal_i);
+    let (normal, frame, texel) = if points.len() >= 3 {
+        let normal = normalize(cross(sub(points[1], points[0]), sub(points[2], points[0])));
+        let frame = sim::frame_from_normal(normal);
+        // Default texture coordinates (0x42320d): vertex 0 = (s 0, t 127),
+        // vertex 1 = (0, 0), vertex 2 = (127, 0); so s runs along v1→v2,
+        // t along v1→v0.
+        let ds = mul_t(&frame, scale(sub(points[2], points[1]), 1.0 / 127.0));
+        let dt = mul_t(&frame, scale(sub(points[0], points[1]), 1.0 / 127.0));
+        (normal, frame, [ds[0], dt[0], ds[1], dt[1]])
+    } else {
+        (UP, IDENTITY, [0.0; 4])
+    };
+    LocalPoly { points, centre, radius, normal, frame, texel, normal_i, frame_i, angles }
+}
+
+/// `0x431cf0`: the angle between two vectors, `acos` in 1024ths of a turn,
+/// rounded half up; 0 if either is null.
+fn angle_between(a: camera::I3, b: camera::I3) -> i32 {
+    let [a, b] = [a, b].map(|v| v.map(|c| c as f64));
+    let (la, lb) = ((a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt(), (b[0] * b[0] + b[1] * b[1] + b[2] * b[2]).sqrt());
+    if la == 0.0 || lb == 0.0 {
+        return 0;
+    }
+    let c = ((a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (la * lb)).clamp(-1.0, 1.0);
+    let t = c.acos() * 1024.0 / core::f64::consts::TAU;
+    (if t - t.floor() < 0.5 { t.floor() } else { t.ceil() }) as i32
+}
+
+/// A polygon record's `+0x4c` and `+0x4e` (built at 0x4092c5..0x409304):
+/// the angle from +y to the normal's horizontal part `h = (n.x, n.y, 0)`
+/// (`0x400 −` it when `n.x > 0`), and from `h` to the normal (`0x400 −`
+/// it when `n.z < 0`). So `+0x4c` = the azimuth − 90° and `+0x4e` = the
+/// elevation, the same pair `Math_VectorAngles` (0x430c50) gives. A normal
+/// along ±z has `h = (0, 0x400, 0)`.
+pub(crate) fn normal_angles(n: camera::I3) -> (i32, i32) {
+    let h = if n[0] == 0 && n[1] == 0 { [0, 0x400, 0] } else { [n[0], n[1], 0] };
+    let mut a = angle_between([0, 0x400, 0], h);
+    if n[0] > 0 {
+        a = 0x400 - a;
+    }
+    let mut b = angle_between(n, h);
+    if n[2] < 0 {
+        b = 0x400 - b;
+    }
+    (a, b)
+}
+
+/// Mendel's render angles (mover `+0xb4/+0xb6/+0xb8`), the second half of
+/// slot 6 (`0x412180`, from 0x41223c). They are returned in object-angle
+/// order `[rx, ry, rz]` = `[+0xb6, +0xb4, +0xb8]`, because the creature
+/// hands the block to his body mesh (`0x402370`, mesh `+0x3c..+0x40`) and
+/// to `MEnc` (`0x422a80`, object `+0xf0..+0xf4`), whose matrix is
+/// `0x430ce0(+0xf2, +0xf0, +0xf4)` = [`sim::transform`] of these.
+///
+/// * His floor's object not turned (its drawn angles `+0x70..+0x74` all
+///   zero, `0x409b10`): from the polygon record alone (0x4123bd),
+///   `+0xb6 = +0x4c`, `+0xb4 = +0x4e + 0x200`, `+0xb8 = heading − +0x4c`.
+/// * Turned: the normal through the object's rotation (`0x409940`) gives
+///   yaw and pitch (`0x430c50`); the roll is measured by pushing
+///   `0x430ce0(0, 0x380, heading)` through the polygon frame `+0x28`, the
+///   object matrix and `0x430e40(yaw, pitch + 0x200, 0)` (`0x431b50` ×
+///   3), `roll = atan(m[6], m[8]) + 0x300`.
+///
+/// The `0x380` pitch is the exe's (0x4122a0): with it the roll is exact
+/// only at multiples of 90° of heading and off by up to ~10° in between
+/// (`0x300` would be exact); see the tests.
+pub(crate) fn render_angles(lp: &LocalPoly, obj_rot: [i32; 3], heading: i32) -> [i32; 3] {
+    render_angles_probed(lp, obj_rot, heading, 0x380)
+}
+
+/// [`render_angles`] with the probe's pitch as a parameter (the tests try
+/// `0x300`, which removes the distortion).
+fn render_angles_probed(lp: &LocalPoly, obj_rot: [i32; 3], heading: i32, probe: i32) -> [i32; 3] {
+    let (a, b) = lp.angles;
+    if obj_rot == [0; 3] {
+        return [a, b + 0x200, heading - a].map(|x| x & 0x3ff);
+    }
+    let t = camera::trig();
+    let o = t.rot(obj_rot[0], obj_rot[1], obj_rot[2]);
+    let (yaw, pitch) = t.dir_angles(vec_mat(lp.normal_i, &o));
+    let pitch = pitch + 0x200;
+    let m = mat_mul(&mat_mul(&mat_mul(&t.rot(0, probe, heading), &lp.frame_i), &o), &t.rot_t(yaw, pitch, 0));
+    [yaw, pitch, t.angle(m[6], m[8]) + 0x300].map(|x| x & 0x3ff)
+}
+
+/// `Mover_Place` @ 0x411bf0 (0x411d85..0x411dc4) sets the render angles
+/// with a shortcut: the object's angles `+0xf0..+0xf4` *added* to the
+/// polygon's, `+0xb6 = +0xf2 + +0x4c`, `+0xb4 = +0xf0 + +0x4e + 0x200`,
+/// `+0xb8 = heading − +0xf4 − +0x4c`. They last until slot 6 runs (at once
+/// if the placement's floor test attaches him).
+pub(crate) fn placed_angles(lp: &LocalPoly, obj_rot: [i32; 3], heading: i32) -> [i32; 3] {
+    let (a, b) = lp.angles;
+    [obj_rot[0] + a, obj_rot[1] + b + 0x200, heading - obj_rot[2] - a].map(|x| x & 0x3ff)
+}
+
+/// Render angles of an upright Mendel facing `heading` on a floor facing
+/// +z: `+0x4c = 0`, `+0x4e = 0x100`.
+pub(crate) fn upright_angles(heading: i32) -> [i32; 3] {
+    [0, 0x300, heading & 0x3ff]
 }
 
 /// A world-space triangle gathered for this tick's casts.
@@ -456,6 +557,10 @@ pub struct Mover {
     pub obj_rot: Option<M3>,
     /// `+0xe4`: the flags of `on` (also `creature+0x134`).
     pub floor_flags: u32,
+    /// `+0xb6, +0xb4, +0xb8`: his render angles as object angles `[rx,
+    /// ry, rz]` ([`render_angles`]): how his body and `MEnc` are turned.
+    /// Not in our saved games (recomputed on load).
+    pub angles: [i32; 3],
 }
 
 impl Default for Mover {
@@ -475,6 +580,8 @@ impl Default for Mover {
             spin: 0,
             obj_rot: None,
             floor_flags: 0,
+            // inferred: `Mover_Init` @ 0x411b60 does not set them; upright.
+            angles: upright_angles(0),
         }
     }
 }
@@ -499,8 +606,18 @@ impl Mover {
         Frame::of(polys, sim, self.on)
     }
 
+    /// Slot 6's render angles for where he is now (see [`render_angles`]);
+    /// unchanged without a polygon.
+    pub fn refresh_angles(&mut self, polys: &[Vec<LocalPoly>], sim: &Sim) {
+        let Some((o, p)) = self.on else { return };
+        let Some(lp) = polys.get(o).and_then(|v| v.get(p)).filter(|lp| lp.points.len() >= 3) else { return };
+        self.angles = render_angles(lp, sim.pose(o).1, self.heading);
+    }
+
     /// His forward and left in world space, from the heading in the
-    /// polygon's plane.
+    /// polygon's plane (what the port drew him by before it had the render
+    /// angles; the tests compare the two).
+    #[cfg(test)]
     pub fn axes(&self, f: &Frame) -> (V3, V3) {
         let a = turns(self.heading);
         (f.dir([a.cos(), a.sin(), 0.0]), f.dir([-a.sin(), a.cos(), 0.0]))
@@ -520,15 +637,17 @@ impl Mover {
         self.spin = 0;
         self.hvel = 0;
         let f = self.frame(polys, sim);
-        if on.is_some() {
+        if let Some((o, p)) = on {
             [self.u, self.v] = [at[0], at[1]];
             self.h = at[2] as i32;
             self.pos = f.point(at);
+            self.angles = placed_angles(&polys[o][p], sim.pose(o).1, self.heading);
         } else {
             let local = f.unpoint(at);
             [self.u, self.v] = [local[0], local[1]];
             self.h = local[2] as i32;
             self.pos = at;
+            self.angles = upright_angles(self.heading);
         }
         self.up = f.normal();
         self.obj_rot = f.rotated.then_some(f.rot);
@@ -573,7 +692,9 @@ impl Mover {
                 self.hvel = 0;
             }
             self.conveyor(polys, sim);
+            // Slot 6 (0x412180): world position and render angles.
             self.pos = self.frame(polys, sim).point([self.u, self.v, self.h as f32]);
+            self.refresh_angles(polys, sim);
         } else {
             // Ballistic along *his* down, the last floor's normal:
             // `vel += up · g` (0x41814e: `up × 0x700 >> 10` on a velocity
@@ -581,6 +702,9 @@ impl Mover {
             self.air = add(self.air, scale(self.up, d.gravity as f32));
             self.pos = add(self.pos, self.air);
             self.heading = (self.heading + self.spin) & 0x3ff;
+            // 0x418209: the spin turns his drawn roll too; the other two
+            // angles stay frozen in flight.
+            self.angles[2] = (self.angles[2] + self.spin) & 0x3ff;
         }
     }
 
@@ -722,7 +846,9 @@ impl Mover {
         self.v = local[1];
         self.h = stance;
         self.hvel = 0;
+        // Slot 6.
         self.pos = nf.point([self.u, self.v, self.h as f32]);
+        self.refresh_angles(polys, sim);
     }
 }
 
@@ -762,5 +888,122 @@ mod tests {
         let back = f.unpoint(f.point(p));
         assert!(length(sub(back, p)) < 1e-3, "{back:?}");
         assert!(length(sub(f.normal(), mul(&rot, n))) < 1e-5);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod angle_tests {
+    use super::*;
+
+    /// A triangle facing `n` (unit), its first vertex at the origin.
+    pub(crate) fn facing(n: V3) -> LocalPoly {
+        let n = normalize(n);
+        let a = normalize(if n[2].abs() < 0.9 { cross([0.0, 0.0, 1.0], n) } else { cross([1.0, 0.0, 0.0], n) });
+        let b = cross(n, a);
+        local_poly(vec![[0.0; 3], scale(a, 3000.0).map(f32::round), scale(b, 3000.0).map(f32::round)])
+    }
+
+    /// (forward, up, left) the old way: the heading in the polygon's frame,
+    /// up its normal (what `Creature::sync` used to draw him by).
+    pub(crate) fn frame_axes(lp: &LocalPoly, obj_rot: [i32; 3], heading: i32) -> [V3; 3] {
+        let m = sim::transform([0; 3], obj_rot);
+        let f = Frame { rot: [m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]], pos: [0.0; 3], poly: lp.frame, v0: lp.points[0], rotated: obj_rot != [0; 3] };
+        let mover = Mover { heading, ..Mover::default() };
+        let (fwd, left) = mover.axes(&f);
+        [fwd, f.normal(), left]
+    }
+
+    /// (forward, up, left) of the render angles: model +x, −y, +z.
+    pub(crate) fn angle_axes(angles: [i32; 3]) -> [V3; 3] {
+        let m = sim::transform([0; 3], angles);
+        let r = [m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]];
+        [mul(&r, [1.0, 0.0, 0.0]), mul(&r, [0.0, -1.0, 0.0]), mul(&r, [0.0, 0.0, 1.0])]
+    }
+
+    /// Largest angle in degrees between corresponding axes.
+    pub(crate) fn degrees(a: [V3; 3], b: [V3; 3]) -> f32 {
+        (0..3).map(|k| dot(normalize(a[k]), normalize(b[k])).clamp(-1.0, 1.0).acos().to_degrees()).fold(0.0, f32::max)
+    }
+
+    const NORMALS: [V3; 7] =
+        [[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.3, -0.5, 0.8], [-0.7, 0.2, -0.3]];
+
+    /// Worst disagreement (degrees) over every 16th heading.
+    fn worst(lp: &LocalPoly, rot: [i32; 3], probe: i32) -> f32 {
+        (0..1024).step_by(16).map(|h| degrees(frame_axes(lp, rot, h), angle_axes(render_angles_probed(lp, rot, h, probe)))).fold(0.0, f32::max)
+    }
+
+    /// Upright on a floor facing +z: `[0, 0x300, heading]`, forward
+    /// `(cos h, sin h, 0)`, his model's down (+y) along −z, left along +y.
+    #[test]
+    fn upright_render_angles() {
+        let lp = facing([0.0, 0.0, 1.0]);
+        assert_eq!(lp.angles, (0, 0x100), "+0x4c, +0x4e of a floor");
+        for h in [0, 100, 256, 700] {
+            assert_eq!(render_angles(&lp, [0; 3], h), [0, 0x300, h]);
+            let [f, u, l] = angle_axes(render_angles(&lp, [0; 3], h));
+            let a = turns(h);
+            assert!(length(sub(f, [a.cos(), a.sin(), 0.0])) < 1e-5, "forward {f:?}");
+            assert!(length(sub(u, UP)) < 1e-5 && length(sub(l, [-a.sin(), a.cos(), 0.0])) < 1e-5);
+        }
+    }
+
+    /// The polygon record's angles are those of `Math_VectorAngles`.
+    #[test]
+    fn record_angles_match_vector_angles() {
+        let t = camera::trig();
+        for n in NORMALS {
+            let lp = facing(n);
+            let (yaw, pitch) = t.dir_angles(lp.normal_i);
+            let d = |a: i32, b: i32| wrap(a - b).abs();
+            assert!(d(lp.angles.0, yaw) <= 1 && d(lp.angles.1, pitch) <= 1, "{n:?}: {:?} vs {:?}", lp.angles, (yaw, pitch));
+        }
+    }
+
+    /// Old vs new. On a polygon of an object that is not turned (walking in
+    /// section 0, the sideways pads of section 1, upside down at section
+    /// 2's start) the exe's shortcut `[+0x4c, +0x4e + 0x200, heading −
+    /// +0x4c]` is the frame-based orientation to within rounding (< 0.5°).
+    /// On a turned object (the capsule) the exe's roll probe, pitched by
+    /// `0x380`, is off by up to ~10° between the right angles of heading;
+    /// with `0x300` it would agree, which checks the rest of the port.
+    #[test]
+    fn render_angles_agree_with_the_frame() {
+        for n in NORMALS {
+            let lp = facing(n);
+            let w = worst(&lp, [0; 3], 0x380);
+            assert!(w < 0.5, "{n:?} unturned: {w}°");
+            for rot in [[256, 0, 0], [0, 100, 0], [0, 0, 300], [100, 200, 300], [512, 0, 0]] {
+                let exact = worst(&lp, rot, 0x300);
+                assert!(exact < 0.6, "{n:?} {rot:?} with 0x300: {exact}°");
+                let exe = worst(&lp, rot, 0x380);
+                assert!((9.0..10.5).contains(&exe), "{n:?} {rot:?} the exe's: {exe}°");
+                // His up is always right: only the roll about it suffers.
+                for h in (0..1024).step_by(64) {
+                    let up = |a: [V3; 3]| a[1];
+                    let e = dot(up(frame_axes(&lp, rot, h)), up(angle_axes(render_angles(&lp, rot, h)))).clamp(-1.0, 1.0).acos().to_degrees();
+                    assert!(e < 0.6, "{n:?} {rot:?} h {h}: up off by {e}°");
+                }
+            }
+        }
+        // At the right angles of heading the exe's roll is exact.
+        let lp = facing([0.0, 0.0, 1.0]);
+        for h in [0, 256, 512, 768] {
+            let e = degrees(frame_axes(&lp, [100, 200, 300], h), angle_axes(render_angles(&lp, [100, 200, 300], h)));
+            assert!(e < 0.6, "h {h}: {e}°");
+        }
+    }
+
+    /// `Mover_Place`'s shortcut adds the object's angles to the polygon's:
+    /// right for an unturned object, only roughly for a turned one (slot 6
+    /// replaces it as soon as he attaches).
+    #[test]
+    fn placed_angles_match_slot_6_when_unturned() {
+        for n in NORMALS {
+            let lp = facing(n);
+            for h in [0, 300, 900] {
+                assert_eq!(placed_angles(&lp, [0; 3], h), render_angles(&lp, [0; 3], h));
+            }
+        }
     }
 }

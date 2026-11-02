@@ -218,10 +218,10 @@ pub struct Creature {
 
     /// The polygon walker (`creature+0x50`), walker.rs.
     pub mover: Mover,
-    /// Derived each tick from the mover, for the senses, the renderer and
-    /// the other modules: his origin, forward and up in world space.
+    /// Derived each tick from the mover, for the senses and the other
+    /// modules: his origin and up (the floor's normal, `+0x24`) in world
+    /// space. How he is *drawn* is the mover's render angles.
     pub pos: V3,
-    pub fwd: V3,
     pub up: V3,
     /// Distance and turn of this tick (`creature+0x7d0`, `+0x7d2`).
     forward: i32,
@@ -346,7 +346,6 @@ impl Creature {
             mode: Mode::Absent,
             mover: Mover::default(),
             pos: [0.0; 3],
-            fwd: [1.0, 0.0, 0.0],
             up: UP,
             forward: 0,
             turn_d: 0,
@@ -413,28 +412,29 @@ impl Creature {
         self.mover.heading
     }
 
-    /// His left: `up × forward` (model `+z`).
+    /// His body's rotation: `sim::transform` of the mover's render angles
+    /// (`+0xb6, +0xb4, +0xb8`), applied to the model's (forward, down,
+    /// left) axes as the mesh draw does (`0x4305a0` from mesh `+0x3c..`).
+    fn body_rotation(&self) -> walker::M3 {
+        let m = sim::transform([0; 3], self.mover.angles);
+        [m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]]
+    }
+
+    /// His drawn forward (model `+x`) in world space.
+    #[cfg(test)]
+    pub fn fwd(&self) -> V3 {
+        walker::mul(&self.body_rotation(), [1.0, 0.0, 0.0])
+    }
+
+    /// His drawn left (model `+z`) in world space.
     fn left_dir(&self) -> V3 {
-        cross(self.up, self.fwd)
+        walker::mul(&self.body_rotation(), [0.0, 0.0, 1.0])
     }
 
-    /// Model space (forward, down, left) → world, without the translation.
-    fn rotate(&self, m: V3) -> V3 {
-        add(add(scale(self.fwd, m[0]), scale(self.up, -m[1])), scale(self.left_dir(), m[2]))
-    }
-
-    /// Re-derives `pos`, `up`, `fwd` from the mover: forward is the
-    /// heading in his polygon's plane, made square to his up (the two
-    /// differ in flight, when `up` is frozen and the platform may turn).
-    fn sync(&mut self, sim: &Sim) {
-        let f = self.mover.frame(&self.polys, sim);
-        let (fwd, _) = self.mover.axes(&f);
+    /// Re-derives `pos` and `up` from the mover.
+    fn sync(&mut self, _sim: &Sim) {
         self.pos = self.mover.pos;
         self.up = normalize(self.mover.up);
-        let flat = sub(fwd, scale(self.up, dot(fwd, self.up)));
-        if length(flat) > 1e-3 {
-            self.fwd = normalize(flat);
-        }
     }
 
     // ——— the tick ———
@@ -585,10 +585,9 @@ impl Creature {
         self.mover = Mover { pos: at, prev: at, heading: heading & 0x3ff, ..Mover::default() };
         self.fall_count = 0;
         self.fall_limit = 0;
+        self.mover.angles = walker::upright_angles(heading);
         self.pos = at;
         self.up = UP;
-        let a = turns(heading);
-        self.fwd = [a.cos(), a.sin(), 0.0];
     }
 
     /// `Game_OnCreatureRespawn` @ 0x41c700 after the effect has run.
@@ -1070,10 +1069,10 @@ impl Creature {
     /// `Creature_AttachTouchHull` @ 0x417d60: the section's `MEnc` (an
     /// invisible click hull) follows Mendel: it gets his position and his
     /// three render angles (`+0xa34`, copied from the mover's `+0xa8`
-    /// block). Ours is hidden: we pick against Mendel's own mesh instead
-    /// (see [`Creature::pick`]). inferred: we turn his frame (forward,
-    /// left, up) into object angles with `sim::angles_of` rather than
-    /// porting the mover's own angle formulas (`0x412180`).
+    /// block at 0x418056; `0x422a80` puts them in the object's `+0xe4`
+    /// block, i.e. `+0xf0 = +0xb4`, `+0xf2 = +0xb6`, `+0xf4 = +0xb8`).
+    /// Ours is hidden: we pick against Mendel's own mesh instead (see
+    /// [`Creature::pick`]).
     fn attach_menc(&self, sim: &mut Sim, mesh: &mut WorldMesh) {
         let Some(i) = self.menc else { return };
         let Some(draw) = mesh.draw_of_object[i] else { return };
@@ -1085,8 +1084,7 @@ impl Creature {
             }
             sim.mark_dirty(r.first, r.first + r.count);
         }
-        let rot = sim::angles_of(self.fwd, self.left_dir(), self.up);
-        sim.set_pose(i, self.pos.map(|c| c as i32), rot, mesh);
+        sim.set_pose(i, self.pos.map(|c| c as i32), self.mover.angles, mesh);
     }
 
 
@@ -1107,7 +1105,8 @@ impl Creature {
         }
         let mesh = self.body.pose_turning((self.phase >> 8) as u8, self.stance, self.turn, self.side);
         let (mesh, look) = self.transition.dress(mesh, &self.afflictions.look);
-        let world: Vec<V3> = mesh.vertices.iter().map(|v| add(self.pos, self.rotate(v.map(|c| c as f32)))).collect();
+        let r = self.body_rotation();
+        let world: Vec<V3> = mesh.vertices.iter().map(|v| add(self.pos, walker::mul(&r, v.map(|c| c as f32)))).collect();
         let look = &look;
         for (k, f) in mesh.faces.iter().enumerate() {
             if f.indices.len() < 3 {
@@ -1135,7 +1134,11 @@ impl Creature {
             let texture = look.texture.map_or(f.texture as f32, |t| t as f32);
             // The polygon's texel offset (+0x5c/+0x5e), added by the
             // Direct3D draw as `(offset & 0x1ff) / 128` (0x40e850).
-            let [du, dv] = f.offset.map(|o| (o & 0x1ff) as f32);
+            // Affliction 1 adds 8 a tick to `u` (`0x42b200`); camouflage
+            // (4) changes only the texture and keeps his own offsets
+            // (`0x407350` copies `+0x40` and the material, nothing else).
+            let offset = [f.offset[0].wrapping_add(look.scroll), f.offset[1]];
+            let [du, dv] = offset.map(|o| (o & 0x1ff) as f32);
             for k in 1..f.indices.len() - 1 {
                 for j in [0, k, k + 1] {
                     let v = p(j);
@@ -1302,6 +1305,11 @@ impl Creature {
         // `Creature_Read` @ 0x419950 ends any affliction (0x405f10 at
         // 0x419967): afflictions are not part of a saved game.
         self.afflictions.end();
+        // inferred: our saves do not keep the render angles; slot 6
+        // recomputes them from where he is (in flight that drops the roll
+        // his spin had added since he let go).
+        self.mover.angles = walker::upright_angles(self.mover.heading);
+        self.mover.refresh_angles(&self.polys, sim);
         self.sync(sim);
         self.build_vertices();
     }
@@ -1480,6 +1488,7 @@ impl SavedCreature {
             spin,
             obj_rot: rotated.then_some(rot),
             floor_flags,
+            angles: walker::upright_angles(heading),
         };
         let ints = [r.i32()?, r.i32()?, r.i32()?];
         let mut s = Self::read_agent(r, mode, SavedMover::Walker(mover), ints)?;
@@ -2008,6 +2017,54 @@ mod hazard_tests {
         assert!(c.afflictions.look.texture.is_some(), "shimmering skin");
     }
 
+    /// Affliction 1's skin slides: `+0x5c += 8` on every polygon each tick
+    /// of its visual (0x42b200), so his texture coordinates move by 8/128
+    /// in `u` (the vertex `u` minus his own offset), `v` never; touching
+    /// the polygon again keeps it going; another affliction (here 3) and
+    /// the end restore his records (`0x405f10`), offsets included.
+    #[test]
+    fn shield_scrolls_his_skin_along_u() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = alive_in_section0(&d);
+        let uv = |sim: &Sim| {
+            let v = &sim.creature.as_ref().unwrap().vertices;
+            (v[3], v[4])
+        };
+        sim.creature.as_mut().unwrap().react(0x0200_0100);
+        sim.step(&mut mesh);
+        // Applied by the surface events, after this tick's effect tick.
+        let c = sim.creature.as_ref().unwrap();
+        assert_eq!((c.afflictions.kind, c.afflictions.look.scroll), (1, 0), "starts after the effects ran");
+        for _ in 0..10 {
+            sim.creature.as_mut().unwrap().react(0x0200_0100); // still touching it
+            sim.step(&mut mesh);
+        }
+        assert_eq!(sim.creature.as_ref().unwrap().afflictions.look.scroll, 80, "re-arming keeps the offsets");
+        // His first drawn vertex against his own offset plus 80.
+        let c = sim.creature.as_ref().unwrap();
+        let f = &c.body.pose_turning((c.phase >> 8) as u8, c.stance, c.turn, c.side).faces[0];
+        let want_u = (f.uv[0][0] + ((f.offset[0].wrapping_add(80) & 0x1ff) as f32)) / 128.0;
+        let want_v = (f.uv[0][1] + ((f.offset[1] & 0x1ff) as f32)) / 128.0;
+        let (u1, v1) = uv(&sim);
+        assert!((u1 - want_u).abs() < 1e-5 && (v1 - want_v).abs() < 1e-5, "({u1}, {v1}) vs ({want_u}, {want_v})");
+        // Another affliction ends this one: records restored.
+        sim.creature.as_mut().unwrap().react(0x0600_0100);
+        sim.step(&mut mesh);
+        let c = sim.creature.as_ref().unwrap();
+        assert_eq!((c.afflictions.kind, c.afflictions.look.scroll, c.afflictions.look.texture), (3, 0, None));
+        // And running out: 1440 ticks of visual, then his own skin again.
+        sim.creature.as_mut().unwrap().react(0x0200_0100);
+        sim.step(&mut mesh);
+        for _ in 0..1440 {
+            sim.step(&mut mesh);
+        }
+        let c = sim.creature.as_ref().unwrap();
+        assert_eq!((c.afflictions.kind, c.afflictions.look.scroll), (1, 1440 * 8), "the last tick of its 1440");
+        sim.step(&mut mesh);
+        let c = sim.creature.as_ref().unwrap();
+        assert_eq!((c.afflictions.kind, c.afflictions.look.scroll), (0, 0), "ended and restored");
+    }
+
     /// The most common lethal floor, 0x01582380 (effect kind 2 v0): he
     /// bursts into pieces for 100 ticks (flash 6, sound 10), respawns, and
     /// the pieces fly back together for 60 (effect 2 v0x40), then he lives.
@@ -2237,7 +2294,7 @@ mod walker_tests {
     use galapagos_formats::worlds::{Archive, Object};
 
     /// Runs until Mendel is alive (the section's `Strt` spawned him).
-    fn until_alive(sim: &mut Sim, mesh: &mut WorldMesh, secs: u32) {
+    pub(super) fn until_alive(sim: &mut Sim, mesh: &mut WorldMesh, secs: u32) {
         for _ in 0..secs * sim::TICKS_PER_SECOND {
             sim.step(mesh);
             if sim.creature.as_ref().unwrap().mode == Mode::Alive {
@@ -2249,7 +2306,7 @@ mod walker_tests {
 
     /// Every teleport of section `s` whose destination polygon does not
     /// face +z: (object index, params entry, polygon, local normal).
-    fn tilted_teleports(d: &[u8], s: usize) -> Vec<(usize, usize, usize, V3)> {
+    pub(super) fn tilted_teleports(d: &[u8], s: usize) -> Vec<(usize, usize, usize, V3)> {
         let a = Archive::parse(d).unwrap();
         let section = a.world(s).unwrap();
         let polys = crate::walker::local_polys(&section);
@@ -2556,7 +2613,7 @@ mod walker_tests {
         w.u8(0);
         [0.0f32; 3].iter().for_each(|&x| w.f32(x));
         w.i32(0);
-        for v in [pos, c.fwd, up] {
+        for v in [pos, c.fwd(), up] {
             v.iter().for_each(|&x| w.f32(x));
         }
         [0, 0, c.mover.h, 0, c.stance_height].iter().for_each(|&x| w.i32(x));
@@ -2670,5 +2727,130 @@ mod level_load_tests {
         let c = sim.creature.as_ref().unwrap();
         assert_eq!(c.mode, Mode::Alive);
         assert_eq!(c.ground().map(|(o, p)| (o + 1, p)), Some((194, 6)), "standing on the Strt's polygon 6");
+    }
+}
+
+/// His render angles (the mover's `+0xb4..+0xb8`, slot 6 @ 0x412180)
+/// against the frame-based orientation the port drew him by before.
+#[cfg(test)]
+mod render_angle_tests {
+    use super::tests::{data, world};
+    use super::*;
+    use crate::walker::angle_tests::{angle_axes, degrees};
+
+    /// The old way (`Creature::sync` before slot 6 was ported): forward =
+    /// the heading in his polygon's current frame, squared to his up.
+    fn old_axes(c: &Creature, sim: &Sim) -> [V3; 3] {
+        let f = c.mover.frame(&c.polys, sim);
+        let (fwd, _) = c.mover.axes(&f);
+        let up = normalize(c.mover.up);
+        let fwd = normalize(sub(fwd, scale(up, dot(fwd, up))));
+        [fwd, up, cross(up, fwd)]
+    }
+
+    #[derive(Debug, Default)]
+    struct Worst {
+        flat: (f32, u32),
+        tilted: (f32, u32),
+        turned: (f32, u32),
+        flying: (f32, u32),
+    }
+
+    impl Worst {
+        fn see(&mut self, c: &Creature, sim: &Sim) {
+            if c.mode != Mode::Alive {
+                return;
+            }
+            let e = degrees(old_axes(c, sim), angle_axes(c.mover.angles));
+            let turned = c.surface().is_some_and(|(o, _)| sim.pose(o).1 != [0; 3]);
+            let slot = if c.ground().is_none() {
+                &mut self.flying
+            } else if turned {
+                &mut self.turned
+            } else if c.up[2] > 0.999 {
+                &mut self.flat
+            } else {
+                &mut self.tilted
+            };
+            slot.0 = slot.0.max(e);
+            slot.1 += 1;
+        }
+    }
+
+    /// The intro (born on the disc, the capsule's ride and rolls, the drop
+    /// onto pad #83) and his first steps: walking and turning on unturned
+    /// floors, the angles are the old frame to within rounding; on the
+    /// turned capsule his up is the same and only the roll differs, by the
+    /// exe's `0x380` probe (walker.rs); in flight the exe freezes his
+    /// pitch and yaw and only spins the roll.
+    #[test]
+    fn intro_render_angles_follow_the_exe() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 0);
+        let mut w = Worst::default();
+        let mut turned_up = 0.0f32;
+        let mut headings = std::collections::BTreeSet::new();
+        for _ in 0..150 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            let c = sim.creature.as_ref().unwrap();
+            w.see(c, &sim);
+            if c.mode == Mode::Alive && c.ground().is_some_and(|(o, _)| sim.pose(o).1 != [0; 3]) {
+                let up = |a: [V3; 3]| a[1];
+                turned_up = turned_up.max(dot(up(old_axes(c, &sim)), up(angle_axes(c.mover.angles))).clamp(-1.0, 1.0).acos().to_degrees());
+            }
+            headings.insert(c.heading() / 64);
+        }
+        println!("intro, worst disagreement (degrees, ticks): {w:?}; on turned floors his up is off by {turned_up:.2}°");
+        assert!(headings.len() >= 8, "he turns through the compass ({} sectors)", headings.len());
+        assert!(w.flat.1 > 500 && w.flat.0 < 0.5, "walking upright: {:?}", w.flat);
+        assert!(w.tilted.0 < 0.5, "on the disc stack's and the pad's slopes: {:?}", w.tilted);
+        assert!(w.turned.1 > 1000 && w.turned.0 < 10.5, "riding the capsule: {:?}", w.turned);
+        assert!(turned_up < 0.6, "his up on the capsule: {turned_up}°");
+        // He lets go of the capsule (turned): what he falls with is the
+        // capsule's last slot-6 roll, so the same kind of difference.
+        assert!(w.flying.1 > 0 && w.flying.0 < 10.5, "falling onto the pad: {:?}", w.flying);
+    }
+
+    /// Section 1's sideways pads (up = +y, #49 ..) and section 2's start
+    /// upside down on #194: unturned objects, so the angles are the frame.
+    #[test]
+    fn sideways_and_upside_down_render_angles() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 1);
+        sim.wake_all = true;
+        super::walker_tests::until_alive(&mut sim, &mut mesh, 30);
+        let mut w = Worst::default();
+        let mut sideways = 0;
+        for (i, entry, _, _) in super::walker_tests::tilted_teleports(&d, 1).into_iter().take(6) {
+            let c = sim.creature.as_mut().unwrap();
+            c.drop_at([0.0, 0.0, 1.0e6], 0);
+            c.mode = Mode::Alive;
+            sim.debug_trigger(i, entry, &mut mesh);
+            for _ in 0..4 * sim::TICKS_PER_SECOND {
+                sim.step(&mut mesh);
+                let c = sim.creature.as_ref().unwrap();
+                if c.surface().is_some_and(|(o, _)| o == i) && c.ground().is_some() {
+                    sideways += 1;
+                    w.see(c, &sim);
+                }
+            }
+        }
+        println!("section 1 pads: {w:?}");
+        assert!(sideways > 100 && w.tilted.1 > 100, "he stood on the pads: {sideways}");
+        assert!(w.tilted.0 < 0.5, "sideways: {:?}", w.tilted);
+
+        let (mut sim, mut mesh) = world(&d, 2);
+        super::walker_tests::until_alive(&mut sim, &mut mesh, 30);
+        let mut w = Worst::default();
+        let mut under = 0;
+        for _ in 0..2 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            let c = sim.creature.as_ref().unwrap();
+            under += (c.ground().is_some() && c.up[2] < -0.999) as u32;
+            w.see(c, &sim);
+        }
+        println!("section 2 start: {w:?}");
+        assert!(under > 20, "upside down under #194 ({under} ticks)");
+        assert!(w.tilted.0 < 0.5, "upside down: {:?}", w.tilted);
     }
 }

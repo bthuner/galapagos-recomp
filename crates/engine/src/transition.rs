@@ -1232,7 +1232,7 @@ impl Transition {
             face.indices = (first..first + corners.len() as u16).collect();
         }
         let bright = f.bright.iter().map(|b| b.unwrap_or(crate::affliction::NORMAL)).collect();
-        (galapagos_formats::creature::PosedMesh { vertices, faces }, crate::affliction::Look { bright, texture: look.texture })
+        (galapagos_formats::creature::PosedMesh { vertices, faces }, crate::affliction::Look { bright, texture: look.texture, scroll: look.scroll })
     }
 }
 

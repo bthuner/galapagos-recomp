@@ -877,17 +877,6 @@ pub(crate) fn transform(pos: [i32; 3], rot: [i32; 3]) -> M {
     [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8], pos[0] as f32, pos[1] as f32, pos[2] as f32]
 }
 
-/// The inverse of [`transform`]'s rotation: the angles `[rx, ry, rz]`
-/// whose matrix has columns `x, y, z` (an orthonormal frame).
-pub(crate) fn angles_of(x: [f32; 3], y: [f32; 3], z: [f32; 3]) -> [i32; 3] {
-    // R (row-major) = [x0 y0 z0; x1 y1 z1; x2 y2 z2].
-    let r = [x[0], y[0], z[0], x[1], y[1], z[1], x[2], y[2], z[2]];
-    let b = r[7].clamp(-1.0, 1.0).asin();
-    let (a, c) = ((-r[1]).atan2(r[4]), r[6].atan2(r[8]));
-    let k = 1024.0 / core::f32::consts::TAU;
-    [a, b, c].map(|t| (t * k).round() as i32 & 0x3ff)
-}
-
 /// The flag array of a freshly loaded object: its first appearance
 /// state's first frames (disabled ones leave 0).
 fn initial_flags(o: Option<&WorldObject>) -> Vec<u32> {
@@ -1087,7 +1076,7 @@ mod transform_tests {
     use super::*;
 
     /// The exe's convention (0x430ce0 applied as `v · M`): key `rx` turns
-    /// about z, `ry` about x, `rz` about y (by −rz); `angles_of` inverts it.
+    /// about z, `ry` about x, `rz` about y (by −rz).
     #[test]
     fn object_rotation_follows_the_exe() {
         let r = |rot: [i32; 3], v: [f32; 3]| {
@@ -1098,11 +1087,5 @@ mod transform_tests {
         assert!(near(r([256, 0, 0], [1.0, 0.0, 0.0]), [0.0, 1.0, 0.0]), "rx: yaw");
         assert!(near(r([0, 256, 0], [0.0, 1.0, 0.0]), [0.0, 0.0, 1.0]), "ry: pitch about x");
         assert!(near(r([0, 0, 256], [0.0, 0.0, 1.0]), [-1.0, 0.0, 0.0]), "rz: roll about y");
-        for rot in [[100, 200, 300], [512, 0, 0], [7, 1000, 513], [0, 128, 0]] {
-            let m = transform([0; 3], rot);
-            let back = angles_of([m[0], m[3], m[6]], [m[1], m[4], m[7]], [m[2], m[5], m[8]]);
-            let m2 = transform([0; 3], back);
-            assert!(m.iter().zip(&m2).take(9).all(|(a, b)| (a - b).abs() < 1e-2), "{rot:?} -> {back:?}");
-        }
     }
 }

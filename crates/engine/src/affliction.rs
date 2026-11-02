@@ -62,6 +62,10 @@ pub struct Look {
     pub bright: Vec<u16>,
     /// Texture layer override (afflictions 1 and 4).
     pub texture: Option<i16>,
+    /// Added to every polygon's texel offset `u` (`+0x5c`): affliction 1
+    /// scrolls his skin 8 a tick (`0x42b200`), i.e. 1/16 of a texture,
+    /// a full turn of the texture every 16 ticks. 0 = his own offsets.
+    pub scroll: i16,
 }
 
 #[derive(Clone, Debug)]
@@ -104,18 +108,22 @@ impl Afflictions {
             first: false,
             osc: [0; 4],
             rising: [false; 4],
-            look: Look { bright: vec![NORMAL; polygons], texture: None },
+            look: Look { bright: vec![NORMAL; polygons], texture: None, scroll: 0 },
             eyes,
         }
     }
 
     /// `Afflictions_End` @ 0x405f10: restore his polygons, affliction 0.
+    /// The exe copies back the whole 0x68-byte record of each of his
+    /// polygons from the copy the manager took when the section was read
+    /// (`0x4059c0`): texture `+0x40`, texel offset `+0x5c/+0x5e`, all.
     pub fn end(&mut self) {
         self.active = false;
         self.left = 0;
         self.kind = 0;
         self.look.bright.fill(NORMAL);
         self.look.texture = None;
+        self.look.scroll = 0;
     }
 
     /// `Afflictions_Apply` @ 0x405e20(n, 0): switch to affliction `n`
@@ -220,8 +228,15 @@ impl Afflictions {
 
     /// Affliction 1's visual (0x42b200): four triangle-wave oscillators;
     /// the last one, bouncing between the first two, sets the mean skin
-    /// brightness, and each polygon adds its own noise.
+    /// brightness, and each polygon adds its own noise. Every polygon also
+    /// gets the section's last texture (`+0x40 = 0x410ef0() − 1`) and
+    /// `+0x5c += 8`: the Direct3D draw adds `(u & 0x1ff) / 128` to his
+    /// texture coordinates (0x40e850), so the skin slides along `u` by
+    /// 1/16 of the texture a tick. Nothing touches `v` (`+0x5e`). The
+    /// offsets keep growing while he stands on the polygon (re-arming
+    /// does not reset them) and come back with the record when it ends.
     fn shimmer(&mut self, sim: &mut sim::Sim) {
+        self.look.scroll = self.look.scroll.wrapping_add(8);
         // (step, low turn, high turn) of oscillators 1, 0, 2 in the
         // order the exe updates them: +0x24, +0x20, +0x28.
         for (k, step, lo, hi) in [(1, 200, 7000, 12000), (0, 300, 15000, 25000), (2, 100, 700, 7000)] {
