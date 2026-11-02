@@ -18,7 +18,8 @@
 //!   appearance data) and -2 "not drawn in the current appearance state"
 //!   (a polygon whose frames never gave it a texture: invisible collision
 //!   geometry), kept in the buffer so a state change can reveal it by
-//!   rewriting one float per vertex.
+//!   rewriting one float per vertex. -4 marks *glass* (a `-4` frame, see
+//!   [`GLASS`]): drawn untextured and additively, after everything else.
 //! * Vertices are *object-local*. Each object carries a 4×4 transform, so
 //!   the simulation can move a platform by changing 16 floats instead of
 //!   rebuilding geometry. The renderer draws one range per object.
@@ -39,6 +40,49 @@ pub struct DrawRange {
     pub count: u32,
 }
 
+/// The `layer` of a glass polygon. A `-4` frame sets the polygon's glass
+/// flag (`0x423791`: flag = texture == -4, cleared by any other frame;
+/// stored by `0x4023b0` at polygon `+0x62`). The Direct3D renderer draws
+/// those polygons in a bucket of their own (bucket `0x27` of the draw loop
+/// `0x40f000`) with depth writes off, alpha blending on, no texture and no
+/// culling; the blend factors set at start-up (`0x40a640`) are `ONE, ONE`,
+/// so glass *adds* a grey of half the polygon's light (`0x40c330`) to
+/// whatever is behind it. The software renderer (`0x404660`) gets the same
+/// look its own way: glass never hides a span, it raises the light level
+/// of the surface behind it. The intro capsule (#3 of section 0) is glass.
+///
+/// How bright the veil is depends on the polygon's *material* (the frame's
+/// shade number, see [`glass_grey`]); glass needs no texture coordinates,
+/// so the vertex `u` carries that grey to the shader.
+pub const GLASS: f32 = -4.0;
+
+/// The grey a glass polygon adds, 0..1, for one material (a section
+/// "colour ramp", read as six `u16 / 65535` by `0x42ece0`; `m[0]` base
+/// light, `m[1]` over-brightening, `m[2]` ambient factor, `m[3]`
+/// directional factor, `m[5]` fog switch).
+///
+/// * Light level (`0x401b70`): `t = min((m0 + m2·ambient − directional) / 2,
+///   0.5) + m1`, at most 1, then `level = trunc(t · 31)` (32 rows,
+///   `pow(2, 5)` at `0x40346f`). The ambient is `trunc(u16 / 65535)`
+///   (`0x42e940`), so 0 for every section on the CD, and the glass
+///   materials (17–19, 49–61 in section 0) have no directional term.
+/// * Direct3D colour (`0x40c3e2`): below the middle row the grey is
+///   `level / 16 · 255`, then halved for glass, without the brightness
+///   preference's highlight.
+/// * The draw loop skips glass whose level is 0 (`0x40f000`): the docked
+///   capsule (material 49, base 0) shows no glass at all; on its ride
+///   (states 2–4, materials 17–19) it turns into the grey veil of the
+///   footage.
+pub fn glass_grey(m: [u16; 6]) -> f32 {
+    let f = m.map(|x| x as f32 / 65535.0);
+    let t = ((f[0] / 2.0).min(0.5) + f[1]).min(1.0);
+    let level = (t * 31.0) as i32;
+    if level <= 0 {
+        return 0.0;
+    }
+    (level as f32 / 16.0).min(1.0) / 2.0
+}
+
 pub struct WorldMesh {
     pub vertices: Vec<f32>,
     /// One range per drawn object, in section object order.
@@ -56,6 +100,11 @@ pub struct WorldMesh {
     blinking: Vec<bool>,
     /// One byte per draw: 1 = drawn, 0 = hidden by a -5 frame.
     pub visible: Vec<u8>,
+    /// For each draw and polygon: its current material (the last frame
+    /// shade number `>= 0`; `0x402450` stores it at polygon `+0x60`).
+    material: Vec<Vec<i16>>,
+    /// [`glass_grey`] of every section material.
+    glass_greys: Vec<f32>,
     /// Texture coordinates before any per-frame offset, 2 per vertex.
     pub base_uv: Vec<f32>,
     /// One column-major 4×4 matrix per drawn object (16 f32 each).
@@ -154,9 +203,11 @@ impl WorldMesh {
         let hides_object = poly_ranges.iter().map(|p| vec![false; p.len()]).collect();
         let visible = vec![1; draws.len()];
         let blinking = vec![false; draws.len()];
+        let material = poly_ranges.iter().map(|p| vec![0; p.len()]).collect();
+        let glass_greys = section.color_ramps.iter().map(|&m| glass_grey(m)).collect();
         let mut mesh = WorldMesh {
-            vertices, draws, draw_of_object, poly_ranges, hides_object, blinking, visible, base_uv, transforms, textures,
-            texture_count, bounds, objects_drawn, far_clip,
+            vertices, draws, draw_of_object, poly_ranges, hides_object, blinking, visible, material, glass_greys,
+            base_uv, transforms, textures, texture_count, bounds, objects_drawn, far_clip,
         };
         // Apply each polygon's initial appearance frame (layer, UV offset).
         for object in &section.objects {
@@ -186,9 +237,8 @@ impl WorldMesh {
         //   -5     hide the *whole object* (a flag passed to 0x4022e0 after
         //          the polygon loop): start pad #57 and the birth tube #54
         //          carry it, so their stacks are never drawn;
-        //   -4     a per-polygon flag (0x4023b0 → polygon +0x62; its
-        //          last value also feeds the object flag 0x4022f0), meaning
-        //          unknown (inferred: a shading mode); kept as is here;
+        //   -4     glass (see `GLASS`): the texture is left alone, the
+        //          polygon is drawn as an additive grey veil;
         //   -2/-3  change nothing: the polygon keeps its previous texture.
         // On the CD, -2/-3 frames sit inside flip-books (e.g. pad #83:
         // 9, -3, -3), so "previous" is the last earlier frame of the same
@@ -208,6 +258,7 @@ impl WorldMesh {
         let previous = frames[..index.min(frames.len())].iter().rev().find(|f| f.texture >= 0).map(|f| f.texture as f32);
         let layer = match frame {
             Some(f) if f.texture >= 0 => f.texture as f32,
+            Some(f) if f.texture == -4 => GLASS,
             Some(_) => previous.unwrap_or_else(|| {
                 let now = self.vertices.get(r.first as usize * FLOATS_PER_VERTEX + 5).copied().unwrap_or(-2.0);
                 if r.count > 0 && now >= 0.0 { now } else { -2.0 }
@@ -218,12 +269,25 @@ impl WorldMesh {
             *h = frame.is_some_and(|f| f.texture == -5);
             self.refresh_visible(draw);
         }
+        if let (Some(f), Some(m)) = (frame, self.material.get_mut(draw).and_then(|m| m.get_mut(poly))) {
+            if f.shade >= 0 {
+                *m = f.shade;
+            }
+        }
+        let grey = self.material[draw][poly];
+        let grey = self.glass_greys.get(grey as usize).copied().unwrap_or(0.0);
         let (du, dv) = frame.map_or((0.0, 0.0), |f| (f.u as f32 / TEX, f.v as f32 / TEX));
         for v in r.first..r.first + r.count {
             let i = v as usize;
             let o = i * FLOATS_PER_VERTEX;
-            self.vertices[o + 3] = self.base_uv[i * 2] + du;
-            self.vertices[o + 4] = self.base_uv[i * 2 + 1] + dv;
+            if layer == GLASS {
+                // Glass is untextured: its u carries the grey it adds.
+                self.vertices[o + 3] = grey;
+                self.vertices[o + 4] = 0.0;
+            } else {
+                self.vertices[o + 3] = self.base_uv[i * 2] + du;
+                self.vertices[o + 4] = self.base_uv[i * 2 + 1] + dv;
+            }
             self.vertices[o + 5] = layer;
         }
         Some(r)
@@ -313,6 +377,30 @@ mod tests {
                 m.objects_drawn, m.texture_count, m.bounds
             );
         }
+    }
+
+    /// `-4` frames are glass (0x423791): the intro capsule #3 of section 0
+    /// has twelve glass polygons (20..=31), drawn, not hidden.
+    #[test]
+    fn minus_four_is_glass_when_data_present() {
+        let p = concat!(env!("CARGO_MANIFEST_DIR"), "/../../originals/mounted/install/data/worlds");
+        let Ok(data) = std::fs::read(p) else { return };
+        let archive = Archive::parse(&data).unwrap();
+        let m = WorldMesh::build(&archive.world(0).unwrap());
+        let d = m.draw_of_object[3 - 1].unwrap();
+        assert_eq!(m.visible[d], 1, "the capsule is drawn");
+        let layer = |p: usize| m.vertices[m.poly_ranges[d][p].first as usize * FLOATS_PER_VERTEX + 5];
+        for p in 20..=31 {
+            assert_eq!(layer(p), GLASS, "capsule polygon {p} is glass");
+        }
+        assert!(layer(0) >= 0.0, "the capsule's frame stays textured");
+        // Docked (material 49, base 0) the glass adds nothing; on the ride
+        // (materials 17..=19) it is a grey veil.
+        let u = |p: usize| m.vertices[m.poly_ranges[d][p].first as usize * FLOATS_PER_VERTEX + 3];
+        assert_eq!(u(20), 0.0);
+        let s = archive.world(0).unwrap();
+        let ride: Vec<f32> = (17..=19).map(|i| glass_grey(s.color_ramps[i])).collect();
+        assert!(ride.iter().all(|&g| g > 0.1 && g < 0.25), "ride glass greys {ride:?}");
     }
 
     /// A `-5` frame hides the whole object (0x423730): section 0's start pad

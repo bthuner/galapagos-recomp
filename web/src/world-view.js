@@ -40,9 +40,23 @@ uniform float uBright; // Preferences ▸ Brightness, 1.0 = Standard
 // The palette flash (flash.rs): each channel becomes lo + c * (hi - lo).
 uniform vec3 uTintLo;
 uniform vec3 uTintHi;
+// 0: the opaque pass (glass skipped); 1: the glass pass (only glass).
+uniform int uGlass;
 in vec2 vUV; flat in float vLayer; in float vLight; in float vDepth;
 out vec4 color;
 void main() {
+  // Layer -4 is glass (world.rs GLASS): in 1997 an untextured grey, added
+  // onto what's behind (Direct3D blend ONE, ONE). The engine computed that
+  // grey from the polygon's material and passes it in u.
+  bool glass = vLayer > -4.5 && vLayer < -3.5;
+  if (glass != (uGlass == 1)) discard;
+  if (glass) {
+    if (vUV.x <= 0.0) discard; // level 0: the exe skips it
+    vec3 g = vec3(vUV.x * (1.0 - 0.85 * clamp(vDepth / uFar, 0.0, 1.0)));
+    // Additive light takes only the flash's scale, not its offset.
+    color = vec4(clamp(g * (uTintHi - uTintLo), 0.0, 1.0), 1.0);
+    return;
+  }
   if (vLayer < -1.5) discard; // hidden in the current appearance state
   // Textures repeat, as in the original's wrap-around texel addressing.
   vec3 c = vLayer < 0.0 ? vec3(0.55) : texture(uTex, vec3(fract(vUV), vLayer)).rgb;
@@ -114,6 +128,7 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   const uBright = gl.getUniformLocation(prog, "uBright");
   const uTintLo = gl.getUniformLocation(prog, "uTintLo");
   const uTintHi = gl.getUniformLocation(prog, "uTintHi");
+  const uGlass = gl.getUniformLocation(prog, "uGlass");
   // Preferences: brightness multiplier and render resolution. `pixels` is
   // the canvas height in device pixels to aim for (0 = native).
   let brightness = 1, pixels = 0;
@@ -224,11 +239,15 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     const { draws } = current;
     const transforms = current.transforms();
     const visible = current.visible?.();
-    for (let i = 0; i < draws.length / 2; i++) {
-      if (visible && !visible[i]) continue; // hidden by a -5 appearance frame
-      gl.uniformMatrix4fv(uModel, false, transforms.subarray(i * 16, i * 16 + 16));
-      gl.drawArrays(gl.TRIANGLES, draws[i * 2], draws[i * 2 + 1]);
-    }
+    const drawWorld = () => {
+      for (let i = 0; i < draws.length / 2; i++) {
+        if (visible && !visible[i]) continue; // hidden by a -5 appearance frame
+        gl.uniformMatrix4fv(uModel, false, transforms.subarray(i * 16, i * 16 + 16));
+        gl.drawArrays(gl.TRIANGLES, draws[i * 2], draws[i * 2 + 1]);
+      }
+    };
+    gl.uniform1i(uGlass, 0);
+    drawWorld();
     // Mendel: a few hundred triangles, re-uploaded every frame.
     const mendel = current.creatureVertices?.();
     if (mendel && mendel.length) {
@@ -238,6 +257,18 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       gl.uniformMatrix4fv(uModel, false, IDENTITY);
       gl.drawArrays(gl.TRIANGLES, 0, mendel.length / 7);
     }
+    // Glass last, over everything it covers (Mendel in the capsule too):
+    // depth-tested but not depth-writing, added onto the picture, as the
+    // 1997 Direct3D renderer drew its glass bucket. A few thousand
+    // triangles drawn twice cost nothing next to sorting them out.
+    gl.bindVertexArray(vao);
+    gl.uniform1i(uGlass, 1);
+    gl.depthMask(false);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    drawWorld();
+    gl.disable(gl.BLEND);
+    gl.depthMask(true);
   }
 
   // The orbit camera: eye on a sphere around `cam.target`.
