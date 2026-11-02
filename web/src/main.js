@@ -105,6 +105,7 @@ async function boot(files) {
         if (ev.kind === 5) sfx.creature(ev.a); // one of Mendel's cues
         if (ev.kind === 8) sfx.affliction(ev.a, ev.b, ev.c); // an affliction's sound, at Mendel
         if (ev.kind === 9) sfx.predator(ev.a, ev.b, ev.c); // a predator growls or bites
+        if (ev.kind === 10) sfx.effect(ev.a, ev.b, ev.c); // a transition effect: Mendel or a predator dissolves
         if (ev.kind === 4) view.snap(); // a teleporter asked for a camera cut
         if (ev.kind === 6) menu.offerSave(); // a save pad was clicked under Mendel
         if (ev.kind === 2) passGate(ev.a, ev.b); // a dimensional gate: time screen, then the next section

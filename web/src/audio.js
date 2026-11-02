@@ -116,6 +116,17 @@ export function createSfx(engine, ctx, out = ctx.destination) {
       const position = engine.sim.object(objectId).position;
       play(2, sound, { position, near: 500, far: sound === 0 ? 10000 : 5000, pitch });
     },
+    // A transition effect's sound (engine event kind 10): a world-bank sound
+    // heard at Mendel (objectId 0) or at the predator that dissolves. The
+    // effect's cue template: 3000 / 30000 (or 10000 / 20000), volume 256.
+    effect(sound, objectId, packed) {
+      const position = objectId ? engine.sim.object(objectId).position : engine.creature.state().position;
+      const pitch = (packed & 0x1fff) << 4;
+      const variation = ((packed >>> 13) & 0xff) << 8;
+      const volume = ((packed >>> 21) & 0x7f) << 2;
+      const wide = (packed >>> 28) & 1;
+      play(0, sound, { position, near: wide ? 10000 : 3000, far: wide ? 20000 : 30000, volume, pitch, variation });
+    },
     // The camera is the listener.
     listen(eye, forward, up) {
       const l = ctx.listener;

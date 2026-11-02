@@ -55,6 +55,11 @@ pub const EV_AFFLICTION_SOUND: u32 = 8;
 /// A predator's cue (predator.rs): a = predator-bank sound (0-based: 0 =
 /// the growl near Mendel, 1 = the bite), b = object id, c = pitch (16.16).
 pub const EV_PREDATOR_SOUND: u32 = 9;
+/// A transition effect's sound (transition.rs), heard at its owner: a =
+/// world-bank sound (0-based), b = object id (0 = Mendel), c = pitch >> 4
+/// (bits 0..12, 16.16 pitch) | variation >> 8 (bits 13..20) | volume >> 2
+/// (bits 21..27) | 1 << 28 for distances 10000/20000 instead of 3000/30000.
+pub const EV_EFFECT_SOUND: u32 = 10;
 
 /// What a portal or save pad asks of Mendel; the creature picks these up
 /// on its tick (`Game_RequestTeleport` @ 0x41c690 queues them the same way).
@@ -62,9 +67,14 @@ pub const EV_PREDATOR_SOUND: u32 = 9;
 pub enum Request {
     /// `Game_SpawnCreature` @ 0x41c590: appear at `at` facing `heading`,
     /// standing on `on` (see [`PortalPlace`]).
-    Spawn { at: [f32; 3], heading: i32, on: Option<PortalPlace> },
-    /// Portal kinds 1, 2 and 7.
-    Teleport { at: [f32; 3], heading: i32, snap: bool, on: Option<PortalPlace> },
+    /// `effect` is the materialise effect (kind, variant; `ints[5..6]`,
+    /// kind 0 = none), played backwards.
+    Spawn { at: [f32; 3], heading: i32, on: Option<PortalPlace>, effect: [u16; 2] },
+    /// Portal kinds 1, 2 and 7. `effect` is the dematerialise effect of
+    /// the portal's reaction (`Portal_InitReactions` @ 0x41b140: kind 1
+    /// `0xf1000` → effect 1 v7, kind 2 `0x161000` → 1 v6, kind 7
+    /// `0x151000` → 1 v5).
+    Teleport { at: [f32; 3], heading: i32, snap: bool, on: Option<PortalPlace>, effect: [u16; 2] },
     /// Portal kind 6: Mendel dissolves and respawn reason 3 runs (the
     /// world snapshot comes back, he reappears at the respawn point).
     Respawn,
@@ -570,13 +580,19 @@ impl Sim {
                     }
                     // `mode` (ints[0]) is the polygon he lands on; the
                     // offset is measured on it (see `PortalPlace`).
-                    PortalAction::Spawn { offset, heading, mode, .. } => {
+                    PortalAction::Spawn { offset, heading, mode, extra } => {
                         let (at, on) = place(offset, mode);
-                        self.requests.push(Request::Spawn { at, heading, on })
+                        let effect = [extra[0] as u16, extra[1] as u16];
+                        self.requests.push(Request::Spawn { at, heading, on, effect })
                     }
                     PortalAction::Teleport { offset, heading, snap_camera, mode } => {
                         let (at, on) = place(offset, mode);
-                        self.requests.push(Request::Teleport { at, heading, snap: snap_camera, on })
+                        let effect = match p.shorts[0] {
+                            2 => [1, 6],
+                            7 => [1, 5],
+                            _ => [1, 7],
+                        };
+                        self.requests.push(Request::Teleport { at, heading, snap: snap_camera, on, effect })
                     }
                     // Kinds 5 and 6 only differ by the reaction they hand
                     // Mendel (`Portal_InitReactions` @ 0x41b140): kind 5's

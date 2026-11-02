@@ -15,6 +15,7 @@ mod flash;
 mod predator;
 mod sim;
 mod sound;
+mod transition;
 mod walker;
 mod world;
 
