@@ -56,6 +56,73 @@
     </div>
   </section>
 
+  <!-- The time screen between levels: drawn from the game's own picture. -->
+  <div id="time-screen" class="time-screen" hidden>
+    <canvas aria-label="Level and total time"></canvas>
+    <p>Esc, Space or click to continue</p>
+  </div>
+
+  <!-- The Pause Game Menu (Esc). Structure and wording follow the original
+       File / Edit / Help menu bar and Preferences dialog of galapagos.exe. -->
+  <div id="menu" class="menu" hidden>
+    <div class="menu__card">
+      <canvas class="menu__title" aria-label="Galapagos"></canvas>
+
+      <section class="menu__panel" data-panel="main">
+        <nav class="menu__list">
+          <button data-action="resume">Resume <kbd>Esc</kbd></button>
+          <hr />
+          <button data-action="new">New game</button>
+          <button data-action="open">Open saved game…</button>
+          <hr />
+          <button data-action="import">Import Mendel NERM…</button>
+          <button data-action="export">Export Mendel NERM…</button>
+          <hr />
+          <button data-action="prefs">Preferences…</button>
+          <button data-action="about">About Galapagos…</button>
+          <button data-action="quit">Quit</button>
+        </nav>
+        <p class="menu__note">Save by clicking a <em>save pad</em> (a blue, shimmering floor panel) while Mendel walks on it.</p>
+      </section>
+
+      <section class="menu__panel" data-panel="open" hidden>
+        <h2>Open saved game</h2>
+        <ul class="menu__saves"></ul>
+        <button class="link" data-action="back">← Back</button>
+      </section>
+
+      <section class="menu__panel" data-panel="prefs" hidden>
+        <h2>Preferences</h2>
+        <div class="menu__prefs"></div>
+        <label class="menu__age">New Mendel Age
+          <input type="range" min="0" max="255" />
+          <output></output>
+          <small>The age of Mendel when he appears in a new game. This will not affect the current game.</small>
+        </label>
+        <button class="link" data-action="back">← Back</button>
+      </section>
+
+      <section class="menu__panel" data-panel="save" hidden>
+        <h2>Save Pad</h2>
+        <form class="menu__save-form">
+          <label>Save As <input name="name" maxlength="40" autocomplete="off" /></label>
+          <div class="menu__row"><button type="submit">Save</button><button type="button" class="link" data-action="resume">Cancel</button></div>
+        </form>
+        <p class="menu__note">If Mendel's body is destroyed, he reappears here and the world is restored to this moment — but not his brain: he keeps what he learnt.</p>
+      </section>
+
+      <section class="menu__panel" data-panel="about" hidden>
+        <h2>About Galapagos</h2>
+        <p>Galapagos: Mendel's Escape © 1997 Anark Game Studios, published by Electronic Arts.
+          Anark and NERM are trademarks of Anark Corporation.</p>
+        <p>This is a clean-room WebAssembly recomp: the game's files, read from your own CD, by a new engine written
+          from what the original executable does. <a href="./making-of/">How it was made →</a></p>
+        <p class="menu__note">Co-authored with AI.</p>
+        <button class="link" data-action="back">← Back</button>
+      </section>
+    </div>
+  </div>
+
   <script type="module" src="./src/main.js"></script>
 </body>
 </html>

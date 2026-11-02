@@ -37,15 +37,15 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
       if (n < 0) throw new Error("Not a Galapagos worlds archive");
       return {
         sectionCount: n,
+        // Build section i into render buffers (and start its simulation).
         build(i) {
-          const verts = wasm.world_build(i);
-          if (verts < 0) throw new Error(`Section ${i} failed to parse`);
+          if (wasm.world_build(i) < 0) throw new Error(`Section ${i} failed to parse`);
           return this.current();
         },
-        // The buffers of the section already built (after build, or after
-        // game.load rebuilt the saved section).
+        // The buffers of the section already built (e.g. after a load).
         current() {
-          const verts = wasm.world_vertex_count();
+          const verts = wasm.world_current_vertex_count();
+          if (verts < 0) throw new Error("No section built");
           const textureCount = wasm.world_texture_count();
           const mem = wasm.memory.buffer;
           return {
@@ -157,6 +157,30 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
         };
       },
     },
+
+    // ——— Menus ———
+    // File ▸ New with the Preferences age (0..255); then build section 0.
+    newGame: (age) => wasm.game_new(age),
+    section: () => wasm.world_section(),
+    // File ▸ Export / Import Mendel NERM: the 28,242-byte .mnd format.
+    exportBrain() {
+      const n = wasm.brain_export();
+      return new Uint8Array(wasm.memory.buffer, wasm.brain_export_ptr(), n).slice();
+    },
+    importBrain(bytes) {
+      const ptr = wasm.alloc(bytes.length);
+      new Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
+      return wasm.brain_import(ptr, bytes.length) === 0;
+    },
+    // UI picture i of the archive as ImageData (time screens, title strips).
+    picture(i) {
+      const [w, h, ptr] = new Uint32Array(wasm.memory.buffer, wasm.picture_info(i), 3);
+      if (!w) return null;
+      return new ImageData(new Uint8ClampedArray(wasm.memory.buffer, ptr, w * h * 4).slice(), w, h);
+    },
+    pictureCount: () => wasm.picture_count(),
+    // Preferences ▸ Fidelity: 1 = 8-bit 11 kHz … 4 = CD quality.
+    setSoundQuality: (q) => wasm.sound_set_quality(q),
 
     // Sound `i` of a bank (0 = current world, 1 = Mendel, 2 = predators):
     // { rate, baseNote, samples: Int16Array } copied out of WASM memory, or

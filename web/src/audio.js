@@ -11,10 +11,10 @@
 // Samples are decoded lazily, once: the first event that needs sound #n
 // copies its PCM out of WebAssembly memory into an AudioBuffer.
 
-export function createSfx(engine, ctx) {
+export function createSfx(engine, ctx, out = ctx.destination) {
   const master = ctx.createGain();
   master.gain.value = 0.8;
-  master.connect(ctx.destination);
+  master.connect(out);
 
   const buffers = new Map(); // "bank:index" → AudioBuffer (or null if empty)
   const loops = new Map(); // object id → playing looped source
@@ -109,6 +109,12 @@ export function createSfx(engine, ctx) {
       l.upX.value = up[0];
       l.upY.value = up[1];
       l.upZ.value = up[2];
+    },
+    // Preferences ▸ Fidelity changed: every decoded sample is stale.
+    flush() {
+      for (const src of loops.values()) src.stop();
+      loops.clear();
+      buffers.clear();
     },
     // A new section: its bank replaces the old one, loops stop.
     reset() {

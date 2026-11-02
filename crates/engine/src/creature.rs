@@ -1656,9 +1656,9 @@ mod tests {
         let (mut sim, mut mesh) = world(&d, 0);
         run(&mut sim, &mut mesh, 60, Some(5));
         let a = Archive::parse(&d).unwrap();
-        let world_bank = crate::sound::Bank::decode(&d, &a.world(0).unwrap().sounds);
+        let world_bank = crate::sound::Bank::decode(&d, &a.world(0).unwrap().sounds, crate::sound::BEST_QUALITY);
         let creature_set = galapagos_formats::worlds::SoundSet::parse(&d, a.header.creature_sounds as usize).unwrap();
-        let creature_bank = crate::sound::Bank::decode(&d, &creature_set);
+        let creature_bank = crate::sound::Bank::decode(&d, &creature_set, crate::sound::BEST_QUALITY);
         let (mut world, mut cues) = (0, 0);
         for e in &sim.events {
             let bank = match e.kind {
