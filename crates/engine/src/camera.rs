@@ -399,13 +399,11 @@ pub struct Camera {
     view: View,
     last_eye: I3,
 
-    // Host side (see `tick`): what the original keeps in the creature's
-    // contact record, which our creature does not carry over teleports.
+    // Host side (see `tick`): Mendel's contact polygon, his mode last tick
+    // and a pending camera cut.
     last_ground: Option<(usize, usize)>,
     prev_mode: Option<Mode>,
     snap_wanted: bool,
-    spawn_contact: Option<(usize, usize)>,
-    teleport_contact: Option<(usize, usize)>,
     /// The last two ticks' samples, for interpolation in the browser.
     pub samples: [[f32; SAMPLE]; 2],
 }
@@ -466,8 +464,6 @@ impl Camera {
             last_ground: None,
             prev_mode: None,
             snap_wanted: false,
-            spawn_contact: None,
-            teleport_contact: None,
             samples: [[0.0; SAMPLE]; 2],
         }
     }
@@ -751,44 +747,33 @@ impl Camera {
     /// One tick, after the creature's. `snapped`: a teleporter of kind 2
     /// asked for a camera cut this tick (`EV_CAMERA_SNAP`).
     ///
-    /// The original keeps Mendel's floor in his contact record
-    /// (creature `+0x50`): portals *set* it to their own polygon `ints[0]`
-    /// (`Game_SpawnCreature` @ 0x41c590, `Game_ExecuteTeleport` @ 0x41c700),
-    /// the mover updates it on landing, and nothing clears it in flight.
-    /// Our creature forgets its floor while airborne, so we keep that
-    /// record here. `Camera_Init` runs at spawn, at respawn and after
-    /// kind-2 teleports, as in the original.
+    /// The key follows Mendel's contact polygon (`Mover_GetSurface` @
+    /// 0x4124a0: the mover's `+0x8`/`+0x30`): placements set it to the
+    /// portal's polygon (`Mover_Place` @ 0x411bf0, from
+    /// `Game_SpawnCreature` @ 0x41c590 / `Game_OnCreatureRespawn` @
+    /// 0x41c700), landing changes it, flight keeps it. `Camera_Init` runs
+    /// at spawn, at respawn and after kind-2 teleports, as in the original.
     pub fn tick(&mut self, sim: &Sim, snapped: bool) {
         let Some(c) = sim.creature.as_ref() else { return };
-        match sim.portal_contact {
-            Some((o, p, true)) => self.spawn_contact = Some((o, p)),
-            Some((o, p, false)) => self.teleport_contact = Some((o, p)),
-            None => {}
-        }
         self.snap_wanted |= snapped;
         let mode = c.mode;
         let was = self.prev_mode.replace(mode);
         let mut cut = false;
         match (was, mode) {
-            (Some(Mode::Absent), Mode::Appearing(_)) => {
-                self.last_ground = self.spawn_contact;
-                cut = true;
-            }
+            (Some(Mode::Absent), Mode::Appearing(_)) => cut = true,
             // Respawn (any reason: a lethal floor, a kind-6 portal; the
-            // world snapshot was just restored): back to the spawn's polygon.
+            // world snapshot was just restored): back to the respawn point.
             (Some(Mode::Vanishing(_, After::Respawn)), Mode::Appearing(_)) => {
-                self.last_ground = self.spawn_contact;
                 self.snap_wanted = false;
                 cut = true;
             }
             (Some(Mode::Vanishing(_, After::Teleport(..))), Mode::Appearing(_)) => {
-                self.last_ground = self.teleport_contact.or(self.last_ground);
                 cut = self.snap_wanted;
                 self.snap_wanted = false;
             }
             _ => {}
         }
-        if let Some(g) = c.ground() {
+        if let Some(g) = c.surface() {
             self.last_ground = Some(g);
         }
         if cut {
@@ -812,8 +797,7 @@ impl Camera {
     pub fn start_loaded(&mut self, sim: &Sim) {
         let c = sim.creature.as_ref();
         self.prev_mode = c.map(|c| c.mode);
-        self.last_ground = c.and_then(|c| c.ground());
-        self.spawn_contact = self.last_ground;
+        self.last_ground = c.and_then(|c| c.surface());
         self.init(sim);
         self.samples = [self.sample(); 2];
     }

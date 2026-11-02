@@ -10,7 +10,7 @@
 //! One tick of a living Mendel (`Creature_Update` @ 0x417da0):
 //!
 //! ```text
-//! mover      ride the platform, turn, walk, slide on walls, fall      0x417f40
+//! mover      walk in the floor's plane, hull vs walls, find the floor  0x417f40 (walker.rs)
 //! touch      hull points that hit something → touch inputs, event 1  0x418450
 //! senses     two infrared eyes, three rays each                       0x418b00
 //! think      three NERM controllers → three slew-limited actuators    0x425dc0
@@ -20,64 +20,31 @@
 //! surface    lethal floors, pain, delayed hazards, afflictions        0x419550
 //! ```
 //!
-//! Coordinates: world space is the section's, **Z up** (floors face +z,
-//! gravity pulls along −z; see docs/re/mendel.md §2.2). Headings turn in
-//! the xy plane, `heading_dir(h) = (cos, sin, 0)`, so a growing heading
-//! turns towards +y, his left. Mendel's model space, after the load-time
-//! axis swap of `BodyPart::transform`, is `x` forward, `y` down (towards
-//! his feet), `z` left; his origin floats `height` units above the ground
-//! (41 + stance·166/256: exactly where the posed feet end, checked on the
-//! CD data), so `world = pos + R(heading) · model`.
-//!
-//! The original mover walks in the plane of the polygon it stands on
-//! (`0x41dc30`, a navmesh-like routine with surface-local coordinates) and
-//! was not ported line by line. Ours is a plain ray-cast character
-//! controller built from the same ingredients: the ten hull points, gravity
-//! 7 units/tick², the stance height and the polygon flag masks. Each
-//! approximation is marked `inferred:`.
+//! Coordinates: world space is the section's (Z up, but Mendel does not
+//! care: his up is the normal of the polygon he stands on, see
+//! walker.rs). His heading turns in that polygon's plane, so a growing
+//! heading turns towards his left. Mendel's model space, after the
+//! load-time axis swap of `BodyPart::transform`, is `x` forward, `y` down
+//! (towards his feet), `z` left; his origin floats `h` units above the
+//! floor (41 + stance·166/256 at rest: exactly where the posed feet end,
+//! checked on the CD data), so `world = pos + R · model` with
+//! `R = (forward, −up, left)`.
 
 use crate::affliction::{Afflictions, Ctx, NORMAL};
 use crate::predator::Prey;
 use crate::sim::save::{Reader, Writer};
-use crate::sim::{self, PortalPlace, Request, Sim};
+use crate::sim::{self, Request, Sim};
+use crate::walker::{
+    add, cross, dot, length, local_polys, normalize, ray_tri, scale, sub, turns, Drive, Faces, Frame, LocalPoly, Mover, Near, Tri,
+    FLOOR, HAZARD, IDENTITY, SOLID, UP, V3,
+};
 use crate::world::{WorldMesh, FLOATS_PER_VERTEX};
 use galapagos_formats::creature::{Brain, CreatureBody, Lcg};
-use galapagos_formats::worlds::{Object, Section};
+use galapagos_formats::worlds::Section;
 
-type V3 = [f32; 3];
-
-fn add(a: V3, b: V3) -> V3 {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-fn sub(a: V3, b: V3) -> V3 {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-fn scale(a: V3, k: f32) -> V3 {
-    [a[0] * k, a[1] * k, a[2] * k]
-}
-fn dot(a: V3, b: V3) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-fn cross(a: V3, b: V3) -> V3 {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-}
-fn length(a: V3) -> f32 {
-    dot(a, a).sqrt()
-}
-fn normalize(a: V3) -> V3 {
-    let l = length(a);
-    if l == 0.0 { a } else { scale(a, 1.0 / l) }
-}
-
-/// The world's up: +Z. The exe resets the mover's contact normal to
-/// `(0, 0, 0x400)` (0x411b60), airborne gravity is `up · −0x700`
-/// (0x41814e), and the camera tests upright floors with `n.z == 0x400`.
-const UP: V3 = [0.0, 0.0, 1.0];
-const DOWN: V3 = [0.0, 0.0, -1.0];
-
-// Gravity: grounded, the mover adds −7 to the vertical speed of the body
-// above its feet; airborne it adds `up · −0x700 >> 10` to a velocity kept
-// in 1/256 units: −7 units/tick² both ways (`CreatureMover_Integrate` @
+// Gravity: grounded, the mover adds −7 to the speed of his height above
+// the floor; airborne it adds `up · −0x700 >> 10` to a velocity kept in
+// 1/256 units: −7 units/tick² both ways (`CreatureMover_Integrate` @
 // 0x418060, verified in the listing). Afflictions 10..12 change it, and
 // afflictions 3 and 7..9 change the gait (24): see affliction.rs.
 /// A right click is felt for this many ticks (`MEnc_PopTouchSide` @ 0x4261a0).
@@ -91,59 +58,13 @@ const PAIN: i64 = 500 << 16;
 /// The real effect's duration lives in the effect code, not ported.
 const VANISH_TICKS: u16 = 30;
 const APPEAR_TICKS: u16 = 12;
-/// inferred: how far above his origin the ground probe starts (lets him
-/// step onto a platform that rose under him) and how far below his feet
-/// it still counts as ground (walking down steps without falling).
-const PROBE_UP: f32 = 150.0;
-const STEP_DOWN: f32 = 120.0;
-/// inferred: a polygon is ground, not wall, when its normal is within
-/// 60° of vertical.
-const FLOOR_NORMAL: f32 = 0.5;
-/// inferred: where the low "ledge" ray of each eye looks for the floor.
-const LEDGE_AHEAD: f32 = 700.0;
-const LEDGE_DROP: f32 = 250.0;
 /// Radius around Mendel inside which polygons are gathered each tick: the
-/// longest ray (eye range 2,000 + 206) plus the hull, with margin.
+/// longest ray (eye range 2,000 + 256) plus the hull, with margin.
 const GATHER_RADIUS: f32 = 3200.0;
-/// inferred: he steps off a ledge only if some ground lies within this
-/// depth below; an edge over the void behaves like a wall. The original
-/// mover walks from polygon to polygon (`0x411f55` attaches a surface,
-/// `0x41213e` lets go) and was not ported; this keeps him out of the void
-/// while still letting him drop into pits and onto lower floors.
-const MAX_DROP: f32 = 40_000.0;
-
-/// The ten hull points (`creature+0xa60`, set in `Creature_ReadMaster`
-/// @ 0x417570) as plain `x, y, z` triples in the mover's Z-up frame:
-/// forward, left, up (the last point, `(0, 0, −450)`, is the feet).
-/// Converted here to model space `(forward, down, left)`.
-const HULL: [[f32; 3]; 10] = {
-    const fn p(fwd: f32, left: f32, up: f32) -> [f32; 3] {
-        [fwd, -up, left]
-    }
-    [
-        p(400.0, 450.0, 225.0), // 0: front left  → touch input L
-        p(-450.0, -450.0, 225.0),
-        p(400.0, -450.0, 225.0), // 2: front right → touch input R
-        p(-450.0, 450.0, 225.0),
-        p(450.0, 0.0, 0.0),
-        p(-450.0, 0.0, 0.0),
-        p(0.0, 450.0, 0.0),
-        p(0.0, -450.0, 0.0),
-        p(0.0, 0.0, 450.0),  // head
-        p(0.0, 0.0, -450.0), // feet: the ground probe below replaces it
-    ]
-};
 
 // ——— Polygon flags (docs/re/objects.md §3, docs/re/mendel.md §2.3) ———
-/// Bit 8: what the hull and the eyes collide with (masks 0x100 at
-/// `0x41859a`, 0x40000100 at `0x419122`): walls, in practice.
-const SOLID: u32 = 0x100;
-/// Bit 1: a floor. The mover's floor finder (0x411ec3) casts with mask 2
-/// (`0x4089e0(…, 2)`, nearest of up to ten hits) before attaching to the
-/// surface (0x411f55); the camera probes use 0x102. Every upward-facing
-/// pad top in section 0 is 0x2, every wall 0x340.
-const FLOOR: u32 = 0x2;
-const HAZARD: u32 = 0x4000_0000;
+/// What an eye ray hits (mask 0x40000100 at `0x419122`) and what of it
+/// it sees: IR-visible (0xc0) or hazard polygons.
 const IR_VISIBLE: u32 = 0xc0;
 const LETHAL: u32 = 0xf000;
 const DELAYED: u32 = 0x80_0000;
@@ -158,6 +79,16 @@ const AFFLICTION_BITS: u32 = 0x1e00_0000;
 const FELL_TOO_LONG: u32 = 0x18_1000;
 /// Frame flag bit 5: a save pad ("blue, shimmering floor panel").
 const SAVE_PAD: u32 = 0x20;
+/// The eye rays: start heights above his feet, along his up (0x418b00:
+/// `up/4`, `up/64`, `−up/32` from `pos − up·stance_height/1024`).
+const EYE_HIGH: f32 = 256.0;
+const EYE_MID: f32 = 16.0;
+const EYE_LOW: f32 = -32.0;
+/// A hit's distance counts from 656 units (`- 0x290`, 0x41915c).
+const EYE_NEAR: i32 = 656;
+/// The ledge ray: a gap of at least this between two edge hits is a drop
+/// (`< 0xfb` keeps looking, 0x4192c8).
+const LEDGE_GAP: i32 = 251;
 
 // ——— Actuators ——————————————————————————————————————————————————————
 
@@ -211,7 +142,8 @@ impl Actuator {
     }
 }
 
-// ——— World geometry for ray casts ——————————————————————————————————————
+
+// ——— Probes for the other modules ————————————————————————————————————
 
 /// What a predator's probe touched: the object, the polygon's unit normal
 /// and how far the probe went past it.
@@ -222,132 +154,10 @@ pub struct ProbeHit {
     pub depth: f32,
 }
 
-/// One mesh polygon in its object's local space, with a bounding sphere so
-/// the per-tick gather can skip far polygons cheaply.
-struct LocalPoly {
-    points: Vec<V3>,
-    centre: V3,
-    radius: f32,
-}
-
-/// A world-space triangle gathered for this tick's ray casts.
-struct Tri {
-    a: V3,
-    e1: V3,
-    e2: V3,
-    normal: V3,
-    obj: usize,
-    poly: usize,
-    flags: u32,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Hit {
-    dist: f32,
-    obj: usize,
-    poly: usize,
-    flags: u32,
-    normal: V3,
-}
-
-/// Möller–Trumbore, two-sided: distance along the unit ray `d`.
-fn ray_tri(o: V3, d: V3, t: &Tri) -> Option<f32> {
-    let p = cross(d, t.e2);
-    let det = dot(t.e1, p);
-    if det.abs() < 1e-6 {
-        return None;
-    }
-    let inv = 1.0 / det;
-    let s = sub(o, t.a);
-    let u = dot(s, p) * inv;
-    if !(0.0..=1.0).contains(&u) {
-        return None;
-    }
-    let q = cross(s, t.e1);
-    let v = dot(d, q) * inv;
-    if v < 0.0 || u + v > 1.0 {
-        return None;
-    }
-    let dist = dot(t.e2, q) * inv;
-    (dist >= 0.0).then_some(dist)
-}
-
-/// The triangles near Mendel this tick, in world space, with each
-/// polygon's *current* appearance-frame flags: a door that opens stops
-/// being solid, a platform that moves carries its floor along.
-struct Near(Vec<Tri>);
-
-impl Near {
-    /// Nearest hit within `len` among polygons whose flags satisfy `accept`.
-    ///
-    /// Polygons are one-sided: a ray only hits a polygon's front, the side
-    /// its normal `(v1 - v0) × (v2 - v0)` points to. Verified on the data:
-    /// floors face up (+z), and section 0's birth tube #54 faces inwards
-    /// (inferred: the original's collision culls back faces the same way).
-    fn cast(&self, o: V3, d: V3, len: f32, accept: impl Fn(&Tri) -> bool) -> Option<Hit> {
-        let mut best: Option<Hit> = None;
-        for t in &self.0 {
-            if dot(d, t.normal) >= 0.0 || !accept(t) {
-                continue;
-            }
-            if let Some(dist) = ray_tri(o, d, t) {
-                if dist <= len && best.is_none_or(|b| dist < b.dist) {
-                    best = Some(Hit { dist, obj: t.obj, poly: t.poly, flags: t.flags, normal: t.normal });
-                }
-            }
-        }
-        best
-    }
-
-    /// Segment from `a` to `b`.
-    fn segment(&self, a: V3, b: V3, accept: impl Fn(&Tri) -> bool) -> Option<Hit> {
-        let d = sub(b, a);
-        let len = length(d);
-        if len == 0.0 {
-            return None;
-        }
-        self.cast(a, scale(d, 1.0 / len), len, accept)
-    }
-}
-
-/// A wall, for a creature whose up is `up`: solid and steeper than 60°.
-fn is_wall(up: V3) -> impl Fn(&Tri) -> bool {
-    move |t| t.flags & SOLID != 0 && dot(t.normal, up).abs() < FLOOR_NORMAL
-}
-/// Ground under a creature whose up is `up`: a floor polygon (flag 0x2)
-/// facing him. A *new* floor must also face
-/// the world's up; the object he already stands on may have turned under
-/// him (a rolling capsule) and still holds him. inferred: the original
-/// mover sticks to its surface (`+0x24` is the surface's up vector).
-fn is_ground(up: V3, riding: Option<usize>) -> impl Fn(&Tri) -> bool {
-    move |t| {
-        t.flags & FLOOR != 0
-            && dot(t.normal, up) >= FLOOR_NORMAL
-            && (dot(t.normal, UP) >= FLOOR_NORMAL || riding == Some(t.obj))
-    }
-}
-/// What an eye sees (`Creature_CastIrRay` @ 0x4190f0): mask 0x40000100 and
-/// an IR-visible (0xc0) or hazard polygon.
-fn is_seen(t: &Tri) -> bool {
-    t.flags & (SOLID | HAZARD) != 0 && t.flags & (IR_VISIBLE | HAZARD) != 0
-}
-
-/// The rotation part of a `sim` transform, and its inverse (transpose).
-fn rotate_by(m: &sim::M, v: V3) -> V3 {
-    [m[0] * v[0] + m[1] * v[1] + m[2] * v[2], m[3] * v[0] + m[4] * v[1] + m[5] * v[2], m[6] * v[0] + m[7] * v[1] + m[8] * v[2]]
-}
-fn unrotate_by(m: &sim::M, v: V3) -> V3 {
-    [m[0] * v[0] + m[3] * v[1] + m[6] * v[2], m[1] * v[0] + m[4] * v[1] + m[7] * v[2], m[2] * v[0] + m[5] * v[1] + m[8] * v[2]]
-}
-
-/// Heading (1024ths) → world direction on a level floor. Grounded, the
-/// mover adds `cos[h]·forward` to its first surface coordinate and
-/// `sin[h]·forward` to the second (tables 0x472858 = cos, 0x473058 = sin,
-/// built by `Math_InitTables` @ 0x4308c0; `CreatureMover_Integrate` @
-/// 0x418060). On a floor facing +z the surface frame is the world's.
-fn heading_dir(h: i32) -> V3 {
-    let a = h as f32 * core::f32::consts::TAU / 1024.0;
-    [a.cos(), a.sin(), 0.0]
+/// What an eye sees (`Creature_CastIrRay` @ 0x4190f0): the nearest polygon
+/// of mask 0x40000100, if it is IR-visible (0xc0) or a hazard.
+fn is_seen(flags: u32) -> bool {
+    flags & (IR_VISIBLE | HAZARD) != 0
 }
 
 // ——— The creature ———————————————————————————————————————————————————
@@ -367,23 +177,32 @@ pub enum Mode {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum After {
-    /// Respawn reason 3: back to the last save pad / spawn point.
+    /// Respawn reason 3: back to the respawn point.
     Respawn,
-    /// Reasons 1/2: a teleporter's destination.
-    Teleport(V3, i32),
+    /// Reasons 1/2: a teleporter's destination (`Game+0x17efd6..`).
+    Teleport(Place),
 }
 
-/// The surface Mendel stands on, with his position and orientation
-/// remembered in that object's local frame, so a moving, turning or
-/// rolling platform carries him (inferred: the original keeps him in
-/// surface-local coordinates, `mover+0x44/+0x48`).
-#[derive(Clone, Copy, Debug)]
-struct Contact {
-    obj: usize,
-    poly: usize,
-    local: V3,
-    fwd: V3,
-    up: V3,
+/// A spot for Mendel the way the game stores one (`Game+0x17efc4..`, the
+/// respawn point, and `+0x17efd6..`, the pending teleport): an object, a
+/// polygon, `(u, v, h)` in that polygon's frame, and a heading in its
+/// plane, i.e. the arguments of `Mover_Place` @ 0x411bf0. `on = None`
+/// means `at` is a world position (a portal whose polygon is missing, or
+/// a respawn point from a version 1–2 saved game).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Place {
+    pub on: Option<(usize, usize)>,
+    pub at: V3,
+    pub heading: i32,
+}
+
+impl Place {
+    fn of_request(at: V3, heading: i32, on: Option<sim::PortalPlace>) -> Place {
+        match on {
+            Some(p) => Place { on: Some((p.obj, p.poly)), at: p.local, heading },
+            None => Place { on: None, at, heading },
+        }
+    }
 }
 
 pub struct Creature {
@@ -393,29 +212,20 @@ pub struct Creature {
     polys: Vec<Vec<LocalPoly>>,
     menc: Option<usize>,
     light: V3,
-    floor_limit: f32,
-    /// Where a pending teleport puts him (consumed when he rematerialises).
-    teleport_on: Option<PortalPlace>,
     pub mode: Mode,
 
-    // Mover (`creature+0x50`).
+    /// The polygon walker (`creature+0x50`), walker.rs.
+    pub mover: Mover,
+    /// Derived each tick from the mover, for the senses, the renderer and
+    /// the other modules: his origin, forward and up in world space.
     pub pos: V3,
-    /// His frame: unit forward and up vectors. On a level floor `up` is
-    /// the world's up and `fwd = (cos, 0, sin)(heading)`; on a platform
-    /// both follow the platform.
     pub fwd: V3,
     pub up: V3,
     /// Distance and turn of this tick (`creature+0x7d0`, `+0x7d2`).
     forward: i32,
     turn_d: i32,
-    /// Body height above the feet, and its vertical speed (grounded).
-    height: i32,
-    hvel: i32,
+    /// Stance height (`+0x7d4`, the mover's `+0x784`): 41..207.
     stance_height: i32,
-    /// Airborne velocity, units per tick (world space).
-    air: V3,
-    air_ticks: u32,
-    ground: Option<Contact>,
     surface: u32,
     delay: u16,
 
@@ -435,17 +245,12 @@ pub struct Creature {
     turn: i32,
     side: bool,
 
-    spawn_point: Option<(V3, i32)>,
-    /// The respawn point (`Game+0x17efc4..0x17efd4`): where he stood when
-    /// the last world snapshot was taken, or the latest spawn request.
-    save_point: Option<(V3, i32)>,
+    /// The respawn point (`Game+0x17efc4..0x17efd4`): the last spawn
+    /// request, or where he stood when the last world snapshot was taken.
+    respawn: Option<Place>,
     /// `creature+0xaf0`: the surface he touches this tick has frame flag
     /// bit 5 (0x20), i.e. he stands on a save pad (`0x419730`).
     pub on_save_pad: bool,
-    /// not in the original: the last spot where he stood on still, harmless
-    /// ground, a respawn fallback when the spawn point hangs over nothing
-    /// (section 0's birth tube is gone once the capsule has left).
-    safe_point: Option<(V3, i32)>,
 
     /// The posed mesh in world space, `world::FLOATS_PER_VERTEX` per vertex.
     pub vertices: Vec<f32>,
@@ -453,9 +258,9 @@ pub struct Creature {
     pub stats: Stats,
 
     /// Sound cue inputs gathered during the tick: flags of every polygon an
-    /// eye ray hit, and how long he had been falling if he landed.
+    /// eye ray hit, and whether he landed after a fall (event 4).
     seen_flags: u32,
-    landed_after: u32,
+    landed: bool,
     /// Silence timers (ticks): `[0]` the landing cue's (`+0xa32`), `[1]`
     /// the one the four other cues share (`+0xa30`); `[2..]` unused.
     cue_quiet: [u16; 5],
@@ -472,8 +277,6 @@ pub struct Creature {
     /// `+0x8f4` / `+0x8f6`: airborne ticks and the fall limit (0 = unset).
     fall_count: u16,
     fall_limit: u16,
-    /// inferred: `+0x134`, the flags of the last ground polygon.
-    last_ground_flags: u32,
     /// `+0xafc`, `+0xafe`: affliction 6's held sensor noise.
     noise: [i32; 2],
     /// The section's last texture layer (affliction 1's skin).
@@ -488,8 +291,6 @@ pub struct Creature {
 /// `0x180000`-class surface, strong left/right asymmetry (one shared
 /// timer, one cue per tick at most).
 const SOUND_CUES: [(&[i16], u16); 5] = [(&[5], 5), (&[1, 2], 5), (&[3, 4], 20), (&[6, 7], 20), (&[8, 9, 10, 11], 20)];
-/// "Landing" means after more than this many airborne ticks.
-const LANDING_AIR_TICKS: u32 = 5;
 /// Event 16: `|L - R| > 230` (`Creature_SenseInfrared` @ 0x418b00).
 const ASYMMETRY: i32 = 230;
 
@@ -503,32 +304,14 @@ pub struct Stats {
     pub evolutions: u32,
 }
 
+
 impl Creature {
     /// `LoadCreature` @ 0x41cde0, minus the parts that belong to the host
     /// (sounds). The brain is whatever the caller chose: an overlay from the
     /// CD (`Game_LoadCreatureBrainForSection` @ 0x41ced0) or the brain he
     /// carried out of the previous section.
     pub fn new(section: &Section, mesh: &WorldMesh, body: CreatureBody, brain: Brain) -> Self {
-        let polys = section
-            .objects
-            .iter()
-            .map(|o| match o {
-                Object::World(w) => w.mesh.as_ref().map_or_else(Vec::new, |m| {
-                    m.polygons
-                        .iter()
-                        .map(|p| {
-                            let points: Vec<V3> =
-                                p.iter().filter_map(|&k| m.vertices.get(k as usize)).map(|v| v.map(|c| c as f32)).collect();
-                            let n = points.len().max(1) as f32;
-                            let centre = scale(points.iter().fold([0.0; 3], |a, &p| add(a, p)), 1.0 / n);
-                            let radius = points.iter().map(|&p| length(sub(p, centre))).fold(0.0, f32::max);
-                            LocalPoly { points, centre, radius }
-                        })
-                        .collect()
-                }),
-                Object::Camera(_) => Vec::new(),
-            })
-            .collect();
+        let polys = local_polys(section);
         let menc = section.objects.iter().position(|o| o.kind() == *b"MEnc");
         // Affliction 5's eyes (`0x414e10`): the polygons sorted by their mean
         // x; inferred: the four most forward ones, at rest.
@@ -555,20 +338,14 @@ impl Creature {
             polys,
             menc,
             light: normalize([l[0] as f32, l[1] as f32, l[2] as f32]),
-            floor_limit: mesh.bounds[2] - 20_000.0,
-            teleport_on: None,
             mode: Mode::Absent,
+            mover: Mover::default(),
             pos: [0.0; 3],
-            fwd: heading_dir(0),
+            fwd: [1.0, 0.0, 0.0],
             up: UP,
             forward: 0,
             turn_d: 0,
-            height: stance_height(stance),
-            hvel: 0,
             stance_height: stance_height(stance),
-            air: [0.0; 3],
-            air_ticks: 0,
-            ground: None,
             surface: 0,
             delay: DELAY_TICKS,
             left: 0,
@@ -585,21 +362,18 @@ impl Creature {
             stance,
             turn: 0,
             side: true,
-            spawn_point: None,
-            save_point: None,
+            respawn: None,
             on_save_pad: false,
-            safe_point: None,
             vertices: Vec::new(),
             stats: Stats::default(),
             seen_flags: 0,
-            landed_after: 0,
+            landed: false,
             cue_quiet: [0; 5],
             seen_class: false,
             afflictions,
             injected: 0,
             fall_count: 0,
             fall_limit: 0,
-            last_ground_flags: 0,
             noise: [0; 2],
             last_texture: mesh.texture_count as i16 - 1,
         };
@@ -612,19 +386,25 @@ impl Creature {
         self.touch = Some((left, TOUCH_TICKS));
     }
 
+    /// The floor he stands on (object, polygon), if grounded.
     pub fn ground(&self) -> Option<(usize, usize)> {
-        self.ground.map(|g| (g.obj, g.poly))
+        self.mover.on.filter(|_| self.mover.grounded)
+    }
+
+    /// The polygon whose frame he lives in (`Mover_GetSurface` @ 0x4124a0):
+    /// the floor he stands on, or the last one while airborne.
+    pub fn surface(&self) -> Option<(usize, usize)> {
+        self.mover.on
     }
 
     pub fn outputs(&self) -> [i32; 3] {
         [self.act[0].value, self.act[1].value, self.act[2].value]
     }
 
-    /// His heading in 1024ths of a turn, measured in the world's
-    /// horizontal (xy) plane (`(cos, sin, 0)` convention of the mover).
+    /// His heading in 1024ths of a turn, in the plane of his polygon
+    /// (`+0x50`; on a floor facing +z, the world's `(cos, sin, 0)`).
     pub fn heading(&self) -> i32 {
-        let a = self.fwd[1].atan2(self.fwd[0]) * 1024.0 / core::f32::consts::TAU;
-        (a.round() as i32) & 0x3ff
+        self.mover.heading
     }
 
     /// His left: `up × forward` (model `+z`).
@@ -632,25 +412,22 @@ impl Creature {
         cross(self.up, self.fwd)
     }
 
-    /// Forward turned by `delta` 1024ths about his up axis (positive =
-    /// towards his left, as the heading grows on a level floor).
-    fn dir(&self, delta: i32) -> V3 {
-        let a = delta as f32 * core::f32::consts::TAU / 1024.0;
-        add(scale(self.fwd, a.cos()), scale(self.left_dir(), a.sin()))
-    }
-
     /// Model space (forward, down, left) → world, without the translation.
     fn rotate(&self, m: V3) -> V3 {
         add(add(scale(self.fwd, m[0]), scale(self.up, -m[1])), scale(self.left_dir(), m[2]))
     }
 
-    /// Lie flat on a surface with normal `n`, keeping the heading as well
-    /// as possible.
-    fn align(&mut self, n: V3) {
-        let f = sub(self.fwd, scale(n, dot(self.fwd, n)));
-        if length(f) > 1e-3 {
-            self.up = n;
-            self.fwd = normalize(f);
+    /// Re-derives `pos`, `up`, `fwd` from the mover: forward is the
+    /// heading in his polygon's plane, made square to his up (the two
+    /// differ in flight, when `up` is frozen and the platform may turn).
+    fn sync(&mut self, sim: &Sim) {
+        let f = self.mover.frame(&self.polys, sim);
+        let (fwd, _) = self.mover.axes(&f);
+        self.pos = self.mover.pos;
+        self.up = normalize(self.mover.up);
+        let flat = sub(fwd, scale(self.up, dot(fwd, self.up)));
+        if length(flat) > 1e-3 {
+            self.fwd = normalize(flat);
         }
     }
 
@@ -673,6 +450,13 @@ impl Creature {
             }
             Mode::Alive => self.live(sim),
         }
+        // Dying and rematerialising, the mover still runs (0x417eb8): he
+        // keeps riding his platform, settles on his new floor, or falls.
+        if matches!(self.mode, Mode::Appearing(_) | Mode::Vanishing(..)) {
+            let near = Near::gather(&self.polys, sim, self.mover.pos, GATHER_RADIUS, SOLID | FLOOR | HAZARD);
+            self.step_mover(&near, sim);
+        }
+        self.sync(sim);
         self.attach_menc(sim, mesh);
         self.build_vertices();
     }
@@ -681,15 +465,13 @@ impl Creature {
     fn request(&mut self, r: Request, sim: &mut Sim) {
         match r {
             Request::Spawn { at, heading, on } => {
-                // inferred: a spawn while he is already alive only moves the
-                // respawn point (section 0's arrival pad #83 does that).
-                self.spawn_point = Some((at, heading));
-                // `Game_SpawnCreature` @ 0x41c590 also overwrites the
-                // respawn point, in both of its branches.
-                self.save_point = Some((at, heading));
+                // `Game_SpawnCreature` @ 0x41c590: the first call places
+                // him; every call (section 0's arrival pad #83 makes one
+                // while he is alive) overwrites the respawn point.
+                let place = Place::of_request(at, heading, on);
+                self.respawn = Some(place);
                 if self.mode == Mode::Absent {
-                    self.place(at, heading);
-                    self.settle(on, sim);
+                    self.place(place, sim);
                     self.mode = Mode::Appearing(APPEAR_TICKS);
                 }
             }
@@ -698,8 +480,7 @@ impl Creature {
                 // to is ignored. Pads repeat their trigger every tick until
                 // he touches them; without this he would never land.
                 if self.mode == Mode::Alive && length(sub(at, self.pos)) > 1500.0 {
-                    self.mode = Mode::Vanishing(VANISH_TICKS, After::Teleport(at, heading));
-                    self.teleport_on = on;
+                    self.mode = Mode::Vanishing(VANISH_TICKS, After::Teleport(Place::of_request(at, heading, on)));
                     self.stats.teleports += 1;
                     if snap {
                         sim.events.push(sim::HostEvent { kind: sim::EV_CAMERA_SNAP, a: 0, b: 0, c: 0 });
@@ -714,57 +495,47 @@ impl Creature {
         }
     }
 
-    /// After [`Creature::place`] at a portal: stand on its polygon, in its
-    /// frame, as `Game_SpawnCreature` / `Game_ExecuteTeleport` hand the
-    /// mover that polygon as its contact. A portal whose offset lifts him
-    /// clear of the polygon (section 6's start, 4,000 up) drops him instead.
-    fn settle(&mut self, on: Option<PortalPlace>, sim: &Sim) {
-        let Some(p) = on else { return };
-        let (up, fwd) = (normalize(p.up), normalize(p.fwd));
-        if p.lift.abs() > (self.height as f32 + STEP_DOWN) || length(fwd) < 0.5 {
-            return;
-        }
-        self.up = up;
-        self.fwd = fwd;
-        self.pos = add(self.pos, scale(up, self.height as f32 - p.lift));
-        let hit = Hit { dist: 0.0, obj: p.obj, poly: p.poly, flags: sim.frame_flags(p.obj, p.poly), normal: up };
-        self.ground = Some(self.contact(sim, &hit));
+    /// The mover's placement (slot 1, `0x418310` → `Mover_Place` @
+    /// 0x411bf0): at `(u, v, h)` on the polygon, in its frame, then the
+    /// floor test right away. A portal whose offset lifts him clear of the
+    /// polygon (section 6's start, 4,000 up) leaves him airborne: he falls
+    /// along the polygon's −normal.
+    fn place(&mut self, p: Place, sim: &mut Sim) {
+        self.mover.place(&self.polys, sim, p.on, p.at, p.heading, self.stance_height);
+        self.delay = DELAY_TICKS;
+        self.sync(sim);
     }
 
-    fn place(&mut self, at: V3, heading: i32) {
+    /// Debug/test: put him at a world position, airborne, upright in the
+    /// world's frame. The next tick's floor probe catches whatever lies
+    /// within his reach below.
+    #[cfg(test)]
+    pub fn drop_at(&mut self, at: V3, heading: i32) {
+        self.mover = Mover { pos: at, prev: at, heading: heading & 0x3ff, ..Mover::default() };
+        self.fall_count = 0;
+        self.fall_limit = 0;
         self.pos = at;
-        self.fwd = heading_dir(heading);
         self.up = UP;
-        self.air = [0.0; 3];
-        self.air_ticks = 0;
-        self.ground = None;
-        self.hvel = 0;
-        self.height = self.stance_height;
-        self.delay = DELAY_TICKS;
+        let a = turns(heading);
+        self.fwd = [a.cos(), a.sin(), 0.0];
     }
 
     /// `Game_OnCreatureRespawn` @ 0x41c700 after the effect has run.
-    /// Reason 3 first restores the world snapshot (level start, last save
-    /// or open), then puts him back on the respawn point and cuts the
-    /// camera. The brain is never restored: he keeps what he learnt.
+    /// Reasons 1/2 place him on the pending teleport; reason 3 first
+    /// restores the world snapshot (level start, last save or open), then
+    /// puts him back on the respawn point and cuts the camera. The brain
+    /// is never restored: he keeps what he learnt.
     fn finish_vanishing(&mut self, then: After, sim: &mut Sim, mesh: &mut WorldMesh) {
         match then {
-            After::Teleport(at, h) => {
-                self.place(at, h);
-                let on = self.teleport_on.take();
-                self.settle(on, sim);
-            }
+            After::Teleport(p) => self.place(p, sim),
             After::Respawn => {
                 // Respawn reason 3 ends any affliction (`0x405f10` at 0x417e68).
                 self.afflictions.end();
                 if sim.restore_snapshot(mesh) {
                     sim.events.push(sim::HostEvent { kind: sim::EV_CAMERA_SNAP, a: 0, b: 0, c: 0 });
                 }
-                let candidates = [self.save_point, self.spawn_point, self.safe_point];
-                let mut pick = candidates.iter().flatten().find(|&&(p, _)| self.ground_below(sim, p)).copied();
-                pick = pick.or(self.spawn_point);
-                if let Some((at, h)) = pick {
-                    self.place(at, h);
+                if let Some(p) = self.respawn {
+                    self.place(p, sim);
                 }
             }
         }
@@ -773,27 +544,61 @@ impl Creature {
 
     fn live(&mut self, sim: &mut Sim) {
         self.stats.ticks_alive += 1;
-        let near = self.gather(sim, self.pos, GATHER_RADIUS);
+        let near = Near::gather(&self.polys, sim, self.mover.pos, GATHER_RADIUS, SOLID | FLOOR | HAZARD);
         self.step_mover(&near, sim);
-        self.sense(&near);
+        self.sync(sim);
+        self.sense(&near, sim);
         self.think();
         self.apply_motor_outputs();
         self.accumulate_cost();
         // The effect manager's tick (0x405fc0), then the surface events.
-        let floor_texture = self.ground.and_then(|g| sim.frame_texture(g.obj, g.poly));
+        let floor_texture = self.ground().and_then(|(o, p)| sim.frame_texture(o, p));
         let last_texture = self.last_texture;
         self.afflictions.tick(Ctx { sim, floor_texture, last_texture });
         self.surface_events(sim);
-        self.on_save_pad = self.surface & SAVE_PAD != 0 || self.touches_save_pad(sim);
+        self.on_save_pad = self.surface & SAVE_PAD != 0;
         self.sound_cues(sim);
     }
+
+    /// `CreatureMover_Step` @ 0x417f40, the touch inputs and the click.
+    fn step_mover(&mut self, near: &Near, sim: &mut Sim) {
+        let drive = Drive {
+            forward: std::mem::take(&mut self.forward),
+            turn: std::mem::take(&mut self.turn_d),
+            stance: self.stance_height,
+            gravity: self.afflictions.gravity(),
+            injected: std::mem::take(&mut self.injected),
+        };
+        let mut posted = Vec::new();
+        let was = self.mover.pos;
+        let felt = self.mover.step(&self.polys, sim, near, &drive, &mut posted);
+        if self.mover.grounded {
+            self.stats.walked += length(sub(self.mover.pos, was));
+        }
+        // Event bit 1, "Mendel touches me", to each wall the hull pushed
+        // against and to his polygon's object (`vtable[9]`, 0x4185e0 and
+        // 0x418956 → `WorldObject_PostEvent` @ 0x4232f0).
+        for o in posted {
+            sim.post_event(o, 1);
+            self.stats.touches_posted += 1;
+        }
+        self.left = if felt.left { 256 } else { 0 };
+        self.right = if felt.right { 256 } else { 0 };
+        self.surface = felt.surface;
+        // The right click (`MEnc`): felt exactly like a bump on that side.
+        if let Some((left, n)) = self.touch {
+            if left { self.left = 256 } else { self.right = 256 }
+            self.touch = (n > 1).then_some((left, n - 1));
+        }
+    }
+
 
     /// The cue part of `Creature_HandleSurfaceEvents` @ 0x419550. The
     /// landing cue has its own 5-tick silence; the four others share one
     /// timer and play by priority, one per tick, then stay quiet for their
     /// minimum plus `0..31` ticks drawn from the brain's LCG.
     fn sound_cues(&mut self, sim: &mut Sim) {
-        let landed = self.landed_after > LANDING_AIR_TICKS;
+        let landed = std::mem::take(&mut self.landed);
         let agitated = matches!(self.afflictions.kind, 7..=9);
         let events = [
             agitated,
@@ -801,7 +606,6 @@ impl Creature {
             self.seen_class,
             (self.left - self.right).abs() > ASYMMETRY,
         ];
-        self.landed_after = 0;
         self.seen_flags = 0;
         self.seen_class = false;
         if self.cue_quiet[0] > 0 {
@@ -826,297 +630,20 @@ impl Creature {
         sim.events.push(sim::HostEvent { kind: sim::EV_CREATURE_SOUND, a: pick as i32 - 1, b: 0, c: 0 });
     }
 
-    /// Collects every polygon near Mendel, transformed by its object's
-    /// *current* pose. All objects count, including those of sleeping
-    /// folders: a folder only stops updates, its floor is still there.
-    fn gather(&self, sim: &Sim, centre: V3, radius: f32) -> Near {
-        self.gather_masked(sim, centre, radius, SOLID | FLOOR | HAZARD)
-    }
-
-    fn gather_masked(&self, sim: &Sim, centre: V3, radius: f32, mask: u32) -> Near {
-        let mut out = Vec::new();
-        for (i, polys) in self.polys.iter().enumerate() {
-            if polys.is_empty() {
-                continue;
-            }
-            let (pos, rot) = sim.pose(i);
-            let m = sim::transform(pos, rot);
-            for (p, lp) in polys.iter().enumerate() {
-                if lp.points.len() < 3 || length(sub(sim::apply(&m, lp.centre), centre)) > radius + lp.radius {
-                    continue;
-                }
-                // A floor is a floor whatever frame its flip-book shows this
-                // tick: the arrival pad #83 cycles through three frames of
-                // which only the first carries bit 1 (inferred: the
-                // original's mover stays on its surface between frames).
-                // Appearance *states* do change floors: section 0's start
-                // disc #57 hands the floor down its stack of four polygons,
-                // then to the docked capsule #3.
-                let flags = sim.frame_flags(i, p) | (sim.state_flags(i, p) & FLOOR);
-                if flags & mask == 0 {
-                    continue;
-                }
-                let w: Vec<V3> = lp.points.iter().map(|&v| sim::apply(&m, v)).collect();
-                let normal = normalize(cross(sub(w[1], w[0]), sub(w[2], w[0])));
-                for k in 1..w.len() - 1 {
-                    out.push(Tri { a: w[0], e1: sub(w[k], w[0]), e2: sub(w[k + 1], w[0]), normal, obj: i, poly: p, flags });
-                }
-            }
-        }
-        Near(out)
-    }
-
-    // ——— mover ———
-
-    /// `CreatureMover_Step` @ 0x417f40 → `_Integrate` @ 0x418060 →
-    /// `_CollideAndTouch` @ 0x418450.
-    fn step_mover(&mut self, near: &Near, sim: &mut Sim) {
-        self.left = 0;
-        self.right = 0;
-        self.surface = 0;
-        let mut still = true;
-        if let Some(g) = self.ground {
-            let before = self.pos;
-            self.ride(g, sim);
-            still = length(sub(self.pos, before)) < 1.0;
-        }
-        if self.ground.is_some() {
-            self.walk(near, sim);
-        } else {
-            self.fall(near, sim);
-        }
-        // Touch: the hull, at the final position.
-        let hits = self.hull_hits(near, self.pos);
-        for (k, h) in hits.iter().enumerate() {
-            let Some(h) = h else { continue };
-            match k {
-                0 => self.left = 256,
-                2 => self.right = 256,
-                _ => {}
-            }
-            self.surface |= h.flags;
-            self.post(sim, h.obj);
-        }
-        // inferred: his feet touch what lies under the four hull corners
-        // too (his legs span ±450), not only what is under his centre.
-        if self.ground.is_some() {
-            let down = scale(self.up, -1.0);
-            let reach = self.height as f32 + STEP_DOWN;
-            let mut felt: Vec<usize> = Vec::new();
-            for &[x, _, z] in &HULL[..4] {
-                let at = add(self.pos, self.rotate([x, 0.0, z]));
-                if let Some(h) = near.cast(at, down, reach, is_ground(self.up, self.riding())) {
-                    if Some(h.obj) != self.riding() && !felt.contains(&h.obj) {
-                        felt.push(h.obj);
-                        self.post(sim, h.obj);
-                    }
-                }
-            }
-        }
-        if let Some(g) = self.ground {
-            let flags = sim.frame_flags(g.obj, g.poly);
-            self.surface |= flags;
-            self.post(sim, g.obj);
-            if still && flags & LETHAL == 0 && dot(self.up, UP) > 0.9 {
-                self.safe_point = Some((add(self.pos, scale(UP, 200.0)), self.heading()));
-            }
-        }
-        // Flags the game handed him (`creature+0xae8`): a predator's bite.
-        self.surface |= std::mem::take(&mut self.injected);
-        if let Some(g) = self.ground {
-            self.last_ground_flags = sim.frame_flags(g.obj, g.poly);
-        }
-        // The right click (`MEnc`): felt exactly like a bump on that side.
-        if let Some((left, n)) = self.touch {
-            if left { self.left = 256 } else { self.right = 256 }
-            self.touch = (n > 1).then_some((left, n - 1));
-        }
-    }
-
-    /// Event bit 1, "Mendel touches me", to the object and its ancestors
-    /// (`0x4185e0` → `WorldObject_PostEvent` @ 0x4232f0).
-    fn post(&mut self, sim: &mut Sim, obj: usize) {
-        sim.post_event(obj, 1);
-        self.stats.touches_posted += 1;
-    }
-
-    /// Moving platforms: re-express his position and frame from the
-    /// platform's local frame with its new pose.
-    fn ride(&mut self, g: Contact, sim: &Sim) {
-        let (pos, rot) = sim.pose(g.obj);
-        let m = sim::transform(pos, rot);
-        self.pos = sim::apply(&m, g.local);
-        self.fwd = normalize(rotate_by(&m, g.fwd));
-        self.up = normalize(rotate_by(&m, g.up));
-    }
-
-    fn contact(&self, sim: &Sim, h: &Hit) -> Contact {
-        let (pos, rot) = sim.pose(h.obj);
-        let m = sim::transform(pos, rot);
-        Contact {
-            obj: h.obj,
-            poly: h.poly,
-            local: sim::unapply(&m, self.pos),
-            fwd: unrotate_by(&m, self.fwd),
-            up: unrotate_by(&m, self.up),
-        }
-    }
-
-    fn riding(&self) -> Option<usize> {
-        self.ground.map(|g| g.obj)
-    }
-
-    /// The hull: segments from his origin to each of the eight side points
-    /// (rotated by the heading). Floor-like polygons are left to the ground
-    /// probe, so slopes and steps don't stop him.
-    fn hull_hits(&self, near: &Near, at: V3) -> [Option<Hit>; 8] {
-        core::array::from_fn(|k| near.segment(at, add(at, self.rotate(HULL[k])), is_wall(self.up)))
-    }
-
-    /// How free a position is: the smallest hit fraction along the hull
-    /// segments (1 = nothing touched), and the nearest hit.
-    fn clearance(&self, near: &Near, at: V3) -> (f32, Option<Hit>) {
-        let mut best = (1.0, None);
-        for (k, h) in self.hull_hits(near, at).into_iter().enumerate() {
-            if let Some(h) = h {
-                let f = h.dist / length(HULL[k]);
-                if f < best.0 {
-                    best = (f, Some(h));
-                }
-            }
-        }
-        best
-    }
-
-    /// Grounded integration: turn, walk, slide along walls, follow the
-    /// ground, or step off into the air.
-    fn walk(&mut self, near: &Near, sim: &Sim) {
-        self.fwd = self.dir(self.turn_d);
-        let d = scale(self.fwd, self.forward as f32);
-        // The body bobs above its feet: vertical speed, gravity, clamp.
-        self.hvel += self.afflictions.gravity();
-        self.height += self.hvel;
-        if self.height <= self.stance_height {
-            self.height = self.stance_height;
-            self.hvel = 0;
-        }
-        let next = self.slide(near, d);
-        self.stats.walked += length(sub(next, self.pos));
-        if self.stand(near, sim, next) {
-            return;
-        }
-        if !self.ground_below(sim, next) {
-            // An edge over nothing: stay on this side of it.
-            let here = self.pos;
-            if !self.stand(near, sim, here) {
-                self.ground = None;
-            }
-            return;
-        }
-        // Walked off a ledge: keep the momentum, start falling.
-        self.pos = next;
-        self.air = add(d, scale(self.up, self.hvel as f32));
-        self.air_ticks = 0;
-        self.ground = None;
-        self.level_out();
-    }
-
-    /// Ground probe along his down axis below `at`; on success he stands
-    /// there, lying flat on the polygon.
-    fn stand(&mut self, near: &Near, sim: &Sim, at: V3) -> bool {
-        let from = add(at, scale(self.up, PROBE_UP));
-        let reach = PROBE_UP + self.height as f32 + STEP_DOWN;
-        let down = scale(self.up, -1.0);
-        let Some(h) = near.cast(from, down, reach, is_ground(self.up, self.riding())) else { return false };
-        self.align(h.normal);
-        let foot = add(from, scale(down, h.dist));
-        self.pos = add(foot, scale(self.up, self.height as f32));
-        self.ground = Some(self.contact(sim, &h));
-        true
-    }
-
-    /// Airborne, he turns back to the world's up (inferred).
-    fn level_out(&mut self) {
-        let mut f = [self.fwd[0], self.fwd[1], 0.0];
-        if length(f) < 1e-3 {
-            f = [-self.up[0], -self.up[1], 0.0];
-        }
-        self.fwd = if length(f) < 1e-3 { heading_dir(0) } else { normalize(f) };
-        self.up = UP;
-    }
-
-    fn ground_below(&self, sim: &Sim, at: V3) -> bool {
-        let deep = self.gather(sim, add(at, scale(DOWN, MAX_DROP / 2.0)), MAX_DROP / 2.0);
-        deep.cast(at, DOWN, MAX_DROP, is_ground(UP, None)).is_some()
-    }
-
-    /// Accept a move unless it brings the hull closer to a wall; otherwise
-    /// try sliding along that wall; otherwise stay put. Comparing with the
-    /// current clearance (rather than demanding none) lets him back out of
-    /// a wall that moved into him.
-    fn slide(&self, near: &Near, d: V3) -> V3 {
-        if length(d) == 0.0 {
-            return self.pos;
-        }
-        let (now, _) = self.clearance(near, self.pos);
-        let ok = |delta: V3| {
-            let at = add(self.pos, delta);
-            (self.clearance(near, at).0 >= now.min(1.0)).then_some(at)
-        };
-        if let Some(at) = ok(d) {
-            return at;
-        }
-        if let (_, Some(h)) = self.clearance(near, add(self.pos, d)) {
-            let n = normalize(sub(h.normal, scale(self.up, dot(h.normal, self.up))));
-            if let Some(at) = ok(sub(d, scale(n, dot(d, n)))) {
-                return at;
-            }
-        }
-        self.pos
-    }
-
-    /// Airborne: ballistic flight (`0x41814e`), landing on the first ground
-    /// polygon under the path. Walls stop the horizontal motion.
-    fn fall(&mut self, near: &Near, sim: &Sim) {
-        self.air = add(self.air, scale(UP, self.afflictions.gravity() as f32));
-        self.air_ticks += 1;
-        let mut next = add(self.pos, self.air);
-        if self.clearance(near, [next[0], next[1], self.pos[2]]).0 < 1.0 {
-            next = [self.pos[0], self.pos[1], next[2]];
-            self.air = [0.0, 0.0, self.air[2]];
-        }
-        // Probe from where he was (height-wise) to below his feet at `next`.
-        let from = [next[0], next[1], self.pos[2] + PROBE_UP];
-        let reach = (from[2] - next[2]).max(0.0) + self.stance_height as f32;
-        if self.air[2] < 0.0 {
-            if let Some(h) = near.cast(from, DOWN, reach, is_ground(UP, None)) {
-                let foot = add(from, scale(DOWN, h.dist));
-                self.height = self.stance_height;
-                self.hvel = 0;
-                self.align(h.normal);
-                self.pos = add(foot, scale(self.up, self.height as f32));
-                self.ground = Some(self.contact(sim, &h));
-                self.landed_after = self.air_ticks;
-                self.air_ticks = 0;
-                return;
-            }
-        }
-        self.pos = next;
-    }
 
     // ——— senses ———
 
     /// `Creature_SenseInfrared` @ 0x418b00. Two eyes at heading ± `a`, each
     /// casting three rays; an eye already set by touch stays as it is.
-    fn sense(&mut self, near: &Near) {
+    fn sense(&mut self, near: &Near, sim: &Sim) {
         let posture = self.act[0].value;
         let a = 100 - posture * 50 / 256;
         let range = 1500 + posture * 500 / 256;
         if self.left == 0 {
-            self.left = self.eye(near, a, range);
+            self.left = self.eye(near, sim, a, range);
         }
         if self.right == 0 {
-            self.right = self.eye(near, -a, range);
+            self.right = self.eye(near, sim, -a, range);
         }
         match self.afflictions.kind {
             // Blind (0x418fe8).
@@ -1139,6 +666,12 @@ impl Creature {
             }
             _ => {}
         }
+        // Falling (0x41906a): both eyes scream, unless the fall started
+        // from a bit-4 floor (limit 130).
+        if self.fall_count != 0 && self.fall_limit != 130 {
+            self.left = 256;
+            self.right = 256;
+        }
     }
 
     /// One LCG step, true when bits 16..19 of the seed are all 0 (1 in 16).
@@ -1147,37 +680,107 @@ impl Creature {
         self.rng.0 & 0xf_0000 == 0
     }
 
-    fn eye(&mut self, near: &Near, angle: i32, range: i32) -> i32 {
-        let dir = self.dir(angle);
-        let value = |dist: f32| (256 - (dist as i32 - 656) * 256 / (range - 450)).clamp(0, 256);
-        let reach = (range + 206) as f32;
-        let mut best = 0;
-        // inferred: the high and middle rays start at the top of the shell
-        // and at his origin (the stacking offsets are not in the spec).
-        // Under affliction 1 polygons flagged 0x400000 count as IR-visible
-        // (0x419290: `flags |= 0xc0`): he sees the lethal floors.
-        let shield = self.afflictions.kind == 1;
-        let seen = move |t: &Tri| is_seen(t) || (shield && t.flags & SHIELDED != 0 && t.flags & (SOLID | HAZARD) != 0);
-        for lift in [150.0, 0.0] {
-            if let Some(h) = near.cast(add(self.pos, scale(self.up, lift)), dir, reach, seen) {
-                best = best.max(value(h.dist));
-                self.seen_flags |= h.flags;
-                self.seen_class |= h.flags & 0x38_0000 == 0x18_0000;
+    /// One eye: three parallel rays of length `range` along heading +
+    /// `angle` in his polygon's plane, from his feet (`pos − up · stance`)
+    /// raised 256 and 16 along his up, and lowered 32 (under the floor's
+    /// surface: the ledge ray). The eye reports the nearest of the three.
+    fn eye(&mut self, near: &Near, sim: &Sim, angle: i32, range: i32) -> i32 {
+        let f = self.mover.frame(&self.polys, sim);
+        let a = turns(self.mover.heading + angle);
+        let dir = normalize(f.dir([a.cos(), a.sin(), 0.0]));
+        let feet = sub(self.pos, scale(self.up, self.stance_height as f32));
+        let up = self.up;
+        let ray = |lift: f32| {
+            let o = add(feet, scale(up, lift));
+            (o, add(o, scale(dir, range as f32)))
+        };
+        let value = |d: i32| (256 - d * 256 / (range - 450)).clamp(0, 256);
+        let wanted = |t: &Tri| t.flags & (SOLID | HAZARD) != 0;
+        // (distance − 656, value); 10000 = nothing seen.
+        let mut rays = [(10_000, 0); 3];
+        for (k, lift) in [EYE_HIGH, EYE_MID].into_iter().enumerate() {
+            let (o, e) = ray(lift);
+            // `Creature_CastIrRay` @ 0x4190f0: the nearest polygon of the
+            // mask, which may hide what lies behind it.
+            if let Some(h) = near.segment(o, e, Faces::Both, wanted) {
+                if is_seen(h.flags) {
+                    let d = h.dist as i32 - EYE_NEAR;
+                    rays[k] = (d, value(d));
+                }
+                self.notice(h.flags);
             }
         }
-        // The low ray (`Creature_CastIrLedgeRay` @ 0x4191f0) reports drops.
-        // inferred: we look for the floor just ahead along the eye and, if
-        // it falls away by more than 250, see the ledge as an obstacle there.
-        if self.ground.is_some() {
-            let ahead = add(self.pos, scale(dir, LEDGE_AHEAD));
-            let feet = self.height as f32;
-            let down = scale(self.up, -1.0);
-            if near.cast(ahead, down, feet + LEDGE_DROP, is_ground(self.up, self.riding())).is_none() {
-                best = best.max(value(LEDGE_AHEAD));
-            }
+        rays[2] = self.ledge_ray(near, ray(EYE_LOW), value);
+        // The nearest wins (0x419070 compares the three distances).
+        let [hi, mid, low] = rays;
+        if !(mid.0 < hi.0 || low.0 < hi.0) {
+            hi.1
+        } else if !(hi.0 < mid.0 || low.0 < mid.0) {
+            mid.1
+        } else {
+            low.1
         }
-        best
     }
+
+    /// Sound-cue side effects of a polygon an eye ray met.
+    fn notice(&mut self, flags: u32) {
+        self.seen_flags |= flags;
+        self.seen_class |= flags & 0x38_0000 == 0x18_0000;
+    }
+
+    /// `Creature_CastIrLedgeRay` @ 0x4191f0: the low ray runs 32 below his
+    /// feet, i.e. *inside* the floor, so the first things it meets are the
+    /// edges of the slab he walks on. All its hits (nearest first, at most
+    /// ten) are read in order. IR class 0x40 (the sides of floors, walls
+    /// `0x340`): a lone one is "an edge"; if the next hit lies within 250
+    /// it was just a seam between two slabs, otherwise the edge is a drop
+    /// and is seen. Class 0x80 or a hazard: seen at once. Anything else
+    /// (class 0xc0 or 0) ends the ray unseen. Under the shield
+    /// (affliction 1), bit-22 polygons count as class 0xc0 (0x419290).
+    fn ledge_ray(&mut self, near: &Near, (o, e): (V3, V3), value: impl Fn(i32) -> i32) -> (i32, i32) {
+        let wanted = |t: &Tri| t.flags & (SOLID | HAZARD) != 0;
+        let hits = near.segment_all(o, e, wanted);
+        let dist: Vec<i32> = hits.iter().map(|h| h.dist as i32).collect();
+        let report = |d: i32| (d - EYE_NEAR, value(d - EYE_NEAR));
+        let mut out = (10_000, 0);
+        let mut pending = false;
+        for (i, h) in hits.iter().enumerate() {
+            let mut fl = h.flags;
+            if self.afflictions.kind == 1 && fl & SHIELDED != 0 {
+                fl |= IR_VISIBLE;
+            }
+            self.notice(fl);
+            let stop = match fl & IR_VISIBLE {
+                0x40 if pending => {
+                    if dist[i] - dist[i - 1] < LEDGE_GAP {
+                        pending = false;
+                        false
+                    } else {
+                        out = report(dist[i - 1]);
+                        true
+                    }
+                }
+                0x40 if i + 1 == hits.len() => {
+                    out = report(dist[i]);
+                    false
+                }
+                0x40 => {
+                    pending = true;
+                    false
+                }
+                c if c == 0x80 || fl & HAZARD != 0 => {
+                    out = report(if pending { dist[i - 1] } else { dist[i] });
+                    true
+                }
+                _ => true,
+            };
+            if stop {
+                break;
+            }
+        }
+        out
+    }
+
 
     // ——— brain ———
 
@@ -1226,8 +829,10 @@ impl Creature {
         self.forward = fwd as i32;
         self.turn_d = if self.side { td as i32 } else { -td as i32 };
         let h = stance_height(self.stance);
-        if self.ground.is_some() {
-            self.hvel = 2 * (h - self.stance_height);
+        // A rising stance pushes his body up (a hop), grounded and not
+        // falling (0x418a8b).
+        if self.mover.grounded && self.fall_count == 0 {
+            self.mover.hvel = 2 * (h - self.stance_height);
         }
         self.stance_height = h;
         // frac = 256: we render simulation states, not interpolations.
@@ -1267,6 +872,7 @@ impl Creature {
         }
     }
 
+
     /// `Creature_HandleSurfaceEvents` @ 0x419550: the shield, the fall
     /// limit, lethal surfaces and afflictions (the cues are [`Self::sound_cues`]).
     fn surface_events(&mut self, sim: &mut Sim) {
@@ -1278,10 +884,11 @@ impl Creature {
                 self.surface &= !AFFLICTION_BITS;
             }
         }
-        // Falling for too long is lethal (0x4195cf..0x41962a).
-        if self.ground.is_none() {
+        // Falling for too long is lethal (0x4195cf..0x41962a); the limit
+        // comes from the floor he left (`+0x134`, the mover's `+0xe4`).
+        if !self.mover.grounded {
             if self.fall_limit == 0 {
-                self.fall_limit = if self.last_ground_flags & 0x10 != 0 { 130 } else { 65 };
+                self.fall_limit = if self.mover.floor_flags & 0x10 != 0 { 130 } else { 65 };
             } else {
                 let n = self.fall_count;
                 self.fall_count += 1;
@@ -1293,23 +900,22 @@ impl Creature {
                 }
             }
         } else {
+            // Landing after more than 5 airborne ticks: event 4.
+            self.landed = self.fall_count > 5;
             self.fall_count = 0;
             self.fall_limit = 0;
         }
         let f = self.surface;
-        // not in the original: a safety net for our approximate mover, if
-        // he leaves the world's bounding box.
-        let fell_out = self.pos[2] < self.floor_limit;
         if f & AFFLICTION_BITS != 0 {
             self.afflictions.apply(((f >> 25) & 15) as u8, sim);
         }
-        if f & LETHAL == 0 && !fell_out {
-            if self.ground.is_some() {
+        if f & LETHAL == 0 {
+            if self.mover.grounded {
                 self.delay = DELAY_TICKS;
             }
             return;
         }
-        if f & DELAYED != 0 && !fell_out {
+        if f & DELAYED != 0 {
             self.delay = self.delay.saturating_sub(1);
             if self.delay > 0 {
                 return;
@@ -1323,9 +929,11 @@ impl Creature {
         // (f >> 19) & 7 picks what happens after the effect; on the CD the
         // lethal floors all say 3, "death". Teleport reasons (1, 2) need a
         // pending destination we don't have here, so they also respawn.
+        self.fall_count = 0;
         self.stats.deaths += 1;
         self.mode = Mode::Vanishing(VANISH_TICKS, After::Respawn);
     }
+
 
     // ——— Predators ———
 
@@ -1345,20 +953,27 @@ impl Creature {
         self.injected |= flags;
     }
 
+
     /// A predator's probe (`World_Cast` @ 0x4089e0 on the segment `a → b`)
     /// against polygons whose flags meet `mask`, ignoring object `skip`.
+    /// inferred: front faces only (the predator code's own tests on the
+    /// hit were not traced).
     pub(crate) fn probe(&self, sim: &Sim, a: V3, b: V3, mask: u32, skip: usize) -> Option<ProbeHit> {
         let len = length(sub(b, a));
-        let near = self.gather_masked(sim, a, len, mask);
-        let h = near.segment(a, b, |t| t.obj != skip)?;
+        let near = Near::gather(&self.polys, sim, a, len, mask);
+        let h = near.segment(a, b, Faces::Front, |t| t.obj != skip)?;
         Some(ProbeHit { obj: h.obj, normal: h.normal, depth: len - h.dist })
     }
 
     // ——— MEnc and rendering ———
 
     /// `Creature_AttachTouchHull` @ 0x417d60: the section's `MEnc` (an
-    /// invisible click hull) follows Mendel. Ours is hidden: we pick
-    /// against Mendel's own mesh instead (see [`Creature::pick`]).
+    /// invisible click hull) follows Mendel: it gets his position and his
+    /// three render angles (`+0xa34`, copied from the mover's `+0xa8`
+    /// block). Ours is hidden: we pick against Mendel's own mesh instead
+    /// (see [`Creature::pick`]). inferred: we turn his frame (forward,
+    /// left, up) into object angles with `sim::angles_of` rather than
+    /// porting the mover's own angle formulas (`0x412180`).
     fn attach_menc(&self, sim: &mut Sim, mesh: &mut WorldMesh) {
         let Some(i) = self.menc else { return };
         let Some(draw) = mesh.draw_of_object[i] else { return };
@@ -1370,10 +985,10 @@ impl Creature {
             }
             sim.mark_dirty(r.first, r.first + r.count);
         }
-        // inferred: a turn about the world's up (Z) by his heading.
-        let rot = [0, 0, self.heading()];
+        let rot = sim::angles_of(self.fwd, self.left_dir(), self.up);
         sim.set_pose(i, self.pos.map(|c| c as i32), rot, mesh);
     }
+
 
     /// The posed body in world space: shell plus both leg sides, real UVs,
     /// texture layers 16..19, flat Lambert light like the world's.
@@ -1414,15 +1029,16 @@ impl Creature {
         }
     }
 
+
     /// For `camera.rs` (`Camera_Collide` @ 0x413cb0): the nearest polygon
     /// with flags 0x102 crossing the segment `from → to`, as (a point of
-    /// its plane, its unit world normal). Front faces only, like `cast`.
+    /// its plane, its unit world normal). Front faces only.
     pub fn camera_probe(&self, sim: &Sim, from: V3, to: V3) -> Option<(V3, V3)> {
-        let near = self.gather_masked(sim, from, length(sub(to, from)), 0x102);
-        let h = near.segment(from, to, |_| true)?;
-        let t = near.0.iter().find(|t| t.obj == h.obj && t.poly == h.poly)?;
-        Some((t.a, t.normal))
+        let near = Near::gather(&self.polys, sim, from, length(sub(to, from)), 0x102);
+        let h = near.segment(from, to, Faces::Front, |_| true)?;
+        Some((h.plane, h.normal))
     }
+
 
     /// Ray against his posed mesh. Returns `Some(true)` for a hit on his
     /// left side, `Some(false)` for the right (the original maps the eight
@@ -1451,20 +1067,26 @@ fn stance_height(stance: i32) -> i32 {
 
 // ——— Saved games (docs/re/saves.md) ——————————————————————————————————————
 
+/// The mover as a saved game holds it. Version 3 stores the walker's own
+/// state (`Mover_Write` @ 0x412620 keeps the same facts: surface object,
+/// polygon, heading, local position, `+0x52`, `+0x24`, `+0xe4`); versions
+/// 1 and 2 stored the old ray-cast controller's world frame and its
+/// object-local contact, converted on load.
+#[derive(Clone, Debug)]
+enum SavedMover {
+    Walker(Mover),
+    Legacy { pos: V3, fwd: V3, up: V3, contact: Option<(usize, usize)>, air: V3 },
+}
+
 /// Everything about Mendel a saved game needs besides his brain: the
-/// mover, the agent (actuators, running costs), the respawn points and the
+/// mover, the agent (actuators, running costs), the respawn point and the
 /// counters. Parsed completely before it is applied, so a damaged file
 /// leaves the running game untouched.
 #[derive(Clone, Debug)]
 pub struct SavedCreature {
     mode: Mode,
-    pos: V3,
-    fwd: V3,
-    up: V3,
-    ints: [i32; 5], // forward, turn_d, height, hvel, stance_height
-    air: V3,
-    air_ticks: u32,
-    ground: Option<Contact>,
+    mover: SavedMover,
+    ints: [i32; 3], // forward, turn_d, stance_height
     surface: u32,
     delay: u16,
     left: i32,
@@ -1480,26 +1102,22 @@ pub struct SavedCreature {
     stance: i32,
     turn: i32,
     side: bool,
-    points: [Option<(V3, i32)>; 3], // spawn, respawn (save), safe
+    respawn: Option<Place>,
     stats: Stats,
     rng: u32,
     cue_quiet: [u16; 5],
-    /// Since save version 2: `injected`, the fall counter and limit, the
-    /// last ground flags, affliction 6's held noise.
-    hazards: (u32, u16, u16, u32, [i32; 2]),
+    /// `injected`, the fall counter and limit, affliction 6's held noise
+    /// (version 2 on; version 2 also had the last ground flags, now the
+    /// mover's `floor_flags`).
+    hazards: (u32, u16, u16, [i32; 2]),
 }
 
 impl Creature {
     pub(crate) fn saved(&self) -> SavedCreature {
         SavedCreature {
             mode: self.mode,
-            pos: self.pos,
-            fwd: self.fwd,
-            up: self.up,
-            ints: [self.forward, self.turn_d, self.height, self.hvel, self.stance_height],
-            air: self.air,
-            air_ticks: self.air_ticks,
-            ground: self.ground,
+            mover: SavedMover::Walker(self.mover),
+            ints: [self.forward, self.turn_d, self.stance_height],
             surface: self.surface,
             delay: self.delay,
             left: self.left,
@@ -1515,23 +1133,27 @@ impl Creature {
             stance: self.stance,
             turn: self.turn,
             side: self.side,
-            points: [self.spawn_point, self.save_point, self.safe_point],
+            respawn: self.respawn,
             stats: self.stats,
             rng: self.rng.0,
             cue_quiet: self.cue_quiet,
-            hazards: (self.injected, self.fall_count, self.fall_limit, self.last_ground_flags, self.noise),
+            hazards: (self.injected, self.fall_count, self.fall_limit, self.noise),
         }
     }
 
-    pub(crate) fn apply_saved(&mut self, s: SavedCreature) {
+    pub(crate) fn apply_saved(&mut self, s: SavedCreature, sim: &Sim) {
+        let valid = |on: Option<(usize, usize)>| {
+            on.filter(|&(o, p)| self.polys.get(o).and_then(|v| v.get(p)).is_some_and(|lp| lp.points.len() >= 3))
+        };
         self.mode = s.mode;
-        self.pos = s.pos;
-        self.fwd = s.fwd;
-        self.up = s.up;
-        [self.forward, self.turn_d, self.height, self.hvel, self.stance_height] = s.ints;
-        self.air = s.air;
-        self.air_ticks = s.air_ticks;
-        self.ground = s.ground.filter(|g| g.obj < self.polys.len());
+        if let Mode::Vanishing(n, After::Teleport(p)) = self.mode {
+            self.mode = Mode::Vanishing(n, After::Teleport(Place { on: valid(p.on), ..p }));
+        }
+        self.mover = match s.mover {
+            SavedMover::Walker(m) => Mover { on: valid(m.on), grounded: m.grounded && valid(m.on).is_some(), ..m },
+            SavedMover::Legacy { pos, fwd, up, contact, air } => self.legacy_mover(sim, pos, fwd, up, contact, air),
+        };
+        [self.forward, self.turn_d, self.stance_height] = s.ints;
         self.surface = s.surface;
         self.delay = s.delay;
         self.left = s.left;
@@ -1555,52 +1177,85 @@ impl Creature {
         self.stance = s.stance;
         self.turn = s.turn;
         self.side = s.side;
-        [self.spawn_point, self.save_point, self.safe_point] = s.points;
+        self.respawn = s.respawn.map(|p| Place { on: valid(p.on), ..p });
         self.stats = s.stats;
         self.rng = Lcg(s.rng);
         self.cue_quiet = s.cue_quiet;
-        (self.injected, self.fall_count, self.fall_limit, self.last_ground_flags, self.noise) = s.hazards;
+        (self.injected, self.fall_count, self.fall_limit, self.noise) = s.hazards;
         // `Creature_Read` @ 0x419950 ends any affliction (0x405f10 at
         // 0x419967): afflictions are not part of a saved game.
         self.afflictions.end();
+        self.sync(sim);
         self.build_vertices();
     }
 
-    /// inferred: the exe learns about save pads through its contacts. Every
-    /// save-pad polygon on the CD is flagged 0x22, a floor (bit 1) but not
-    /// a wall (0x100), so standing on one sets `surface`; we also test, both ways, whether his
-    /// hull segments or a vertical segment through his body cross a 0x20
-    /// polygon: "Mendel is walking on it" as the readme says.
-    fn touches_save_pad(&self, sim: &Sim) -> bool {
-        let near = self.gather_masked(sim, self.pos, 1200.0, SAVE_PAD);
-        if near.0.is_empty() {
-            return false;
+    /// A version 1–2 mover (world frame + the contact in its object's local
+    /// space) re-expressed in the walker's polygon coordinates.
+    fn legacy_mover(&self, sim: &Sim, pos: V3, fwd: V3, up: V3, contact: Option<(usize, usize)>, air: V3) -> Mover {
+        let on = contact.filter(|&(o, p)| self.polys.get(o).and_then(|v| v.get(p)).is_some_and(|lp| lp.points.len() >= 3));
+        let f = Frame::of(&self.polys, sim, on);
+        let hd = f.undir(fwd);
+        let heading = ((hd[1].atan2(hd[0]) * 1024.0 / core::f32::consts::TAU).round() as i32) & 0x3ff;
+        let local = f.unpoint(pos);
+        Mover {
+            on,
+            grounded: on.is_some(),
+            u: local[0],
+            v: local[1],
+            h: (local[2].round() as i32).max(0),
+            heading,
+            up: if on.is_some() { f.normal() } else { normalize(up) },
+            pos,
+            prev: pos,
+            air,
+            obj_rot: f.rotated.then_some(f.rot),
+            floor_flags: on.map_or(0, |(o, p)| sim.frame_flags(o, p)),
+            ..Mover::default()
         }
-        let feet = self.height as f32 + STEP_DOWN;
-        let mut segments: Vec<(V3, V3)> = HULL[..8].iter().map(|&h| (self.pos, add(self.pos, self.rotate(h)))).collect();
-        segments.push((add(self.pos, scale(self.up, 450.0)), add(self.pos, scale(self.up, -feet))));
-        segments.iter().any(|&(a, b)| {
-            let d = sub(b, a);
-            let len = length(d);
-            let dir = scale(d, 1.0 / len.max(1e-3));
-            near.0.iter().any(|t| ray_tri(a, dir, t).is_some_and(|h| h <= len))
-        })
     }
 
     /// Part of `Game_TakeSnapshot` @ 0x41d170: his current spot becomes the
-    /// respawn point (`0x4124a0`/`0x4124f0` read the mover's surface and
-    /// surface-local position; the world is restored to this very instant,
-    /// so the world position is equivalent).
+    /// respawn point, read off the mover (`Mover_GetSurface` @ 0x4124a0,
+    /// `Mover_GetLocal` @ 0x4124f0): object, polygon, `(u, v)` with `h =
+    /// 0`, heading. Airborne, that is the last floor and the last `(u, v)`.
     pub(crate) fn anchor_respawn(&mut self) {
-        if self.mode == Mode::Alive {
-            self.save_point = Some((self.pos, self.heading()));
+        if self.mode != Mode::Alive {
+            return;
         }
+        let m = &self.mover;
+        self.respawn = Some(match m.on {
+            Some(on) => Place { on: Some(on), at: [m.u, m.v, 0.0], heading: m.heading },
+            None => Place { on: None, at: m.pos, heading: m.heading },
+        });
     }
 }
 
+fn write_v3(w: &mut Writer, v: V3) {
+    v.iter().for_each(|&c| w.f32(c));
+}
+fn read_v3(r: &mut Reader) -> Result<V3, &'static str> {
+    Ok([r.f32()?, r.f32()?, r.f32()?])
+}
+
+fn write_place(w: &mut Writer, p: Option<Place>) {
+    let p = p.unwrap_or(Place { on: None, at: [0.0; 3], heading: 0 });
+    let (has, (o, q)) = (p.on.is_some() as u8, p.on.unwrap_or((0, 0)));
+    w.u8(has);
+    w.u32(o as u32);
+    w.u32(q as u32);
+    write_v3(w, p.at);
+    w.i32(p.heading);
+}
+
+fn read_place(r: &mut Reader) -> Result<Place, &'static str> {
+    let has = r.u8()? != 0;
+    let (o, q) = (r.u32()? as usize, r.u32()? as usize);
+    Ok(Place { on: has.then_some((o, q)), at: read_v3(r)?, heading: r.i32()? })
+}
+
 impl SavedCreature {
+    /// Version 3 layout (docs/re/saves.md).
     pub(crate) fn write(&self, w: &mut Writer) {
-        let v3 = |w: &mut Writer, v: V3| v.iter().for_each(|&c| w.f32(c));
         let (kind, n, after) = match self.mode {
             Mode::Absent => (0, 0, None),
             Mode::Appearing(n) => (1, n, None),
@@ -1609,32 +1264,34 @@ impl SavedCreature {
         };
         w.u8(kind);
         w.u16(n);
-        match after {
-            Some(After::Teleport(at, h)) => {
-                w.u8(1);
-                v3(w, at);
-                w.i32(h);
-            }
-            _ => {
-                w.u8(0);
-                v3(w, [0.0; 3]);
-                w.i32(0);
-            }
+        let teleport = match after {
+            Some(After::Teleport(p)) => Some(p),
+            _ => None,
+        };
+        w.u8(teleport.is_some() as u8);
+        write_place(w, teleport);
+        let m = match &self.mover {
+            SavedMover::Walker(m) => *m,
+            SavedMover::Legacy { .. } => Mover::default(), // never written: apply converts it
+        };
+        let (has, (o, q)) = (m.on.is_some() as u8, m.on.unwrap_or((0, 0)));
+        w.u8(has);
+        w.u32(o as u32);
+        w.u32(q as u32);
+        w.u8(m.grounded as u8);
+        w.f32(m.u);
+        w.f32(m.v);
+        w.i32(m.h);
+        w.i32(m.hvel);
+        w.i32(m.heading);
+        for v in [m.up, m.pos, m.prev, m.air] {
+            write_v3(w, v);
         }
-        for v in [self.pos, self.fwd, self.up] {
-            v3(w, v);
-        }
+        w.i32(m.spin);
+        w.u8(m.obj_rot.is_some() as u8);
+        m.obj_rot.unwrap_or(IDENTITY).iter().for_each(|&c| w.f32(c));
+        w.u32(m.floor_flags);
         self.ints.iter().for_each(|&i| w.i32(i));
-        v3(w, self.air);
-        w.u32(self.air_ticks);
-        let g = self.ground;
-        w.u8(g.is_some() as u8);
-        let g = g.unwrap_or(Contact { obj: 0, poly: 0, local: [0.0; 3], fwd: [0.0; 3], up: [0.0; 3] });
-        w.u32(g.obj as u32);
-        w.u32(g.poly as u32);
-        for v in [g.local, g.fwd, g.up] {
-            v3(w, v);
-        }
         w.u32(self.surface);
         w.u16(self.delay);
         w.i32(self.left);
@@ -1652,52 +1309,114 @@ impl SavedCreature {
         w.i32(self.stance);
         w.i32(self.turn);
         w.u8(self.side as u8);
-        for p in self.points {
-            w.u8(p.is_some() as u8);
-            let (at, h) = p.unwrap_or(([0.0; 3], 0));
-            v3(w, at);
-            w.i32(h);
-        }
+        w.u8(self.respawn.is_some() as u8);
+        write_place(w, self.respawn);
         let s = self.stats;
         w.u32(s.ticks_alive);
         w.f32(s.walked);
         [s.touches_posted, s.deaths, s.teleports, s.evolutions].iter().for_each(|&i| w.u32(i));
         w.u32(self.rng);
         self.cue_quiet.iter().for_each(|&q| w.u16(q));
-        let (injected, count, limit, ground, noise) = self.hazards;
+        let (injected, count, limit, noise) = self.hazards;
         w.u32(injected);
         w.u16(count);
         w.u16(limit);
-        w.u32(ground);
         noise.iter().for_each(|&n| w.i32(n));
     }
 
-    /// `version` is the saved game's: version 1 lacks the hazard block.
+    /// `version` is the saved game's: 3 is the walker's layout; 1 and 2
+    /// the ray-cast controller's (2 adds the hazard block).
     pub(crate) fn read(r: &mut Reader, version: u32) -> Result<Self, &'static str> {
-        fn v3(r: &mut Reader) -> Result<V3, &'static str> {
-            Ok([r.f32()?, r.f32()?, r.f32()?])
+        if version < 3 {
+            return Self::read_legacy(r, version);
         }
         let kind = r.u8()?;
         let n = r.u16()?;
         let teleport = r.u8()? != 0;
-        let (at, h) = (v3(r)?, r.i32()?);
-        let after = if teleport { After::Teleport(at, h) } else { After::Respawn };
-        let mode = match kind {
-            0 => Mode::Absent,
-            1 => Mode::Appearing(n.max(1)),
-            2 => Mode::Alive,
-            3 => Mode::Vanishing(n.max(1), after),
-            _ => return Err("bad creature mode"),
+        let place = read_place(r)?;
+        let after = if teleport { After::Teleport(place) } else { After::Respawn };
+        let mode = mode_of(kind, n, after)?;
+        let has = r.u8()? != 0;
+        let (o, q) = (r.u32()? as usize, r.u32()? as usize);
+        let grounded = r.u8()? != 0;
+        let (u, v, h, hvel, heading) = (r.f32()?, r.f32()?, r.i32()?, r.i32()?, r.i32()?);
+        let (up, pos, prev, air) = (read_v3(r)?, read_v3(r)?, read_v3(r)?, read_v3(r)?);
+        let spin = r.i32()?;
+        let rotated = r.u8()? != 0;
+        let mut rot = IDENTITY;
+        for c in &mut rot {
+            *c = r.f32()?;
+        }
+        let floor_flags = r.u32()?;
+        let mover = Mover {
+            on: has.then_some((o, q)),
+            grounded,
+            u,
+            v,
+            h,
+            hvel,
+            heading,
+            up,
+            pos,
+            prev,
+            air,
+            spin,
+            obj_rot: rotated.then_some(rot),
+            floor_flags,
         };
-        let (pos, fwd, up) = (v3(r)?, v3(r)?, v3(r)?);
-        let mut ints = [0; 5];
-        for i in &mut ints {
+        let ints = [r.i32()?, r.i32()?, r.i32()?];
+        let mut s = Self::read_agent(r, mode, SavedMover::Walker(mover), ints)?;
+        let has_respawn = r.u8()? != 0;
+        let respawn = read_place(r)?;
+        s.respawn = has_respawn.then_some(respawn);
+        s.read_tail(r)?;
+        let (injected, count, limit) = (r.u32()?, r.u16()?, r.u16()?);
+        s.hazards = (injected, count, limit, [r.i32()?, r.i32()?]);
+        Ok(s)
+    }
+
+    fn read_legacy(r: &mut Reader, version: u32) -> Result<Self, &'static str> {
+        let kind = r.u8()?;
+        let n = r.u16()?;
+        let teleport = r.u8()? != 0;
+        let (at, h) = (read_v3(r)?, r.i32()?);
+        let after = if teleport { After::Teleport(Place { on: None, at, heading: h }) } else { After::Respawn };
+        let mode = mode_of(kind, n, after)?;
+        let (pos, fwd, up) = (read_v3(r)?, read_v3(r)?, read_v3(r)?);
+        let mut old = [0; 5]; // forward, turn_d, height, hvel, stance_height
+        for i in &mut old {
             *i = r.i32()?;
         }
-        let air = v3(r)?;
-        let air_ticks = r.u32()?;
+        let air = read_v3(r)?;
+        let _air_ticks = r.u32()?;
         let grounded = r.u8()? != 0;
-        let contact = Contact { obj: r.u32()? as usize, poly: r.u32()? as usize, local: v3(r)?, fwd: v3(r)?, up: v3(r)? };
+        let (o, q) = (r.u32()? as usize, r.u32()? as usize);
+        // The old contact's platform-local position, forward and up: the
+        // world ones are equivalent at save time.
+        for _ in 0..3 {
+            read_v3(r)?;
+        }
+        let contact = grounded.then_some((o, q));
+        let mover = SavedMover::Legacy { pos, fwd, up, contact, air };
+        let mut s = Self::read_agent(r, mode, mover, [old[0], old[1], old[4]])?;
+        // Spawn, respawn (the save point), safe point: world positions.
+        let mut points = [None; 3];
+        for p in &mut points {
+            let has = r.u8()? != 0;
+            let (at, h) = (read_v3(r)?, r.i32()?);
+            *p = has.then_some(Place { on: None, at, heading: h });
+        }
+        s.respawn = points[1].or(points[0]);
+        s.read_tail(r)?;
+        if version >= 2 {
+            let (injected, count, limit, _ground) = (r.u32()?, r.u16()?, r.u16()?, r.u32()?);
+            s.hazards = (injected, count, limit, [r.i32()?, r.i32()?]);
+        }
+        Ok(s)
+    }
+
+    /// The agent block, common to every version.
+    fn read_agent(r: &mut Reader, mode: Mode, mover: SavedMover, ints: [i32; 3]) -> Result<Self, &'static str> {
         let surface = r.u32()?;
         let delay = r.u16()?;
         let (left, right) = (r.i32()?, r.i32()?);
@@ -1718,35 +1437,10 @@ impl SavedCreature {
         let phase = r.u16()?;
         let (stance, turn) = (r.i32()?, r.i32()?);
         let side = r.u8()? != 0;
-        let mut points = [None; 3];
-        for p in &mut points {
-            let has = r.u8()? != 0;
-            let (at, h) = (v3(r)?, r.i32()?);
-            *p = has.then_some((at, h));
-        }
-        let ticks_alive = r.u32()?;
-        let walked = r.f32()?;
-        let (touches_posted, deaths, teleports, evolutions) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
-        let stats = Stats { ticks_alive, walked, touches_posted, deaths, teleports, evolutions };
-        let rng = r.u32()?;
-        let mut cue_quiet = [0; 5];
-        for q in &mut cue_quiet {
-            *q = r.u16()?;
-        }
-        let hazards = if version >= 2 {
-            (r.u32()?, r.u16()?, r.u16()?, r.u32()?, [r.i32()?, r.i32()?])
-        } else {
-            (0, 0, 0, 0, [0; 2])
-        };
         Ok(SavedCreature {
             mode,
-            pos,
-            fwd,
-            up,
+            mover,
             ints,
-            air,
-            air_ticks,
-            ground: grounded.then_some(contact),
             surface,
             delay,
             left,
@@ -1762,20 +1456,44 @@ impl SavedCreature {
             stance,
             turn,
             side,
-            points,
-            stats,
-            rng,
-            cue_quiet,
-            hazards,
+            respawn: None,
+            stats: Stats::default(),
+            rng: 0,
+            cue_quiet: [0; 5],
+            hazards: (0, 0, 0, [0; 2]),
         })
     }
+
+    /// Stats, brain RNG and cue timers, common to every version.
+    fn read_tail(&mut self, r: &mut Reader) -> Result<(), &'static str> {
+        let ticks_alive = r.u32()?;
+        let walked = r.f32()?;
+        let (touches_posted, deaths, teleports, evolutions) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+        self.stats = Stats { ticks_alive, walked, touches_posted, deaths, teleports, evolutions };
+        self.rng = r.u32()?;
+        for q in &mut self.cue_quiet {
+            *q = r.u16()?;
+        }
+        Ok(())
+    }
 }
+
+fn mode_of(kind: u8, n: u16, after: After) -> Result<Mode, &'static str> {
+    Ok(match kind {
+        0 => Mode::Absent,
+        1 => Mode::Appearing(n.max(1)),
+        2 => Mode::Alive,
+        3 => Mode::Vanishing(n.max(1), after),
+        _ => return Err("bad creature mode"),
+    })
+}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use galapagos_formats::creature::overlay_for_age;
-    use galapagos_formats::worlds::Archive;
+    use galapagos_formats::worlds::{Archive, Object};
 
     pub(super) fn data() -> Option<Vec<u8>> {
         std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../originals/mounted/install/data/worlds")).ok()
@@ -1867,7 +1585,7 @@ mod tests {
         assert!([3, 6, 9].contains(&poly) && c.up[2] > 0.95 && c.pos[2] > 4440.0, "upright on top of the pad, poly {poly}, z = {}", c.pos[2]);
         assert!(!sim.visible()[160 - 1], "the upper level sleeps");
 
-        sim.creature.as_mut().unwrap().place([-1110.0, -19100.0, 3959.0], 0); // into the lift platform #77
+        sim.creature.as_mut().unwrap().drop_at([-1110.0, -19100.0, 3959.0], 0); // into the lift platform #77
         let mut woke = None;
         for t in 0..3 * sim::TICKS_PER_SECOND {
             sim.step(&mut mesh);
@@ -1897,10 +1615,10 @@ mod tests {
         for _ in 0..60 * sim::TICKS_PER_SECOND {
             sim.step(&mut mesh);
             let c = sim.creature.as_ref().unwrap();
-            let Some(g) = c.ground else { continue };
+            let Some((o, p)) = c.ground() else { continue };
             grounded += 1;
             upright += (c.up[2] > 0.9) as u32;
-            floors += (sim.state_flags(g.obj, g.poly) & FLOOR != 0) as u32;
+            floors += (sim.frame_flags(o, p) & FLOOR != 0) as u32;
         }
         let c = sim.creature.as_ref().unwrap();
         println!("{grounded} grounded ticks, {upright} upright, {floors} on floor polygons; walked {}", c.stats.walked as i32);
@@ -1925,13 +1643,6 @@ mod tests {
         a.set_target(0);
         a.step(0, 0);
         assert_eq!(a.value, last);
-    }
-
-    #[test]
-    fn ray_hits_a_triangle() {
-        let t = Tri { a: [0.0; 3], e1: [10.0, 0.0, 0.0], e2: [0.0, 10.0, 0.0], normal: UP, obj: 0, poly: 0, flags: SOLID };
-        assert_eq!(ray_tri([1.0, 1.0, 5.0], DOWN, &t), Some(5.0));
-        assert_eq!(ray_tri([11.0, 1.0, 5.0], DOWN, &t), None);
     }
 
     /// One minute of section 0 after the skip: the world and Mendel make
@@ -1986,7 +1697,7 @@ mod tests {
                 let c = scale(pts.iter().fold([0.0; 3], |a, &p| add(a, p)), 1.0 / pts.len() as f32);
                 tried += 1;
                 let mendel = sim.creature.as_mut().unwrap();
-                mendel.place(add(c, scale(UP, 400.0)), 0);
+                mendel.drop_at(add(c, scale(UP, 400.0)), 0);
                 mendel.mode = Mode::Alive;
                 let mut on = false;
                 for _ in 0..24 {
@@ -2184,7 +1895,7 @@ mod hazard_tests {
             if mode == 3 {
                 closest = closest.min(dist(&sim));
             }
-            // Mid-chase, a saved game carries the ball's state (GLPS v2).
+            // Mid-chase, a saved game carries the ball's state (GLPS v2 on).
             if t == 40 {
                 sim.take_snapshot(); // what the Save dialog does
                 let bytes = sim.save_game();
@@ -2209,7 +1920,7 @@ mod hazard_tests {
         let pole = sim.position_of(55).map(|v| v as f32);
         sim.events.clear();
         let c = sim.creature.as_mut().unwrap();
-        c.place(add(pole, [0.0, 0.0, -1500.0]), 0);
+        c.drop_at(add(pole, [0.0, 0.0, -1500.0]), 0);
         c.mode = Mode::Alive;
         sim.debug_goto(ball, 3);
         let mut bite = None;
@@ -2226,3 +1937,286 @@ mod hazard_tests {
         assert!(growls > 0, "it growls / bites (predator bank)");
     }
 }
+
+/// The polygon walker against the CD (docs/re/mendel.md §2.2): tilted
+/// pads, the upside-down start of section 2, seams between polygons and
+/// saved games with a tilted contact. They skip themselves without data.
+#[cfg(test)]
+mod walker_tests {
+    use super::tests::{data, world};
+    use super::*;
+    use crate::walker::Mover;
+    use galapagos_formats::logic::PortalAction;
+    use galapagos_formats::worlds::{Archive, Object};
+
+    /// Runs until Mendel is alive (the section's `Strt` spawned him).
+    fn until_alive(sim: &mut Sim, mesh: &mut WorldMesh, secs: u32) {
+        for _ in 0..secs * sim::TICKS_PER_SECOND {
+            sim.step(mesh);
+            if sim.creature.as_ref().unwrap().mode == Mode::Alive {
+                return;
+            }
+        }
+        panic!("Mendel never came alive");
+    }
+
+    /// Every teleport of section `s` whose destination polygon does not
+    /// face +z: (object index, params entry, polygon, local normal).
+    fn tilted_teleports(d: &[u8], s: usize) -> Vec<(usize, usize, usize, V3)> {
+        let a = Archive::parse(d).unwrap();
+        let section = a.world(s).unwrap();
+        let polys = crate::walker::local_polys(&section);
+        let mut out = Vec::new();
+        for (i, o) in section.objects.iter().enumerate() {
+            let Object::World(w) = o else { continue };
+            for (e, p) in w.logic.params.iter().enumerate() {
+                let PortalAction::Teleport { mode, .. } = p.portal() else { continue };
+                let Some(lp) = polys[i].get(mode.max(0) as usize).filter(|lp| lp.points.len() >= 3) else { continue };
+                if lp.normal[2] < 0.99 && &w.kind == b"Tele" {
+                    out.push((i, e, mode as usize, lp.normal));
+                }
+            }
+        }
+        out
+    }
+
+    /// Section 1's teleporters put Mendel on pads that face +y (the level
+    /// stands on its side there). Each lands him on its polygon, standing
+    /// in its frame (his up = its normal), and he walks off without
+    /// falling: the polygon is his floor whatever way it faces.
+    #[test]
+    fn teleports_onto_tilted_pads_in_section1() {
+        let Some(d) = data() else { return };
+        let pads = tilted_teleports(&d, 1);
+        assert!(pads.len() >= 18, "section 1 has its sideways pads ({})", pads.len());
+        let (mut sim, mut mesh) = world(&d, 1);
+        sim.wake_all = true;
+        until_alive(&mut sim, &mut mesh, 30);
+        let mut report = Vec::new();
+        for &(i, entry, poly, normal) in &pads {
+            // The pad's own trigger (portal kind 1/2/7): it queues the
+            // teleport; Mendel vanishes, then rematerialises on the pad.
+            let c = sim.creature.as_mut().unwrap();
+            c.drop_at([0.0, 0.0, 1.0e6], 0); // far from every pad, so the request counts
+            c.mode = Mode::Alive;
+            sim.debug_trigger(i, entry, &mut mesh);
+            let mut landed = None;
+            for _ in 0..3 * sim::TICKS_PER_SECOND {
+                sim.step(&mut mesh);
+                let c = sim.creature.as_ref().unwrap();
+                if c.mode == Mode::Alive {
+                    landed = Some((c.ground(), c.up, c.mover.h, c.stance_height));
+                    break;
+                }
+            }
+            let (ground, up, h, stance) = landed.expect("he rematerialises");
+            let want = sim::transform([0; 3], sim.pose(i).1);
+            let wn = [
+                want[0] * normal[0] + want[1] * normal[1] + want[2] * normal[2],
+                want[3] * normal[0] + want[4] * normal[1] + want[5] * normal[2],
+                want[6] * normal[0] + want[7] * normal[1] + want[8] * normal[2],
+            ];
+            assert_eq!(ground, Some((i, poly)), "pad #{} poly {poly}: attached to it", i + 1);
+            assert!(dot(up, wn) > 0.999, "pad #{}: upright in its frame, up {up:?} vs normal {wn:?}", i + 1);
+            assert!((h - stance).abs() <= 2, "pad #{}: at his stance height ({h} vs {stance})", i + 1);
+            // Two seconds of his own walking: still on a floor at the end,
+            // never a long fall.
+            let (mut grounded, mut longest_fall) = (0, 0);
+            for _ in 0..2 * sim::TICKS_PER_SECOND {
+                sim.step(&mut mesh);
+                let c = sim.creature.as_ref().unwrap();
+                grounded += c.ground().is_some() as u32;
+                longest_fall = longest_fall.max(c.fall_count);
+            }
+            let c = sim.creature.as_ref().unwrap();
+            report.push((i + 1, poly, grounded, longest_fall, c.stats.walked as i32));
+            assert!(grounded * 10 >= 2 * sim::TICKS_PER_SECOND * 9, "pad #{}: grounded {grounded} of 48 ticks", i + 1);
+            assert_eq!(c.mode, Mode::Alive, "pad #{}: alive", i + 1);
+        }
+        println!("pads (id, poly, grounded ticks /48, longest fall, walked): {report:?}");
+    }
+
+    /// Section 2 begins upside down: its `Strt` #194 puts Mendel on a
+    /// polygon facing −z, and the walker stands him on it, his up −z.
+    #[test]
+    fn section2_starts_on_its_downward_start_polygon() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 2);
+        sim.wake_all = true;
+        for _ in 0..30 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            if sim.creature.as_ref().unwrap().mode != Mode::Absent {
+                break;
+            }
+        }
+        let c = sim.creature.as_ref().unwrap();
+        let (o, p) = c.ground().expect("standing from the first tick");
+        println!("section 2 start: on #{} poly {p}, up {:?}, pos {:?}", o + 1, c.up, c.pos);
+        assert_eq!(o + 1, 194, "on the Strt object");
+        assert!(c.up[2] < -0.999, "upside down: up {:?}", c.up);
+        // His origin hangs his stance height *below* the polygon.
+        let lp = &c.polys[o][p];
+        let plane = sim::apply(&sim::transform(sim.pose(o).0, sim.pose(o).1), lp.points[0]);
+        assert!((plane[2] - c.pos[2] - c.stance_height as f32).abs() < 2.0, "origin {} under the plane {}", c.pos[2], plane[2]);
+    }
+
+    /// Walking across the seam between two polygons of one floor never
+    /// lets go. Section 0's arrival pad (#82 on #83) is a flat top with two
+    /// sloping ramps; driven straight from the top across a ramp, the
+    /// mover goes from polygon to polygon (re-attaching at each seam,
+    /// turning across the hinge) and is grounded every tick until he walks
+    /// off the ramp's far end.
+    #[test]
+    fn crossing_polygon_seams_keeps_him_grounded() {
+        let Some(d) = data() else { return };
+        let (mut sim, _mesh) = world(&d, 0);
+        let c = sim.creature.take().unwrap();
+        let pad = 82 - 1;
+        let (pos, rot) = sim.pose(pad);
+        let m = sim::transform(pos, rot);
+        let top = sim::apply(&m, c.polys[pad][2].centre);
+        let mut crossed = 0;
+        for ramp in [0usize, 1] {
+            let rc = sim::apply(&m, c.polys[pad][ramp].centre);
+            let dir = normalize([rc[0] - top[0], rc[1] - top[1], 0.0]);
+            let heading = (dir[1].atan2(dir[0]) * 1024.0 / core::f32::consts::TAU).round() as i32;
+            let mut w = Mover::default();
+            w.place(&c.polys, &mut sim, None, add(top, [0.0, 0.0, 100.0]), heading, 124);
+            assert!(w.grounded && w.on == Some((pad, 2)), "placed over the top, he stands on it: {:?}", w.on);
+            let mut seq = vec![w.on];
+            let mut posted = Vec::new();
+            let mut let_go = None;
+            for t in 0..300 {
+                let near = Near::gather(&c.polys, &sim, w.pos, 3200.0, SOLID | FLOOR | HAZARD);
+                let drive = Drive { forward: 30, turn: 0, stance: 124, gravity: -7, injected: 0 };
+                w.step(&c.polys, &mut sim, &near, &drive, &mut posted);
+                if !w.grounded {
+                    let_go = Some((t, w.pos));
+                    break;
+                }
+                if seq.last() != Some(&w.on) {
+                    seq.push(w.on);
+                }
+            }
+            println!("towards ramp {ramp}: polygons {seq:?}, let go {let_go:?}, now at {:?} (walked {} ticks)", w.pos, let_go.map_or(300, |l| l.0));
+            if seq.iter().any(|&o| o == Some((pad, ramp))) {
+                crossed += 1;
+                // If he let go, it was past the ramp's lower end (or off
+                // the side where it meets the ground), never on the seam.
+                if let Some((_, at)) = let_go {
+                    let lp = &c.polys[pad][ramp];
+                    let lowest = lp.points.iter().map(|p| sim::apply(&m, *p)[2]).fold(f32::MAX, f32::min);
+                    assert!(at[2] < lowest + 200.0, "let go at the ramp's lower end ({lowest}), not on a seam: {at:?}");
+                }
+            }
+        }
+        assert!(crossed >= 1, "he crossed from the top onto a ramp");
+    }
+
+    /// A saved game taken while Mendel stands on a tilted pad (section 1,
+    /// facing +y) keeps the full contact: loading puts him back on that
+    /// polygon in its frame, saving again gives the same bytes, and a
+    /// death respawns him there (the respawn point is a polygon place).
+    #[test]
+    fn saved_game_keeps_a_tilted_contact() {
+        let Some(d) = data() else { return };
+        let pads = tilted_teleports(&d, 1);
+        let (i, entry, poly, _) = pads[0];
+        let (mut sim, mut mesh) = world(&d, 1);
+        sim.wake_all = true;
+        until_alive(&mut sim, &mut mesh, 30);
+        let c = sim.creature.as_mut().unwrap();
+        c.drop_at([0.0, 0.0, 1.0e6], 0);
+        sim.debug_trigger(i, entry, &mut mesh);
+        for _ in 0..3 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            if sim.creature.as_ref().unwrap().mode == Mode::Alive {
+                break;
+            }
+        }
+        let c = sim.creature.as_ref().unwrap();
+        assert_eq!(c.ground(), Some((i, poly)));
+        let (up, pos) = (c.up, c.pos);
+        sim.take_snapshot();
+        let bytes = sim.save_game();
+        let (mut other, mut other_mesh) = world(&d, 1);
+        other.load_game(&bytes, &mut other_mesh).unwrap();
+        let o = other.creature.as_ref().unwrap();
+        assert_eq!(o.ground(), Some((i, poly)), "loaded on the same polygon");
+        assert!(dot(o.up, up) > 0.9999 && length(sub(o.pos, pos)) < 0.01, "same frame and spot");
+        assert!(other.save_game() == bytes, "load then save is the identity");
+        // Die: back on the tilted pad, in its frame.
+        other.requests.push(Request::Respawn);
+        for _ in 0..3 * sim::TICKS_PER_SECOND {
+            other.step(&mut other_mesh);
+            if other.creature.as_ref().unwrap().mode == Mode::Alive {
+                break;
+            }
+        }
+        let o = other.creature.as_ref().unwrap();
+        println!("respawned on {:?} up {:?} ({} from the saved spot)", o.ground(), o.up, length(sub(o.pos, pos)));
+        assert_eq!(o.ground(), Some((i, poly)), "respawned on the pad");
+        assert!(dot(o.up, up) > 0.999, "in its frame");
+    }
+
+    /// Version 2 saved games still open: the old world-space contact is
+    /// re-expressed in the walker's polygon coordinates.
+    #[test]
+    fn version2_creature_converts_to_the_walker() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 0);
+        for _ in 0..10 * sim::TICKS_PER_SECOND {
+            sim.skip_held = (120..122).contains(&sim.tick);
+            sim.step(&mut mesh);
+        }
+        let c = sim.creature.as_ref().unwrap();
+        let (on, pos, up, heading) = (c.ground().unwrap(), c.pos, c.up, c.heading());
+        // The v2 layout, written by hand: mode, pos/fwd/up, five ints, air,
+        // air ticks, the contact, then the agent block and the old points.
+        let mut w = Writer::default();
+        w.u8(2);
+        w.u16(0);
+        w.u8(0);
+        [0.0f32; 3].iter().for_each(|&x| w.f32(x));
+        w.i32(0);
+        for v in [pos, c.fwd, up] {
+            v.iter().for_each(|&x| w.f32(x));
+        }
+        [0, 0, c.mover.h, 0, c.stance_height].iter().for_each(|&x| w.i32(x));
+        [0.0f32; 3].iter().for_each(|&x| w.f32(x));
+        w.u32(0);
+        w.u8(1);
+        w.u32(on.0 as u32);
+        w.u32(on.1 as u32);
+        [0.0f32; 9].iter().for_each(|&x| w.f32(x));
+        let mut agent = Writer::default();
+        c.saved().write(&mut agent);
+        // In the v3 layout the agent block (surface .. side, 188 bytes)
+        // follows the mode (29 bytes), the mover (123) and three ints (12).
+        let start = 29 + 123 + 12;
+        w.bytes(&agent.0[start..start + 188]);
+        for _ in 0..3 {
+            w.u8(1);
+            pos.iter().for_each(|&x| w.f32(x));
+            w.i32(heading);
+        }
+        let n = agent.0.len();
+        w.bytes(&agent.0[n - 16 - 38..n - 16]); // stats, rng, cue timers
+        w.u32(0);
+        w.u16(0);
+        w.u16(0);
+        w.u32(0);
+        w.i32(0);
+        w.i32(0);
+        let mut r = Reader { data: &w.0, at: 0 };
+        let s = SavedCreature::read(&mut r, 2).unwrap();
+        assert_eq!(r.at, w.0.len(), "the whole v2 record was read");
+        let mut c = sim.creature.take().unwrap();
+        c.apply_saved(s, &sim);
+        sim.creature = Some(c);
+        let c = sim.creature.as_ref().unwrap();
+        assert_eq!(c.ground(), Some(on), "the contact survives");
+        assert!(length(sub(c.pos, pos)) < 1.0 && dot(c.up, up) > 0.999 && (c.heading() - heading).abs() <= 1);
+    }
+}
+
