@@ -352,6 +352,22 @@ pos = first_stream_with_valid_crc(overlay)
           (<code>0x40a640</code>). We used trilinear mipmaps and a <code>fract()</code> for wrapping, which drew thin dashed
           seams across panels and floors. Plain bilinear with the sampler's own repeat removes them.
         </p>
+        <h3>The predator that never shipped</h3>
+        <p>
+          The exe knows a fourth hunter, <code>PMan</code>, and no world on the CD uses it. Its chase
+          (<code>0x415c40</code>) is the fork's, instruction for instruction, with two differences: it targets
+          Mendel the way the ball does, giving up and going home when he's camouflaged, and its bite carries no
+          lethal bits. Its probes reach his touch hull, his eyes see a hazard, he flinches, and he lives. A
+          fright, perhaps cut before release. With nothing on the disc to show it, we test it by re-classing
+          World 2's fork as a <code>PMan</code> and checking every formula: the overshooting aim, the growl every 16
+          ticks, the harmless bite.
+        </p>
+        <p>
+          Reading the shared chase this closely paid off for the hunters that do ship. The heading input is taken
+          only when a predator re-aims and is then held, not recomputed every tick. And a predator's matrix is
+          built from (yaw, pitch, roll) in the order the exe stores them, so the fork now turns its nose towards
+          its prey.
+        </p>
         <h3>Seven ways to leave the world</h3>
         <p>
           Until now, when Mendel died or a predator vanished, our port just blinked them. In 1997 these moments
@@ -838,6 +854,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> The seven transition effects (fade, burst, squash, jolt, melt, stretch, shatter) replace the blinking, for Mendel and the predators; gates white out before the level changes.</li>
           <li><time>2026‑11‑02</time> Textures sampled like Direct3D (bilinear, no mipmaps): no more dashed seams. Mendel's legs and the light panels measured against the footage: the legs match, and the panels follow this CD's exe.</li>
           <li><time>2026‑11‑02</time> Rotation conditions now read the motion-key axes (rx, ry, rz), not field offsets. All 37 on the CD test rz in World 5, so nothing visible changes.</li>
+          <li><time>2026‑11‑02</time> <code>PMan</code>, the unused fourth predator, ported and tested on a re-classed fork; the shared chase now holds its heading between re-aims, and predators face their prey.</li>
           <li><time>2026‑11‑02</time> The bounce response (<code>0x408c50</code>) ported exactly, for predators and the camera: a perpendicular push only when the probe went behind the wall, plus the stored normal's nudge.</li>
           <li><time>2026‑11‑02</time> Level load enters every initial state before the first tick, as <code>0x4222d0</code> does: World 2 (and World 1) now spawn Mendel without "Wake every machine".</li>
           <li><time>2026‑11‑02</time> Blinking reported again: traced to a browser serving the pre-fix engine from its cache. Checked against the footage; the engine is now always revalidated before use.</li>
