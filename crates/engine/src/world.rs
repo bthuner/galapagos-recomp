@@ -16,7 +16,7 @@
 //!   polygon's plane; a quad's fourth vertex lands on (127,127).
 //! * `layer` indexes a TEXTURE_2D_ARRAY; -1 means "untextured" (no
 //!   appearance data) and -2 "not drawn in the current appearance state"
-//!   (disabled, or a negative texture number: invisible collision
+//!   (a polygon whose frames never gave it a texture: invisible collision
 //!   geometry), kept in the buffer so a state change can reveal it by
 //!   rewriting one float per vertex.
 //! * Vertices are *object-local*. Each object carries a 4×4 transform, so
@@ -186,18 +186,32 @@ impl WorldMesh {
         //   -5     hide the *whole object* (a flag passed to 0x4022e0 after
         //          the polygon loop): start pad #57 and the birth tube #54
         //          carry it, so their stacks are never drawn;
-        //   -4     an object-level flag (0x4022f0), meaning unknown;
+        //   -4     a per-polygon flag (0x4023b0 → polygon +0x62; its
+        //          last value also feeds the object flag 0x4022f0), meaning
+        //          unknown (inferred: a shading mode); kept as is here;
         //   -2/-3  change nothing: the polygon keeps its previous texture.
         // On the CD, -2/-3 frames sit inside flip-books (e.g. pad #83:
         // 9, -3, -3), so "previous" is the last earlier frame of the same
         // list with a real texture. inferred: resolving it from the list
         // rather than from render history keeps snapshots reproducible.
-        // Without one, the polygon stays hidden.
+        // A list with none (section 1's pad #163, states 6 and 7: only
+        // -2/-3 frames) keeps the texture the polygon shows now, as the
+        // exe does; only a polygon that never had one stays hidden.
+        //
+        // The frame's `enabled` byte plays no part here: 0x423730 and the
+        // flip-book step 0x423810 set texture, shade and texel offset of
+        // every frame, and only the flag copies (0x42df50, 0x42e050) test
+        // `enabled > 0`. Flip-books are mostly one enabled frame followed
+        // by disabled `-2`/`-3` frames that just slide the offset (pad #49
+        // of section 1: `(8, e1), (-3, e0, +4/+4) × 31`), so reading
+        // "disabled" as "hidden" blanked them 31 ticks out of 32.
         let previous = frames[..index.min(frames.len())].iter().rev().find(|f| f.texture >= 0).map(|f| f.texture as f32);
         let layer = match frame {
-            Some(f) if f.enabled == 0 => -2.0,
             Some(f) if f.texture >= 0 => f.texture as f32,
-            Some(_) => previous.unwrap_or(-2.0),
+            Some(_) => previous.unwrap_or_else(|| {
+                let now = self.vertices.get(r.first as usize * FLOATS_PER_VERTEX + 5).copied().unwrap_or(-2.0);
+                if r.count > 0 && now >= 0.0 { now } else { -2.0 }
+            }),
             None => -1.0,
         };
         if let Some(h) = self.hides_object.get_mut(draw).and_then(|h| h.get_mut(poly)) {

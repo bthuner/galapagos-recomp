@@ -2060,6 +2060,77 @@ mod walker_tests {
         assert!((plane[2] - c.pos[2] - c.stance_height as f32).abs() < 2.0, "origin {} under the plane {}", c.pos[2], plane[2]);
     }
 
+    /// Section 2's belt #197 (polygon 2, flags 0x6, facing −z next to the
+    /// start #194) carries Mendel at the exe's speed, and that speed is
+    /// what sweeps him off it: its flip-book slides the texture 8 texels a
+    /// frame along t (`v`: 0, −8, −16 …), one frame a tick; its texel
+    /// basis is ∂v/∂t = 2220/127 = 17.48 units, stored × −256 as −4474
+    /// (0x41d6d0 with 0x460288 = 1.0, 0x46028c = −256.0); `0x41dc30` adds
+    /// `(−4474 · −8 >> 8) >> 0 = 139` to `v` every tick. The belt is 2220
+    /// wide across that flow, so standing still he leaves its far edge in
+    /// about 16 ticks, whatever he does.
+    #[test]
+    fn section2_belt_carries_him_at_the_exes_speed() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 2);
+        let belt = 197 - 1;
+        // Before its appearance is applied the scroll record is the zeros
+        // 0x41d9e0 wrote: no flow.
+        assert_eq!(sim.uv_step(belt, 2), (0, 0), "no frame applied yet");
+        sim.wake_all = true;
+        for _ in 0..4 {
+            sim.step(&mut mesh);
+        }
+        assert_eq!(sim.uv_step(belt, 2), (0, -8), "8 texels a frame along t");
+        let c = sim.creature.take().unwrap();
+        let m = c.polys[belt][2].texel.map(|x| (-256.0 * x) as i32);
+        assert_eq!(m, [-20883, 0, 0, -4474], "the exe's short basis");
+        let mut w = Mover::default();
+        w.place(&c.polys, &mut sim, Some((belt, 2)), [5000.0, -1800.0, 124.0], 0, 124);
+        assert!(w.grounded && w.on == Some((belt, 2)), "standing on the belt: {:?}", w.on);
+        let drive = Drive { forward: 0, turn: 0, stance: 124, gravity: -7, injected: 0 };
+        let mut posted = Vec::new();
+        let mut off = None;
+        for t in 0..40 {
+            let (u, v) = (w.u, w.v);
+            let near = Near::gather(&c.polys, &sim, w.pos, 3200.0, SOLID | FLOOR | HAZARD);
+            w.step(&c.polys, &mut sim, &near, &drive, &mut posted);
+            if w.on != Some((belt, 2)) || !w.grounded {
+                off = Some((t, v));
+                break;
+            }
+            assert_eq!((w.u - u, w.v - v), (0.0, 139.0), "tick {t}: one conveyor step");
+        }
+        let (t, v) = off.expect("the belt carries him off");
+        assert!(t <= 16 && v > -140.0, "off its v = 0 edge (world y = −37000) after {t} ticks, last v {v}");
+    }
+
+    /// Section 1's sideways pads are drawn on every tick. Their flip-books
+    /// are one enabled frame and 31 disabled `-3` frames that only slide
+    /// the texture (#49 polygon 0: `(8, e1), (-3, e0, +4/+4) × 31`); the
+    /// exe's frame appliers (0x423730, 0x423810) never read `enabled`, so
+    /// the polygon keeps texture 8 throughout.
+    #[test]
+    fn section1_pads_stay_drawn_through_their_flip_books() {
+        let Some(d) = data() else { return };
+        let pads = tilted_teleports(&d, 1);
+        let (mut sim, mut mesh) = world(&d, 1);
+        sim.wake_all = true;
+        let layer = |mesh: &WorldMesh, i: usize, p: usize| {
+            let draw = mesh.draw_of_object[i].unwrap();
+            let r = mesh.poly_ranges[draw][p];
+            (mesh.visible[draw], mesh.vertices[r.first as usize * FLOATS_PER_VERTEX + 5])
+        };
+        for t in 0..64 {
+            sim.step(&mut mesh);
+            for &(i, _, poly, _) in &pads {
+                let (vis, l) = layer(&mesh, i, poly);
+                assert!(vis == 1 && l >= 0.0, "tick {t}: pad #{} polygon {poly} drawn (visible {vis}, layer {l})", i + 1);
+            }
+        }
+        assert_eq!(layer(&mesh, 49 - 1, 0).1, 8.0, "#49 keeps texture 8");
+    }
+
     /// Walking across the seam between two polygons of one floor never
     /// lets go. Section 0's arrival pad (#82 on #83) is a flat top with two
     /// sloping ramps; driven straight from the top across a ramp, the

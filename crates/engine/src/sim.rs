@@ -369,23 +369,42 @@ impl Sim {
 
     /// The texture offset step of polygon `p` this tick, in texels
     /// `(du, dv)`: what `0x41dc30` reads from the polygon's scroll record
-    /// (`+0x1d0`, 16 bytes: current and previous offset, filled by
-    /// `0x41dbc0` each time a frame is applied), each wrapped like the
-    /// exe: `(cur & 0x7f) − (prev & 0x7f)` folded into `−64..64`.
-    /// inferred: "previous" is the flip-book's previous frame (cyclic when
-    /// the state loops), since flip-books advance one frame a tick.
+    /// (`+0x1d0`, 16 bytes: current and previous offset), each wrapped like
+    /// the exe: `(cur & 0x7f) − (prev & 0x7f)` folded into `−64..64`.
+    ///
+    /// The record (observed): built zeroed (`0x41d9e0`), so a polygon whose
+    /// appearance was never applied does not move him; every frame applied
+    /// (`0x423730` on a state change, `0x423810` per flip-book step) goes
+    /// through slot 0x14 `0x41daf0`, which **resets** it (prev = cur = the
+    /// new frame's offset) when the texture number changes, then slot 0x18
+    /// `0x41dbc0`: prev = cur, cur = the frame's `(u, v)`. Flip-books step
+    /// once per tick (`Game_Tick` → `0x4284f0` → object slot 0x28 →
+    /// `0x423420` → `0x423810`; the record takes the frame's own offset,
+    /// not the sub-tick interpolated one), so the step is the difference
+    /// of consecutive frames. A stopped flip-book (non-looping state at its
+    /// end, or an object in a switched-off folder) keeps its last step.
+    /// inferred: on the first tick of a state, "previous" is taken as the
+    /// list's last frame (looping) instead of the old state's frame, which
+    /// would need the record saved with the game.
     pub(crate) fn uv_step(&self, i: usize, p: usize) -> (i32, i32) {
         let Some(o) = self.objs.get(i) else { return (0, 0) };
         let Some(state) = o.obj.as_ref().and_then(|w| w.appearance.as_ref()).and_then(|s| s.get(o.appearance)) else {
             return (0, 0);
         };
+        // Never applied: the record is still the zeros 0x41d9e0 wrote.
+        let Some(&at) = o.poly_frame.get(p) else { return (0, 0) };
         let Some(frames) = state.polygons.get(p).filter(|f| f.len() > 1) else { return (0, 0) };
-        let at = (*o.poly_frame.get(p).unwrap_or(&0)).min(frames.len() - 1);
+        let looping = state.looping != 0;
+        let at = at.min(frames.len() - 1);
         let prev = match at {
-            0 if state.looping != 0 => frames.len() - 1,
+            0 if looping => frames.len() - 1,
             0 => return (0, 0),
             k => k - 1,
         };
+        // 0x41daf0: a new texture number resets the record.
+        if frames[at].texture >= 0 && Some(frames[at].texture) != last_texture(frames, prev, looping) {
+            return (0, 0);
+        }
         let fold = |a: i16, b: i16| {
             let d = (a as i32 & 0x7f) - (b as i32 & 0x7f);
             if d > 0x40 { d - 0x80 } else if d < -0x40 { d + 0x80 } else { d }
@@ -640,8 +659,8 @@ impl Sim {
         }
     }
 
-    /// Ray pick against every visible polygon whose current appearance frame
-    /// is pickable (flags & 0xfffffffe), like `World_Pick` @ 0x4089e0.
+    /// Ray pick against every visible polygon whose flags are pickable
+    /// (flags & 0xfffffffe), like `World_Pick` @ 0x4089e0.
     /// Returns the 1-based id of the nearest hit.
     #[cfg(test)]
     pub fn pick(&self, origin: [f32; 3], dir: [f32; 3]) -> Option<u16> {
@@ -657,13 +676,14 @@ impl Sim {
             if !visible[i] {
                 continue;
             }
-            let (Some(m), Some(states)) = (obj.mesh.as_ref(), obj.appearance.as_ref()) else { continue };
-            let Some(state) = states.get(o.appearance) else { continue };
+            let Some(m) = obj.mesh.as_ref() else { continue };
             let t = transform(o.pos, o.rot);
             for (p, poly) in m.polygons.iter().enumerate() {
-                let frame = state.polygons.get(p).and_then(|f| f.get(*o.poly_frame.get(p).unwrap_or(&0)));
-                let Some(f) = frame else { continue };
-                if f.flags & 0xffff_fffe == 0 || f.enabled == 0 {
+                // The polygon's flag-array entry (`0x408730` → `0x409680`),
+                // not its current flip-book frame: a disabled frame keeps
+                // the flags the last enabled one left.
+                let flags = o.flags.get(p).copied().unwrap_or(0);
+                if flags & 0xffff_fffe == 0 {
                     continue;
                 }
                 let pts: Vec<[f32; 3]> = poly
@@ -674,7 +694,7 @@ impl Sim {
                 for k in 1..pts.len().saturating_sub(1) {
                     if let Some(d) = ray_triangle(origin, dir, pts[0], pts[k], pts[k + 1]) {
                         if best.is_none_or(|(bd, _, _)| d < bd) {
-                            best = Some((d, i as u16 + 1, f.flags));
+                            best = Some((d, i as u16 + 1, flags));
                         }
                     }
                 }
@@ -791,6 +811,14 @@ pub(crate) fn angles_of(x: [f32; 3], y: [f32; 3], z: [f32; 3]) -> [i32; 3] {
 fn initial_flags(o: Option<&WorldObject>) -> Vec<u32> {
     let Some(state) = o.and_then(|w| w.appearance.as_ref()).and_then(|s| s.first()) else { return Vec::new() };
     state.polygons.iter().map(|f| f.first().filter(|f| (f.enabled as i8) > 0).map_or(0, |f| f.flags)).collect()
+}
+
+/// The texture number polygon frames up to `at` left set (the last frame
+/// with a texture ≥ 0; cyclically if the state loops): `-2`/`-3`/`-4`/`-5`
+/// frames do not touch it (0x423730, 0x423810).
+fn last_texture(frames: &[galapagos_formats::worlds::PolyFrame], at: usize, looping: bool) -> Option<i16> {
+    let wrap = (at + 1..frames.len()).rev().filter(move |_| looping);
+    (0..=at.min(frames.len().saturating_sub(1))).rev().chain(wrap).map(|k| frames[k].texture).find(|&t| t >= 0)
 }
 
 /// The flags the last enabled frame up to `at` left (cyclically, if the

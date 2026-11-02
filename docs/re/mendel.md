@@ -281,18 +281,54 @@ moving, turning or rolling object carries him (slot 6 re-derives his
 world position from its current transform every tick). The capsule
 ride needs nothing else.
 
-**Conveyors** (`0x41dc30`): a polygon whose flags have bits 2..3
-(`0x4`, `0x8`, `0xc`) has a scroll record (`GameObject_BuildTextureScroll`
-@ `0x41d9e0`): its texel basis (`0x41d6d0`: the Jacobian of the polygon
-frame's `(u, v)` with respect to the default texture coordinates
-`(0,127) (0,0) (127,0)` of vertices 0, 1, 2, stored × −256 as shorts) and
-the last two texture offsets (`0x41dbc0`, refreshed each time a frame is
-applied). Grounded on it, `(u, v) += basis · (cur − prev) >> 8 >> shift`,
-offsets `& 0x7f` folded to ±64, `shift = (flags >> 2 & 3) − 1`. The
-sign makes him **ride the visible flow** of the texture. Section 1 has
-137 such frames (its sideways pads are `0x6`), section 2 a belt (#197,
-`0x6`, flowing across at ~140 units/tick) that carries Mendel off its
-side unless the player stops it (its state 1 is a plain `0x2` floor).
+**Conveyors** (`0x41dc30`) — observed: a polygon whose flags have bits
+2..3 (`0x4`, `0x8`, `0xc`) has a 16-byte scroll record
+(`GameObject_BuildTextureScroll` @ `0x41d9e0`, at `+0x1d0` via the index
+array `+0x1cc`): current offset `(u, v)`, previous offset, and its texel
+basis. The basis (`0x41d6d0`) is the Jacobian of the polygon frame's
+`(x, y)` with respect to the texture coordinates `(s, t)` of vertices 0,
+1, 2 (`(0,127) (0,0) (127,0)`, set at `0x42320d`), each term × `-256.0`
+(`0x46028c`; `0x460288` is the `1.0` of the reciprocal determinant) and
+truncated to a short: `+8 = −256·∂x/∂s`, `+0xc = −256·∂x/∂t`,
+`+0xa = −256·∂y/∂s`, `+0xe = −256·∂y/∂t`. The world direction does not
+depend on which frame is used: it is `−∂world/∂(s,t) · Δ`.
+
+The record is zeroed at build, so a polygon whose appearance was never
+applied does not move him. Each applied frame goes through slot 0x14
+(`0x41daf0`: **a new texture number resets the record**, prev = cur = the
+frame's offset) then slot 0x18 (`0x41dbc0`: prev = cur, cur = the frame's
+`(u, v)` read back through `0x423100`). Flip-books step once per tick, so
+the step is the difference of consecutive frames; a stopped flip-book keeps
+its last step. Grounded on the polygon, every tick (`0x418060`, after the
+walk and the stance bob):
+
+```text
+du = fold((cur.u & 0x7f) − (prev.u & 0x7f))      fold: into −64..64
+dv = fold((cur.v & 0x7f) − (prev.v & 0x7f))
+shift = ((flags >> 2) & 3) − 1                  0x4: full, 0x8: half, 0xc: quarter
+u += (m[+8]·du + m[+0xc]·dv >> 8) >> shift
+v += (m[+0xa]·du + m[+0xe]·dv >> 8) >> shift
+```
+
+The sign makes him **ride the visible flow** of the texture. The usual
+belt slides 8 texels a frame over polygons whose texel is 2220/127 =
+17.48 units: **139 units a tick**, about 4.6× his walking speed (30).
+Speeds on the CD (`0x6` polygons, max over a flip-book): section 1 has 6
+to 140, section 2 mostly 117–146 with a few long skewed polygons far
+faster (#84: 3,519; #174: 979; #152: 466), section 4 up to 193, section 5
+up to 1,060, section 7 up to 151; all straight from the formula.
+
+**Section 2's belt #197** (polygon 2, the underside of a 10360 × 2220 box
+at z = 34780, facing −z, flags `0x6`; its only appearance has 16 looping
+frames `v = 0, −8, … −120`, applied by its initial state 2) flows **across
+its width** (t runs along `v1→v0`, world −y): basis `−4474` on `v`,
+`(−4474 · −8) >> 8 = +139` per tick. Mendel starts hanging under #194's
+polygon 6 at the same height, walks onto the belt by himself after about
+two seconds and is carried off its y = −37000 edge in ≤ 16 ticks, then
+falls "up" (along his down, +z) to his death. The port reproduces the
+exe's arithmetic exactly (test `section2_belt_carries_him_at_the_exes_speed`),
+so this is the original's behaviour, not a scale error; nothing in the
+belt's state machine stops it (states 0/1 only follow event 1).
 
 **Gravity** `g` per tick: `-7` normally, `+7` under affliction 12, `-2`
 under 10, `0` under 11 (anti/low/zero gravity, inferred names). In
@@ -723,9 +759,14 @@ Running Mendel in the live simulation confirmed or corrected:
   until it feels Mendel; the port ignores requests whose destination is
   within 1,500 units (inferred: in the exe a request only becomes a
   teleport through a lethal-surface reaction with reason 1/2).
-* **Conveyors push hard**: section 2's belt #197 sweeps him off its side
-  at ~140 units/tick within half a second of stepping on it, and he
-  falls to his death; stopping it (its state 1) is the player's job.
+* **Conveyors push hard, faithfully**: section 2's belt #197 sweeps him
+  off its side at 139 units/tick within 16 ticks of stepping on it, and he
+  falls to his death. Checked against the exe (§2.2 Conveyors): basis,
+  shift, folding and the one-frame-per-tick step all match.
+* **Disabled frames are drawn**: a frame's `enabled` byte only gates the
+  flag copy (docs/re/worlds.md); the port had hidden disabled frames, so
+  flip-book polygons (pads, belts) vanished on all but their first frame.
+  Pick rays now read the flag array too, as `0x408730` → `0x409680` do.
 
 ## Open questions
 
@@ -738,9 +779,15 @@ Running Mendel in the live simulation confirmed or corrected:
 * Camera profile fields `a, b, c, d`; the `u32 1520`.
 * The transition effect (`+0x8ec`, `0x424520`: kinds 1..7, variants) and
   what `+0x5c += 8` does to a polygon (affliction 1).
-* `0x41dbc0` reads the polygon's texture offset *before* applying the new
-  frame, so the exe's scroll delta lags one frame; the port uses the
-  current and previous frames of the list (same speed, no lag).
+* Scroll record on the first tick of a new state: the exe's "previous"
+  offset is the old state's frame (unless the texture changed); the port
+  takes the new list's last frame (looping) to avoid saving the record.
+  (The earlier note that `0x41dbc0` lags a frame was wrong: it reads the
+  frame record after `0x42e050` advanced it.)
+* Section 2 needs "wake every machine" to spawn Mendel: on tick 0 folder
+  #193 sees #178 still in state 0 (its initial state 1 is only queued) and
+  switches itself off, Strt #194 included. Does the exe's level load run an
+  apply pass first?
 * The `+0x11c..+0x134` filter of the additive pose setter `0x422e80`
   (key components equal to stored values are zeroed): who sets it.
 * `World_Cast`'s camera and predator users: do they reject back faces?
