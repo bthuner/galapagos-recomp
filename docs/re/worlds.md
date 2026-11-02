@@ -281,6 +281,29 @@ below the section's texture count); `-5` / `-4` toggle object-level modes
 `u, v` → texture origin offset. `flags & 0xc` marks scrolling textures
 (`GameObject_BuildTextureScroll` @ `0x41d9e0`); other bits unknown.
 
+In memory a frame is 16 bytes (`0x42e180` reads the file fields into
+`+4 texture, +6 shade, +0xc enabled, +0 flags, +8 u, +0xa v`). **`enabled`
+only gates the flags**: `0x42df50` (state change) and `0x42e050`
+(flip-book step) copy a frame's flags into the per-polygon flag array
+(`+0x14`) when `enabled > 0`; the frame appliers `0x423730` and
+`0x423810` set texture (slot 0x14, `0x41daf0`), shade (`0x402450`) and
+offset (slot 0x18, `0x41dbc0`) of every frame, enabled or not. Flip-books
+are typically one enabled frame followed by disabled `-2`/`-3` frames that
+only slide the offset (section 1's pad #49 polygon 0: `(8, e1)` then
+`(-3, e0, +4/+4) × 31`): the polygon keeps texture 8 all along. `-4` sets
+a per-polygon flag (`0x4023b0` → polygon `+0x62`; the last polygon's value
+also goes to the object, `0x4022f0`), meaning unknown; `-5` hides the
+object (`0x4022e0`). The port once read `enabled == 0` as "not drawn",
+which blanked every flip-book polygon on all but its first frame (the
+"invisible pad under a floating Mendel" of section 1).
+
+The flip-book step (`0x423810(frac)`) advances every polygon one frame per
+call (`0x42e050`) and, for `frac < 0x100`, draws the offset part way from
+the old frame to the new one (`old + (new − old)·frac >> 8` when the jump is
+under 64 texels); `Game_Tick` passes `0x100` while catching up and the
+sub-tick fraction on the tick it renders (`0x422230`), so it still steps
+exactly once per tick.
+
 #### Camera — `Camera_ReadPaths` @ `0x413e80` — layout observed
 
 `'Cmra'` has no `block_end` table:
