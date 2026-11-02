@@ -162,7 +162,22 @@ pub struct Sim {
 }
 
 impl Sim {
-    pub fn new(section: &Section, mesh: &WorldMesh) -> Self {
+    /// Loads a section the way `World_Read` @ 0x4222d0 does: build every
+    /// object, then enter every initial state ([`Sim::enter_initial_states`])
+    /// before the first tick. `Save` variables are all zero; use
+    /// [`Sim::build`] + [`Sim::enter_initial_states`] to carry them over.
+    #[cfg(test)]
+    pub fn new(section: &Section, mesh: &mut WorldMesh) -> Self {
+        let mut sim = Self::build(section, mesh);
+        sim.enter_initial_states(mesh);
+        sim
+    }
+
+    /// The objects as the reader leaves them, before the load pass: every
+    /// one in state 0 (the registry's state array is zeroed by
+    /// `ObjectRegistry_Init` @ 0x428430) with its initial state queued
+    /// (`StateMachine_SetInitialState` @ 0x42ce50).
+    pub fn build(section: &Section, mesh: &WorldMesh) -> Self {
         let objs = section
             .objects
             .iter()
@@ -176,8 +191,7 @@ impl Sim {
                 let mut pending = None;
                 if let Some(o) = &obj {
                     if o.logic.states.is_some() {
-                        // The initial state is queued, so its entry actions run
-                        // on the first tick.
+                        // Queued, not entered: `enter_initial_states` applies it.
                         pending = Some(Actions { goto_state: Some(o.initial_state() as i16), ..Default::default() });
                     }
                 }
@@ -247,13 +261,42 @@ impl Sim {
         self.next_pick = Some(id);
     }
 
+    /// The level-load pass of `World_Read` @ 0x4222d0 (0x422372..0x422396):
+    /// once every object is read, `StateMachine_ApplyPending` @ 0x42ce70
+    /// runs on registry ids `1..=count` **in list order and without folder
+    /// skipping**, so every initial state is entered — `SetState` writes it
+    /// into the registry, and its entry actions (appearance, sound, motion,
+    /// class trigger, timer reset) run — before `Game_Tick` ever evaluates
+    /// a condition. A folder disabled by its initial state still has its
+    /// whole subtree entered. Only then (`0x41cc20` → `0x41caf3`) is the
+    /// level-start snapshot taken.
+    pub fn enter_initial_states(&mut self, mesh: &mut WorldMesh) {
+        for i in 0..self.objs.len() {
+            self.apply_pending(i, mesh);
+        }
+    }
+
+    /// `StateMachine_ApplyPending` @ 0x42ce70 for list index `i`.
+    fn apply_pending(&mut self, i: usize, mesh: &mut WorldMesh) {
+        let Some(pending) = self.objs[i].pending.take() else { return };
+        let Some(sm) = self.objs[i].obj.as_ref().and_then(|w| w.logic.states.as_ref()) else { return };
+        let a = sm.resolve(pending);
+        self.apply(i, a, mesh);
+    }
+
+    /// The registry walk of `ObjectRegistry_TickAll` @ 0x4284f0:
+    /// `next(i) = i + skip[i] + 1`, read *live*.
+    fn next_enabled(&self, i: usize) -> usize {
+        i + if self.wake_all { 1 } else { self.objs[i].skip as usize + 1 }
+    }
+
     /// Visits enabled objects in registry order, honouring folder skips.
     fn enabled_ids(&self) -> Vec<usize> {
         let mut out = Vec::with_capacity(self.objs.len());
         let mut i = 0;
         while i < self.objs.len() {
             out.push(i);
-            i += if self.wake_all { 1 } else { self.objs[i].skip as usize + 1 };
+            i = self.next_enabled(i);
         }
         out
     }
@@ -292,12 +335,15 @@ impl Sim {
             o.events = 0;
         }
 
-        // Pass 2: apply.
-        for &i in &ids {
-            let Some(pending) = self.objs[i].pending.take() else { continue };
-            let Some(sm) = self.objs[i].obj.as_ref().and_then(|w| w.logic.states.as_ref()) else { continue };
-            let a = sm.resolve(pending);
-            self.apply(i, a, mesh);
+        // Pass 2: apply. The exe walks the registry again and reads each
+        // skip count *after* applying that object (0x4284f0, second loop),
+        // so a folder switching itself off here already hides its subtree
+        // from this pass (their actions stay queued until it wakes up), and
+        // one switching on lets its subtree apply what it had queued.
+        let mut i = 0;
+        while i < self.objs.len() {
+            self.apply_pending(i, mesh);
+            i = self.next_enabled(i);
         }
 
         // Predators: their class update (slot 0x28) after the base update,
@@ -436,8 +482,11 @@ impl Sim {
 
     fn apply(&mut self, i: usize, a: Actions, mesh: &mut WorldMesh) {
         if let Some(s) = a.goto_state {
+            // `CStateMachine_SetState` @ 0x42cfd0 (slot 0x04, shared by every
+            // class) stores the state, its record and flag and the registry
+            // entry; it does *not* touch the tick counter (`+0x2c`): only
+            // the reset flag below does.
             self.objs[i].state = s.max(0) as u16;
-            self.objs[i].ticks = 0;
         }
         if let Some(n) = a.appearance {
             self.select_appearance(i, (n - 1).max(0) as usize, mesh);
@@ -911,11 +960,12 @@ mod tests {
             let section = archive.world(s).unwrap();
             let mut mesh = WorldMesh::build(&section);
             let before = mesh.transforms.clone();
-            let mut sim = Sim::new(&section, &mesh);
+            let mut sim = Sim::new(&section, &mut mesh);
             for _ in 0..30 * TICKS_PER_SECOND {
                 sim.step(&mut mesh);
             }
-            let moved = before.iter().zip(&mesh.transforms).filter(|(a, b)| a != b).count() / 16;
+            // Objects (draws) whose transform changed at all.
+            let moved = before.chunks(16).zip(mesh.transforms.chunks(16)).filter(|(a, b)| a != b).count();
             let changed: usize = sim.objs.iter().filter(|o| o.state != o.obj.as_ref().map_or(0, |w| w.initial_state())).count();
             println!("section {s}: {moved} objects moved, {changed} changed state, {} host events", sim.events.len());
             assert!(moved + changed > 0, "section {s} is static");
@@ -936,7 +986,7 @@ mod pick_tests {
         let archive = Archive::parse(&data).unwrap();
         let section = archive.world(0).unwrap();
         let mut mesh = WorldMesh::build(&section);
-        let mut sim = Sim::new(&section, &mesh);
+        let mut sim = Sim::new(&section, &mut mesh);
         // After ~2 s most folders have switched off (they wait for Mendel),
         // so pick right after the first tick, as the game would at load.
         sim.step(&mut mesh);
