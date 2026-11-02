@@ -1005,28 +1005,27 @@ mod tests {
     }
 
     /// Object-relative keys (mode 1) carry the camera along with their
-    /// object: on the intro ride, hand the camera the capsule's (#3)
-    /// polygon 25 as Mendel's contact and watch it fly with the capsule.
-    /// (Our Mendel stands on the capsule's floor, polygon 28, which has no
-    /// key; the original's contact may differ, see objects.md §6.)
+    /// object: on the intro ride Mendel stands on the capsule's (#3) floor
+    /// polygons 25, 27 and 29 in turn (its appearance states hand the
+    /// floor around as it rolls); polygon 25's key is object-relative, so
+    /// while he is on it the eye flies with the capsule.
     #[test]
     fn object_relative_key_rides_the_capsule() {
         let Some(d) = data() else { return };
         let (mut sim, mut mesh, mut cam) = section0(&d);
         let mut boarded = None;
         let mut max_d = 0.0f32;
+        let mut riding = 0;
         for t in 0..80 * sim::TICKS_PER_SECOND as u64 {
             sim.step(&mut mesh);
             if boarded.is_none() && sim.creature.as_ref().unwrap().ground().is_some_and(|g| g.0 == 2) {
                 boarded = Some((t, sim.pose(2).0));
-                cam.last_ground = Some((2, 25));
-                cam.update(&sim);
             }
             cam.tick(&sim, false);
             let s = cam.sample();
             if let Some((t0, _)) = boarded {
-                assert_eq!((s[13], s[14], s[15]), (3.0, 25.0, 1.0), "capsule key 25, mode 1");
-                if t > t0 + 5 * 24 {
+                if (s[13], s[14], s[15]) == (3.0, 25.0, 1.0) && t > t0 + 5 * 24 {
+                    riding += 1;
                     let p = sim.pose(2).0;
                     let d = (0..3).map(|i| (s[1 + i] - p[i] as f32).powi(2)).sum::<f32>().sqrt();
                     max_d = max_d.max(d);
@@ -1036,8 +1035,9 @@ mod tests {
         let (_, p0) = boarded.expect("Mendel boards the capsule");
         let p1 = sim.pose(2).0;
         let flown = (0..3).map(|i| ((p1[i] - p0[i]) as f32).powi(2)).sum::<f32>().sqrt();
-        println!("capsule flew {flown}, eye stayed within {max_d} of it");
+        println!("capsule flew {flown}; {riding} ticks on key 25, eye within {max_d} of it");
         assert!(flown > 20_000.0, "the capsule flies ({flown})");
+        assert!(riding > 24, "some of the ride uses polygon 25's object-relative key");
         // key offset |(-1887, -2454, 4426)| ≈ 5400, plus the filters' lag
         assert!(max_d < 12_000.0, "the eye rides along ({max_d})");
     }

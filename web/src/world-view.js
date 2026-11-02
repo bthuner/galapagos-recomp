@@ -125,10 +125,13 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 7 * 4, off * 4);
   }
 
-  // Orbit camera state. Galapagos' Y axis points *down*, like screen
-  // coordinates (checked visually: with Y-up, every tower hangs from the
-  // sky), so "up" is -Y.
-  const cam = { yaw: 0.8, pitch: 0.5, dist: 1, target: [0, 0, 0], up: -1 };
+  // Orbit camera state. Galapagos is Z-up: floors face +z, gravity pulls
+  // along -z, and the original renderer uses camera z as screen-up
+  // (0x4302e0). `yaw` turns about +z, `pitch` lifts the eye towards +z.
+  // (Our first viewer guessed Y-down from a distant orbit view; the
+  // camera port and the 1997 footage proved Z-up.)
+  const UP = [0, 0, 1];
+  const cam = { yaw: 0.8, pitch: 0.5, dist: 1, target: [0, 0, 0], flip: 1 };
   let radius = 1;
   let fadeFar = 1;
   // Follow mode: the engine's camera, and an optional user look-around
@@ -228,11 +231,11 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   function orbitAt(target, yaw, pitch, dist) {
     const eye = [
       target[0] + dist * Math.cos(pitch) * Math.sin(yaw),
-      target[1] + cam.up * dist * Math.sin(pitch),
-      target[2] + dist * Math.cos(pitch) * Math.cos(yaw),
+      target[1] + dist * Math.cos(pitch) * Math.cos(yaw),
+      target[2] + cam.flip * dist * Math.sin(pitch),
     ];
     const forward = v3.norm(target.map((t, i) => t - eye[i]));
-    const right = v3.norm(v3.cross(forward, [0, cam.up, 0]));
+    const right = v3.norm(v3.cross(forward, UP.map((u) => u * cam.flip)));
     return { eye, forward, up: v3.cross(right, forward) };
   }
   const orbitView = () => orbitAt(cam.target, cam.yaw, cam.pitch, cam.dist);
@@ -282,8 +285,8 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       const d = basis.eye.map((e, i) => e - c.position[i]);
       const dist = Math.max(600, Math.hypot(...d));
       follow.look = {
-        yaw: Math.atan2(d[0], d[2]),
-        pitch: Math.asin(Math.max(-1, Math.min(1, d[1] / (cam.up * dist)))),
+        yaw: Math.atan2(d[0], d[1]),
+        pitch: Math.asin(Math.max(-1, Math.min(1, d[2] / (cam.flip * dist)))),
         dist, idle: 0, weight: 1,
       };
     }
@@ -332,8 +335,8 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       if (follow.on) setFollow(false);
       const s = cam.dist / canvas.clientHeight;
       cam.target[0] -= (Math.cos(cam.yaw) * dx) * s;
-      cam.target[2] += (Math.sin(cam.yaw) * dx) * s;
-      cam.target[1] += cam.up * dy * s;
+      cam.target[1] += (Math.sin(cam.yaw) * dx) * s;
+      cam.target[2] += cam.flip * dy * s;
     } else if (follow.on) {
       const look = lookAround();
       if (look) {
@@ -363,8 +366,8 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       if (c) cam.target = [...c.position];
       const d = basis.eye.map((e, i) => e - cam.target[i]);
       cam.dist = Math.max(600, Math.hypot(...d));
-      cam.yaw = Math.atan2(d[0], d[2]);
-      cam.pitch = Math.asin(Math.max(-1, Math.min(1, d[1] / (cam.up * cam.dist))));
+      cam.yaw = Math.atan2(d[0], d[1]);
+      cam.pitch = Math.asin(Math.max(-1, Math.min(1, d[2] / (cam.flip * cam.dist))));
     }
     onFollowChange(on);
   }
@@ -405,7 +408,7 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       cam.dist = dist;
     },
     // Flip the up axis, for exploring the geometry upside down.
-    flipUp() { cam.up = -cam.up; },
+    flipUp() { cam.flip = -cam.flip; },
     // Show the original camera; `creature` returns engine.creature.state()
     // (drag-to-look orbits around him).
     follow(on, creature = follow.creature) {

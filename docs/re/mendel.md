@@ -90,7 +90,9 @@ polygon_count x f32[6]                          texture coordinates (below)
 polygon_count x { u16 texture; u16 color_ramp; u16 unk0; u16 unk1 }
 ```
 
-On load each frame vertex `(x,y,z)` is transformed (code at `0x426f1b`):
+On load each frame vertex `(x,y,z)` is transformed (`CreatureBody_ReadPart`,
+code at `0x426f1b`; re-checked in the listing, this is the exe's, not an
+adaptation):
 
 ```text
 x' = 140 - offset[2] - z
@@ -175,11 +177,20 @@ At full speed straight ahead: about 39 units/tick; spinning: up to about
 
 `CreatureMover_Integrate` @ `0x418060` (mover vtable slot 4):
 
-* grounded (`creature+0xa2 != 0`): `heading += turn_d` (10-bit angle),
-  `pos.xz += (cos, sin)[heading] * forward >> 14`, vertical velocity
-  `+= g`, height clamped to the stance height; then the world's
-  move-with-collision (`0x41dc30`).
-* airborne: ballistic, `vel += up * g >> 10`, `pos += vel >> 8`, spin.
+* grounded (`creature+0x52 != 0`): the position is kept in the
+  coordinates of the polygon he stands on (`+0x44`, `+0x48` in its plane,
+  `+0x4c` = height along its normal). `u += cos[heading] * forward >> 14`,
+  `v += sin[heading] * forward >> 14` (tables `0x472858` = cos and
+  `0x473058` = sin, both × 16384, filled by `Math_InitTables` @
+  `0x4308c0` with `FSIN`/`FCOS`), `heading += turn_d` (10-bit angle),
+  the height's velocity `+= g`, height clamped to the stance height;
+  then the world's move-with-collision (`0x41dc30`). On a floor facing
+  +z the polygon frame (`Math_FrameFromNormal` @ `0x4312b0`) is the
+  world's, so in world terms the heading direction is `(cos h, sin h, 0)`.
+* airborne: ballistic, `vel += up * g >> 10` (`up` = `+0x24..+0x2c`,
+  his up vector), `pos += vel >> 8`, spin. Leaving a surface resets the
+  contact normal to `(0, 0, 0x400)` (`0x411bdd`): **the world is Z-up**,
+  gravity pulls along −z.
 * gravity `g` per tick: `-7` normally, `+7` under affliction 12, `-2`
   under 10, `0` under 11 (inferred: anti/low/zero gravity zones).
   Airborne the constants are `0x700`/`0x200` added as `up * g >> 10` to a
@@ -189,11 +200,13 @@ At full speed straight ahead: about 39 units/tick; spinning: up to about
 `CreatureMover_CollideAndTouch` @ `0x418450` (slot 9), every tick:
 
 1. clears both sensor inputs (`creature+4`, `+8`) to 0;
-2. tests 10 hull points (`creature+0xa60`, `x,z,y` triples set in
-   `Creature_ReadMaster`): `(400,450,225)`, `(-450,-450,225)`,
-   `(400,-450,225)`, `(-450,450,225)`, `(+-450,0,0)`, `(0,+-450,0)`,
-   `(0,0,+-450)` (the last one = feet, extended by velocity/4), rotated by
-   the heading, each as a segment cast from the body centre;
+2. tests 10 hull points (`creature+0xa60`, plain `x,y,z` triples set in
+   `Creature_ReadMaster` @ `0x417570`, in his frame: forward, left, up):
+   `(400,450,225)`, `(-450,-450,225)`, `(400,-450,225)`,
+   `(-450,450,225)`, `(+-450,0,0)`, `(0,+-450,0)`, `(0,0,+-450)` (the
+   last one = feet, extended by velocity/4), rotated by the heading,
+   each as a segment cast from the body centre, against polygons with
+   flag `0x100` (walls);
 3. on a hit: grounded → slide; airborne → land, and the polygon's
    `flags & 0xe00` gives the impact tolerance (`0, 0x1000, 0x6400, 0xfa00,
    0x15e00, 0x1c200` — soft to hard surfaces, inferred);
@@ -460,24 +473,37 @@ delay seen is a 17 ms busy-wait in a palette fade. Open question.
 
 Running Mendel in the live section-0 simulation confirmed or corrected:
 
+* **Z is up** (corrected; the first port assumed Y-down and Mendel
+  walked on the sides of pads). World up is +z; in his own frame the
+  hull points are (forward, left, up).
 * **Model origin**: the posed feet end exactly at `y = 41 + stance*166/256`
   (41 / 124 / 221 measured at stances 0 / 128 / 255): the origin floats
   `height` above the ground. Model axes after the load transform are
-  forward `+x`, down `+y`, left `+z` (hull point 0, `z = +450`, drives the
-  *left* input). Verified.
-* **Hull points**: the `y` of the `x,z,y` triples must be *up* (inferred):
-  with `y` down, points 0..3 would sit under the floor and touch forever.
+  forward `+x`, down `+y` (towards the feet), left `+z` (hull point 0,
+  left `= +450`, drives the *left* input). In a Z-up world the model's
+  `−y` maps to his up vector. Verified.
+* **Floors are flag bit 1** (`0x2`), walls bit 8 (`0x100`): the mover's
+  floor finder (`0x411ec3`) casts with mask 2 (`0x4089e0`, nearest of up
+  to ten hits); in section 0 every pad top facing +z is `0x2` and every
+  wall `0x340`. Save pads (`0x22`) are floors too. A flip-book frame may
+  drop the bit (pad #83 shows it on one frame of three), so we treat a
+  polygon as a floor if any frame of its current appearance state is one.
+* **Portal offsets are polygon-local**: a portal's `(u, v, h)` is measured
+  from the first vertex of its polygon `ints[0]`, along that polygon's
+  frame (`Math_FrameFromNormal`), `h` along its normal. On every pad on
+  the CD this lands on the polygon's centre (Strt #57: `(383, 922) +
+  (-387, -922)`; arrival pad #83: exact). Mendel appears standing on that
+  polygon, in its frame.
 * **One-sided polygons** (inferred, consistent with every floor checked):
-  `(v1-v0) x (v2-v0)` points to the solid side's front. The section-0
-  `Strt` (#57) spawns Mendel exactly on the *ceiling plane* of the birth
-  tube #54 (offset `(-387, -922, 0)`, Y down); only back-face culling lets
-  him fall *into* the tube. Verified at runtime.
-* **The intro is a ride**: after the spawn, capsule #3 docks around the
-  tube (its floor polygons become solid with appearance 3+), and its
-  1,992-frame motion path carries Mendel, rolling, to the main area. A
-  surface-attached mover is required (he keeps his position *and*
-  orientation in the platform's frame). Verified at runtime: he arrives
-  after ~130 s.
+  `(v1-v0) x (v2-v0)` points to the solid side's front.
+* **The intro is a ride**: Mendel is born standing on the `Strt` disc #57,
+  the floor of the birth tube #54. The disc is a stack of four polygons
+  whose appearance states hand the floor bit down the stack, then to the
+  docked capsule #3 (its floors 25, 27, 29 in turn as it rolls); its
+  1,992-frame motion path carries him to the main area and drops him on
+  the arrival pad #83. A surface-attached mover is required (he keeps his
+  position *and* orientation in the platform's frame). Verified at
+  runtime: he lands on #83 after ~134 s.
 * **Touch wakes folders**: dropped on platform #77 (folder #75), his event
   1 switches the sleeping upper-level folder #145 back on within 20 ticks.
   Verified (test `mendel_wakes_the_world_in_section0`).

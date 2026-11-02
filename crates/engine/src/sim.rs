@@ -51,13 +51,33 @@ pub const EV_GAME_COMPLETE: u32 = 7; // a = 8 (level), b = 9 (time-screen pictur
 /// on its tick (`Game_RequestTeleport` @ 0x41c690 queues them the same way).
 #[derive(Clone, Copy, Debug)]
 pub enum Request {
-    /// `Game_SpawnCreature` @ 0x41c590: appear at `at` facing `heading`.
-    Spawn { at: [f32; 3], heading: i32 },
+    /// `Game_SpawnCreature` @ 0x41c590: appear at `at` facing `heading`,
+    /// standing on `on` (see [`PortalPlace`]).
+    Spawn { at: [f32; 3], heading: i32, on: Option<PortalPlace> },
     /// Portal kinds 1, 2 and 7.
-    Teleport { at: [f32; 3], heading: i32, snap: bool },
+    Teleport { at: [f32; 3], heading: i32, snap: bool, on: Option<PortalPlace> },
     /// Portal kind 6: Mendel dissolves and respawn reason 3 runs (the
     /// world snapshot comes back, he reappears at the respawn point).
     Respawn,
+}
+
+/// Where a portal puts Mendel, worked out in the frame of its polygon
+/// `ints[0]`: the portal's offset `(u, v, h)` is measured from that
+/// polygon's **first vertex** along the polygon's own axes (h along its
+/// normal), and the heading turns in its plane. Checked on every pad of
+/// the CD: `v0 + offset` lands on the polygon's centre (section 0's Strt
+/// #57: `(383, 922) + (-387, -922)`; arrival pad #83: exactly). The axes
+/// are `Math_FrameFromNormal`'s (0x4312b0), as the mover's surface-local
+/// coordinates (`CreatureMover_Integrate` @ 0x418060).
+#[derive(Clone, Copy, Debug)]
+pub struct PortalPlace {
+    pub obj: usize,
+    pub poly: usize,
+    /// World unit vectors: the polygon's normal and his forward.
+    pub up: [f32; 3],
+    pub fwd: [f32; 3],
+    /// The offset's `h`: how far above the polygon he appears.
+    pub lift: f32,
 }
 
 struct Runtime {
@@ -291,6 +311,17 @@ impl Sim {
         state.polygons.get(p).and_then(|f| f.get(frame).or(f.first())).map_or(0, |f| f.flags)
     }
 
+    /// The flags of every flip-book frame of polygon `p` in the object's
+    /// current appearance state, ORed: what the polygon *is* in this state,
+    /// whatever frame it shows this tick.
+    pub(crate) fn state_flags(&self, i: usize, p: usize) -> u32 {
+        let Some(o) = self.objs.get(i) else { return 0 };
+        let Some(state) = o.obj.as_ref().and_then(|w| w.appearance.as_ref()).and_then(|s| s.get(o.appearance)) else {
+            return 0;
+        };
+        state.polygons.get(p).map_or(0, |f| f.iter().fold(0, |a, f| a | f.flags))
+    }
+
     /// `WorldObject_PostEvent` @ 0x4232f0: OR `bits` into the object's
     /// events and forward them up the folder chain, so a folder "feels"
     /// Mendel touching any of its descendants.
@@ -347,6 +378,43 @@ impl Sim {
         }
     }
 
+    /// The world point (on the polygon plane plus `h` along its normal) a
+    /// portal offset designates, and the frame he stands in there. Falls
+    /// back to `position + offset` if the polygon is missing.
+    fn portal_place(&self, i: usize, poly: usize, off: [i32; 3], heading: i32) -> ([f32; 3], Option<PortalPlace>) {
+        let o = self.objs[i].pos;
+        let fallback = ([(o[0] + off[0]) as f32, (o[1] + off[1]) as f32, (o[2] + off[2]) as f32], None);
+        let Some(mesh) = self.objs[i].obj.as_ref().and_then(|w| w.mesh.as_ref()) else { return fallback };
+        let Some(pts) = mesh.polygons.get(poly).filter(|p| p.len() >= 3) else { return fallback };
+        let v = |k: usize| mesh.vertices.get(pts[k] as usize).map(|v| v.map(|c| c as f32));
+        let (Some(a), Some(b), Some(c)) = (v(0), v(1), v(2)) else { return fallback };
+        let sub = |p: [f32; 3], q: [f32; 3]| [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+        let (e1, e2) = (sub(b, a), sub(c, a));
+        let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if l == 0.0 {
+            return fallback;
+        }
+        let f = frame_from_normal(n.map(|x| x / l));
+        let local = |w: [f32; 3]| [
+            f[0] * w[0] + f[1] * w[1] + f[2] * w[2],
+            f[3] * w[0] + f[4] * w[1] + f[5] * w[2],
+            f[6] * w[0] + f[7] * w[1] + f[8] * w[2],
+        ];
+        let d = local(off.map(|x| x as f32));
+        let h = heading as f32 * core::f32::consts::TAU / 1024.0;
+        let m = transform(o, self.objs[i].rot);
+        let rot = |w: [f32; 3]| [
+            m[0] * w[0] + m[1] * w[1] + m[2] * w[2],
+            m[3] * w[0] + m[4] * w[1] + m[5] * w[2],
+            m[6] * w[0] + m[7] * w[1] + m[8] * w[2],
+        ];
+        let at = apply(&m, [a[0] + d[0], a[1] + d[1], a[2] + d[2]]);
+        let up = rot(local([0.0, 0.0, 1.0]));
+        let fwd = rot(local([h.cos(), h.sin(), 0.0]));
+        (at, Some(PortalPlace { obj: i, poly, up, fwd, lift: off[2] as f32 }))
+    }
+
     /// The class behaviour (vtable slot 0x18), for the classes we know.
     fn trigger(&mut self, i: usize, entry: usize) {
         let Some(obj) = self.objs[i].obj.as_ref() else { return };
@@ -358,21 +426,22 @@ impl Sim {
             }
             b"Voic" => self.events.push(HostEvent { kind: EV_MUSIC, a: p.shorts[0] as i32, b: 0, c: 0 }),
             b"Tele" | b"Strt" | b"STel" => {
-                let o = self.objs[i].pos;
-                let at = |off: [i32; 3]| [(o[0] + off[0]) as f32, (o[1] + off[1]) as f32, (o[2] + off[2]) as f32];
+                let place = |off: [i32; 3], heading: i32, mode: i32| self.portal_place(i, mode.max(0) as usize, off, heading);
                 match p.portal() {
                     PortalAction::ChangeSection { section, level } => {
                         self.events.push(HostEvent { kind: EV_SECTION, a: section as i32, b: level as i32, c: 0 })
                     }
-                    // inferred: `mode` is ignored; the offset is always
-                    // relative to the portal, which fits every pad on the CD.
+                    // `mode` (ints[0]) is the polygon he lands on; the
+                    // offset is measured on it (see `PortalPlace`).
                     PortalAction::Spawn { offset, heading, mode, .. } => {
+                        let (at, on) = place(offset, heading, mode);
                         self.portal_contact = Some((i, mode.max(0) as usize, true));
-                        self.requests.push(Request::Spawn { at: at(offset), heading })
+                        self.requests.push(Request::Spawn { at, heading, on })
                     }
                     PortalAction::Teleport { offset, heading, snap_camera, mode } => {
+                        let (at, on) = place(offset, heading, mode);
                         self.portal_contact = Some((i, mode.max(0) as usize, false));
-                        self.requests.push(Request::Teleport { at: at(offset), heading, snap: snap_camera })
+                        self.requests.push(Request::Teleport { at, heading, snap: snap_camera, on })
                     }
                     // Kinds 5 and 6 only differ by the reaction they hand
                     // Mendel (`Portal_InitReactions` @ 0x41b140): kind 5's
@@ -592,6 +661,21 @@ pub(crate) fn transform(pos: [i32; 3], rot: [i32; 3]) -> M {
     ]
 }
 
+/// `Math_FrameFromNormal` @ 0x4312b0 in floating point: the rotation
+/// (row-major) taking +z to the unit normal `n`, about `z × n`. For a
+/// floor facing +z it is the identity: surface axes = world axes.
+pub(crate) fn frame_from_normal(n: [f32; 3]) -> [f32; 9] {
+    let [x, y, z] = n;
+    let hl = (x * x + y * y).sqrt();
+    let (c, s) = (z, hl);
+    let (ux, uy) = if hl == 0.0 { (0.0, 1.0) } else { (x / hl, y / hl) };
+    [
+        c * ux * ux + uy * uy, (c - 1.0) * ux * uy, s * ux,
+        (c - 1.0) * ux * uy, c * uy * uy + ux * ux, s * uy,
+        -s * ux, -s * uy, c,
+    ]
+}
+
 pub(crate) fn apply(m: &M, v: [f32; 3]) -> [f32; 3] {
     [
         m[0] * v[0] + m[1] * v[1] + m[2] * v[2] + m[9],
@@ -753,3 +837,4 @@ mod pick_tests {
         assert!(hits.iter().any(|h| h.is_some()));
     }
 }
+

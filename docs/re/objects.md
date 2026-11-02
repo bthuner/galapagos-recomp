@@ -498,17 +498,19 @@ Mendel, until he steps on another keyed polygon; the capsule's keys
 * Object rotations come from our object transform (sim.rs), not from the
   object's angles via `0x4097a0`.
 
-### Open: which way is up?
+### Which way is up: +z (settled)
 
 Everything the camera code assumes says **+z is up**: the "upright"
 surface test is `normal.z == 0x400`; the creature's contact record
 resets its surface normal to (0, 0, 0x400) (`0x411b60`); every portal
 pad (`Strt`, `Tele`) is an octagon in the xy plane facing +z; and most
 designer keys have their up vector near +z (e.g. section 3: 159 of 209).
-Our creature walks with gravity along +y (floors facing −y), which works
-on the CD's geometry but puts Mendel on the *side* of the pads the
-footage shows him standing on. The camera is ported as the exe does it;
-reconciling the creature's gravity axis is future work.
+The creature code agrees (mendel.md §2.2): the hull's last point is the
+feet at `(0, 0, −450)`, airborne gravity is `up · −0x700`, the floor
+finder casts for polygons with flag bit 1 (`0x2`), and the 1997 footage
+shows Mendel standing on the +z faces of the pads. Our first creature
+port assumed Y-down (from the first render, see worlds.md) and walked on
+the pads' sides; it is now Z-up like the exe.
 
 ## 7. The game loop — partly observed
 
