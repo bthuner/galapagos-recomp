@@ -37,6 +37,9 @@ precision highp sampler2DArray;
 uniform sampler2DArray uTex;
 uniform float uFar;
 uniform float uBright; // Preferences ▸ Brightness, 1.0 = Standard
+// The palette flash (flash.rs): each channel becomes lo + c * (hi - lo).
+uniform vec3 uTintLo;
+uniform vec3 uTintHi;
 in vec2 vUV; flat in float vLayer; in float vLight; in float vDepth;
 out vec4 color;
 void main() {
@@ -46,6 +49,9 @@ void main() {
   // Depth cueing: surfaces fade to black with distance, as the original's
   // shade table did (visible in gameplay footage).
   c *= uBright * vLight * (1.0 - 0.85 * clamp(vDepth / uFar, 0.0, 1.0));
+  // The 1997 game remapped its 8-bit palette for a flash; we remap the
+  // final colour the same way.
+  c = clamp(uTintLo + clamp(c, 0.0, 1.0) * (uTintHi - uTintLo), 0.0, 1.0);
   color = vec4(c, 1.0);
 }`;
 
@@ -106,6 +112,8 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   const uViewProj = gl.getUniformLocation(prog, "uViewProj");
   const uFar = gl.getUniformLocation(prog, "uFar");
   const uBright = gl.getUniformLocation(prog, "uBright");
+  const uTintLo = gl.getUniformLocation(prog, "uTintLo");
+  const uTintHi = gl.getUniformLocation(prog, "uTintHi");
   // Preferences: brightness multiplier and render resolution. `pixels` is
   // the canvas height in device pixels to aim for (0 = native).
   let brightness = 1, pixels = 0;
@@ -202,6 +210,9 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     gl.uniformMatrix4fv(uViewProj, false, viewProj);
     gl.uniform1f(uFar, fadeFar);
     gl.uniform1f(uBright, brightness);
+    const t = current.tint?.() ?? [0, 255, 0, 255, 0, 255];
+    gl.uniform3f(uTintLo, t[0] / 255, t[2] / 255, t[4] / 255);
+    gl.uniform3f(uTintHi, t[1] / 255, t[3] / 255, t[5] / 255);
     gl.bindVertexArray(vao);
     // Upload only what the simulation patched (appearance changes).
     const dirty = current.takeDirty?.();

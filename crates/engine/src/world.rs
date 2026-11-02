@@ -51,6 +51,9 @@ pub struct WorldMesh {
     /// For each draw and polygon: is its current frame's texture -5? One
     /// such polygon hides the whole object (see `apply_frame`).
     hides_object: Vec<Vec<bool>>,
+    /// For each draw: hidden by its class (a predator blinking through
+    /// its materialise effect, predator.rs), whatever its frames say.
+    blinking: Vec<bool>,
     /// One byte per draw: 1 = drawn, 0 = hidden by a -5 frame.
     pub visible: Vec<u8>,
     /// Texture coordinates before any per-frame offset, 2 per vertex.
@@ -95,6 +98,18 @@ fn affine_st(p: V3, e1: V3, e2: V3) -> (f32, f32) {
 }
 
 impl WorldMesh {
+    fn refresh_visible(&mut self, draw: usize) {
+        self.visible[draw] = !(self.blinking[draw] || self.hides_object[draw].iter().any(|&x| x)) as u8;
+    }
+
+    /// Hide (or show again) a whole object for its class's own reasons.
+    pub fn set_blinking(&mut self, draw: usize, hidden: bool) {
+        if let Some(b) = self.blinking.get_mut(draw) {
+            *b = hidden;
+            self.refresh_visible(draw);
+        }
+    }
+
     pub fn build(section: &Section) -> Self {
         let mut vertices = Vec::new();
         let mut draws = Vec::new();
@@ -138,8 +153,9 @@ impl WorldMesh {
         let base_uv = vertices.chunks_exact(FLOATS_PER_VERTEX).flat_map(|v| [v[3], v[4]]).collect();
         let hides_object = poly_ranges.iter().map(|p| vec![false; p.len()]).collect();
         let visible = vec![1; draws.len()];
+        let blinking = vec![false; draws.len()];
         let mut mesh = WorldMesh {
-            vertices, draws, draw_of_object, poly_ranges, hides_object, visible, base_uv, transforms, textures,
+            vertices, draws, draw_of_object, poly_ranges, hides_object, blinking, visible, base_uv, transforms, textures,
             texture_count, bounds, objects_drawn, far_clip,
         };
         // Apply each polygon's initial appearance frame (layer, UV offset).
@@ -186,7 +202,7 @@ impl WorldMesh {
         };
         if let Some(h) = self.hides_object.get_mut(draw).and_then(|h| h.get_mut(poly)) {
             *h = frame.is_some_and(|f| f.texture == -5);
-            self.visible[draw] = !self.hides_object[draw].iter().any(|&x| x) as u8;
+            self.refresh_visible(draw);
         }
         let (du, dv) = frame.map_or((0.0, 0.0), |f| (f.u as f32 / TEX, f.v as f32 / TEX));
         for v in r.first..r.first + r.count {

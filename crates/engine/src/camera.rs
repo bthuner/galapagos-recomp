@@ -41,9 +41,9 @@ type M3 = [i32; 9];
 /// The engine's tables, filled at start-up by `Math_InitTables` @ 0x4308c0:
 /// sine and cosine × 16384 over 1024 steps, and an arctangent table
 /// (atan(i/1024) in 1024ths of a turn). Rounding is half-up.
-struct Trig {
-    sin: Vec<i32>,
-    cos: Vec<i32>,
+pub(crate) struct Trig {
+    pub(crate) sin: Vec<i32>,
+    pub(crate) cos: Vec<i32>,
     atan: Vec<i32>,
 }
 
@@ -53,7 +53,7 @@ fn round_half_up(x: f64) -> i32 {
 }
 
 impl Trig {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let tau = core::f64::consts::TAU;
         Trig {
             sin: (0..1024).map(|i| round_half_up((i as f64 / 1024.0 * tau).sin() * 16384.0)).collect(),
@@ -64,7 +64,7 @@ impl Trig {
 
     /// `Math_Angle2` @ 0x430ab0: the angle of (x, y), 0 along +x, 0x100
     /// along +y, in [0, 0x400]. (0, 0) gives 0.
-    fn angle(&self, x: i32, y: i32) -> i32 {
+    pub(crate) fn angle(&self, x: i32, y: i32) -> i32 {
         let t = |i: i32| self.atan[i.clamp(0, 1024) as usize];
         if x >= 1 && y >= 0 {
             return if y < x { t((y << 10) / x) } else { 0x100 - t((x << 10) / y) };
@@ -85,7 +85,7 @@ impl Trig {
     }
 
     /// `Math_VectorAngles` @ 0x430c50: (yaw, pitch) of a direction.
-    fn dir_angles(&self, v: I3) -> (i32, i32) {
+    pub(crate) fn dir_angles(&self, v: I3) -> (i32, i32) {
         let (x, y) = if v[0] == 0 && v[1] == 0 { (0, 0x400) } else { (v[0], v[1]) };
         let yaw = self.angle(x, y) + 0x300;
         let u = (-(yaw & 0x3ff)) & 0x3ff;
@@ -164,7 +164,7 @@ fn transpose(m: &M3) -> M3 {
 }
 
 /// `Math_ApproxLength` @ 0x430fa0: max + 3/8·(the other two) − max/16.
-fn approx_len(d: I3) -> i32 {
+pub(crate) fn approx_len(d: I3) -> i32 {
     let (mut a, mut b, c) = (d[0].abs(), d[1].abs(), d[2].abs());
     if a < b {
         core::mem::swap(&mut a, &mut b);
@@ -219,24 +219,24 @@ fn wrap(d: i32) -> i32 {
 
 /// `Mover` (0x427780, `SetTarget` @ 0x427840, `Step` @ 0x4278c0): a point
 /// that travels in a straight line with a trapezoidal speed profile.
-#[derive(Clone, Copy, Default)]
-struct Mover {
-    pos: I3,
-    delta: I3,
-    brake: i32,
-    stop_dist: i32,
-    total: i32,
-    remain: i32,
-    max: i16,
-    accel: i16,
-    speed: i16,
-    moving: bool,
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub(crate) struct Mover {
+    pub(crate) pos: I3,
+    pub(crate) delta: I3,
+    pub(crate) brake: i32,
+    pub(crate) stop_dist: i32,
+    pub(crate) total: i32,
+    pub(crate) remain: i32,
+    pub(crate) max: i16,
+    pub(crate) accel: i16,
+    pub(crate) speed: i16,
+    pub(crate) moving: bool,
 }
 
 impl Mover {
     /// 0x4277e0: `stop_dist` is the distance covered while braking from
     /// full speed: Σ 0, accel, 2·accel, … ≤ max.
-    fn setup(&mut self, pos: I3, accel: i16, max: i16) {
+    pub(crate) fn setup(&mut self, pos: I3, accel: i16, max: i16) {
         self.pos = pos;
         self.accel = accel;
         self.max = max;
@@ -252,7 +252,7 @@ impl Mover {
         self.moving = false;
     }
 
-    fn set_target(&mut self, t: I3) {
+    pub(crate) fn set_target(&mut self, t: I3) {
         self.delta = sub(t, self.pos);
         self.moving = true;
         self.speed = 0;
@@ -267,7 +267,7 @@ impl Mover {
         }
     }
 
-    fn step(&mut self) {
+    pub(crate) fn step(&mut self) {
         if !self.moving {
             return;
         }
@@ -292,31 +292,31 @@ impl Mover {
 }
 
 /// One axis of `Tracker` (0x406a50): an alpha-beta filter in 16.16.
-#[derive(Clone, Copy, Default)]
-struct Filter {
-    d: i32,
-    alpha: i32,
-    beta: i32,
-    vel: i32,
-    out: i32,
-    primed: bool,
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub(crate) struct Filter {
+    pub(crate) d: i32,
+    pub(crate) alpha: i32,
+    pub(crate) beta: i32,
+    pub(crate) vel: i32,
+    pub(crate) out: i32,
+    pub(crate) primed: bool,
 }
 
 impl Filter {
     /// 0x406b60: α = 1 − d², β = (1 − d)² (16.16).
-    fn set_d(&mut self, d: i32) {
+    pub(crate) fn set_d(&mut self, d: i32) {
         self.d = d;
         self.alpha = 0x10000 - ((d as u32).wrapping_mul(d as u32) >> 16) as i32;
         self.beta = ((0x10000 - d) * (0x10000 - d)) >> 16;
     }
     /// 0x406af0: same, and forget the state.
-    fn reset(&mut self, d: i32) {
+    pub(crate) fn reset(&mut self, d: i32) {
         self.set_d(d);
         self.vel = 0;
         self.primed = false;
     }
     /// 0x406b90: predict, then correct by the error.
-    fn step(&mut self, x: i32) -> i32 {
+    pub(crate) fn step(&mut self, x: i32) -> i32 {
         if !self.primed {
             self.out = x;
             self.primed = true;
@@ -330,7 +330,7 @@ impl Filter {
     }
 }
 
-fn filter3(f: &mut [Filter; 3], v: I3) -> I3 {
+pub(crate) fn filter3(f: &mut [Filter; 3], v: I3) -> I3 {
     [f[0].step(v[0]), f[1].step(v[1]), f[2].step(v[2])]
 }
 

@@ -8,8 +8,11 @@
 //! fills the buffer, then passes `(ptr, len)` to an `*_open` function, which
 //! takes ownership. JavaScript must not touch or free that buffer afterwards.
 
+mod affliction;
 mod camera;
 mod creature;
+mod flash;
+mod predator;
 mod sim;
 mod sound;
 mod world;
@@ -339,7 +342,19 @@ pub extern "C" fn world_transforms_ptr() -> *const f32 {
 // vertex changes come as one dirty range; side effects come as events).
 
 /// Run `n` ticks of the world simulation. Returns the number of host events
-/// produced (read them at [`sim_events_ptr`], 3 × i32 each).
+/// produced (read them at [`sim_events_ptr`], 4 × i32 each: kind, a, b, c).
+///
+/// | kind | event | a, b, c |
+/// |---|---|---|
+/// | 1 | music | Smacker file 1..10 (0 = stop) |
+/// | 2 | dimensional gate | section, level |
+/// | 3 | world sound | world-bank sound, object id, emitter |
+/// | 4 | camera cut | — |
+/// | 5 | Mendel's cue | creature-bank sound |
+/// | 6 | save pad clicked | object id |
+/// | 7 | game completed | level 8, picture 9 |
+/// | 8 | affliction sound, at Mendel | world-bank sound, pitch 16.16, volume \| variation>>8 << 16 |
+/// | 9 | predator sound | predator-bank sound (0 growl, 1 bite), object id, pitch 16.16 |
 #[no_mangle]
 pub extern "C" fn sim_tick(n: u32) -> u32 {
     WORLDS.with(|w| {
@@ -546,6 +561,83 @@ pub extern "C" fn creature_touch_ray(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32
         }
     });
     out
+}
+
+/// Mendel's affliction (`creature+0x8fc`, affliction.rs): the number in
+/// the low byte (0 = none), the ticks it has left above it.
+#[no_mangle]
+pub extern "C" fn creature_affliction() -> u32 {
+    with_creature(|c| c.afflictions.kind as u32 | (c.afflictions.left().max(0) as u32) << 8, 0)
+}
+
+/// Teaching/debug switch, not in the original: afflict Mendel with `n`
+/// (1..12) as if he touched a polygon carrying it.
+#[no_mangle]
+pub extern "C" fn creature_afflict(n: u32) {
+    with_sim_mut(|sim| {
+        if let Some(mut c) = sim.creature.take() {
+            c.afflictions.apply(n.min(255) as u8, sim);
+            sim.creature = Some(c);
+        }
+    });
+}
+
+thread_local! {
+    static TINT: std::cell::Cell<[i32; 6]> = const { std::cell::Cell::new(flash::IDENTITY) };
+}
+
+/// The screen's palette flash (flash.rs) this tick: six i32, `lo, hi` for
+/// red, green, blue. Each channel `c` (0..255) is drawn as
+/// `lo + c·(hi − lo)/256`; `0, 255` three times means "no flash".
+#[no_mangle]
+pub extern "C" fn sim_tint_ptr() -> *const i32 {
+    let t = WORLDS.with(|w| w.borrow().as_ref().and_then(|w| w.sim.as_ref()).map_or(flash::IDENTITY, |s| s.flash.current()));
+    TINT.with(|c| c.set(t));
+    TINT.with(|c| c.as_ptr() as *const i32)
+}
+
+/// Teaching/debug switch, not in the original: run the class trigger of
+/// object `id` (1-based) with its params entry `entry` (0-based), as a
+/// state machine would (e.g. make section 2's ball #54 appear: entry 0).
+#[no_mangle]
+pub extern "C" fn sim_debug_trigger(id: u32, entry: u32) {
+    WORLDS.with(|w| {
+        let mut guard = w.borrow_mut();
+        let Some(worlds) = guard.as_mut() else { return };
+        let (Some(sim), Some(mesh)) = (worlds.sim.as_mut(), worlds.mesh.as_mut()) else { return };
+        sim.debug_trigger(id.wrapping_sub(1) as usize, entry as usize, mesh);
+    });
+}
+
+/// Teaching/debug switch, not in the original: send object `id`'s state
+/// machine to `state` on the next tick, running that state's entry actions
+/// (section 2's ball #54, state 3: it appears, then hunts in state 1).
+#[no_mangle]
+pub extern "C" fn sim_debug_goto(id: u32, state: u32) {
+    with_sim_mut(|sim| sim.debug_goto(id.wrapping_sub(1) as usize, state as u16));
+}
+
+/// Predators (predator.rs): for predator `k` (0-based, in object order),
+/// four i32 — object id (1-based), class (0 Pred, 1 PBal, 2 PFrk, 3 PMan,
+/// 4 PPol), mode (0 idle, 1 vanishing, 2 appearing, 3 active), contact.
+/// Returns null past the last one.
+#[no_mangle]
+pub extern "C" fn sim_predator_info(k: u32) -> *const i32 {
+    let mut ok = false;
+    WORLDS.with(|w| {
+        if let Some(p) = w.borrow().as_ref().and_then(|w| w.sim.as_ref()).and_then(|s| s.predators.get(k as usize)) {
+            let class = match p.class {
+                predator::Class::Pred => 0,
+                predator::Class::Ball => 1,
+                predator::Class::Fork => 2,
+                predator::Class::Man => 3,
+                predator::Class::Pole => 4,
+            };
+            SCRATCH.with(|s| s.set([p.obj as i32 + 1, class, p.mode as i32, p.contact as i32]));
+            ok = true;
+        }
+    });
+    if ok { SCRATCH.with(|s| s.as_ptr() as *const i32) } else { core::ptr::null() }
 }
 
 // ——— Sounds ——————————————————————————————————————————————————————————

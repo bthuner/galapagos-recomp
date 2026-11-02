@@ -20,6 +20,8 @@
 //! the objects left it and posts his touch events for the *next* tick.
 
 use crate::creature::Creature;
+use crate::flash::Flash;
+use crate::predator::{Class, Predator};
 use crate::world::WorldMesh;
 use galapagos_formats::logic::{Actions, LogicView, PortalAction};
 use galapagos_formats::worlds::{Object, Section, WorldObject};
@@ -46,6 +48,13 @@ pub const EV_CREATURE_SOUND: u32 = 5; // a = creature-bank sound (0-based)
 pub const EV_CAMERA_SNAP: u32 = 4; // a teleporter of kind 2 asks the camera to jump
 pub const EV_SAVE_PAD: u32 = 6; // a = clicked object id: the original opens its Save dialog (docs/re/saves.md)
 pub const EV_GAME_COMPLETE: u32 = 7; // a = 8 (level), b = 9 (time-screen picture): "GALAPAGOS COMPLETED"
+/// An affliction's sound, heard at Mendel (affliction.rs): a = world-bank
+/// sound (0-based), b = pitch (16.16), c = volume (low 16 bits, 256 = full)
+/// | pitch variation >> 8 (high 16 bits; 0x80 = ±0.5).
+pub const EV_AFFLICTION_SOUND: u32 = 8;
+/// A predator's cue (predator.rs): a = predator-bank sound (0-based: 0 =
+/// the growl near Mendel, 1 = the bite), b = object id, c = pitch (16.16).
+pub const EV_PREDATOR_SOUND: u32 = 9;
 
 /// What a portal or save pad asks of Mendel; the creature picks these up
 /// on its tick (`Game_RequestTeleport` @ 0x41c690 queues them the same way).
@@ -144,6 +153,15 @@ pub struct Sim {
     pub level_start_ticks: u32,
     /// Index of the section this simulation runs.
     pub section: usize,
+
+    // ——— Predators and afflictions (predator.rs, affliction.rs) ———
+    /// The class state of every `Pred`/`PBal`/`PFrk`/`PMan`/`PPol`.
+    pub predators: Vec<Predator>,
+    /// The section's `PPol` (`Game+0x17efc0`, set by the object factory at
+    /// 0x41c29e): where `PBal` appears.
+    pub pole: Option<usize>,
+    /// The screen's palette flash (flash.rs).
+    pub flash: Flash,
 }
 
 impl Sim {
@@ -186,6 +204,14 @@ impl Sim {
                 }
             })
             .collect();
+        let predators: Vec<Predator> = section
+            .objects
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| Class::of(&o.kind()).map(|c| Predator::new(i, c)))
+            .collect();
+        // The factory overwrites the slot for every PPol: the last one wins.
+        let pole = predators.iter().rev().find(|p| p.class == Class::Pole).map(|p| p.obj);
         Sim {
             objs,
             picked: None,
@@ -204,6 +230,9 @@ impl Sim {
             total_ticks: 0,
             level_start_ticks: 0,
             section: 0,
+            predators,
+            pole,
+            flash: Flash::default(),
         }
     }
 
@@ -273,6 +302,19 @@ impl Sim {
             self.apply(i, a, mesh);
         }
 
+        // Predators: their class update (slot 0x28) after the base update,
+        // for the enabled ones. inferred: we run them after the apply pass
+        // rather than inside it; they read Mendel's last position.
+        let enabled = self.visible();
+        let prey = self.creature.as_ref().and_then(|c| c.prey());
+        let mut predators = std::mem::take(&mut self.predators);
+        for p in predators.iter_mut().filter(|p| enabled.get(p.obj).copied().unwrap_or(false)) {
+            p.tick(self, mesh, prey);
+        }
+        self.predators = predators;
+        // `Palette_Step` @ 0x437690, once per tick (0x4222ad).
+        self.flash.step();
+
         // Mendel moves through the world the objects just left.
         if let Some(mut c) = self.creature.take() {
             c.tick(self, mesh);
@@ -288,6 +330,20 @@ impl Sim {
     /// Current position and rotation (1024ths) of object list index `i`.
     pub(crate) fn pose(&self, i: usize) -> ([i32; 3], [i32; 3]) {
         self.objs.get(i).map_or(([0; 3], [0; 3]), |o| (o.pos, o.rot))
+    }
+
+    /// Where object `i` started (`+0xd0`): the home of predators and poles.
+    pub(crate) fn rest_of(&self, i: usize) -> [i32; 3] {
+        self.objs.get(i).map_or([0; 3], |o| o.rest)
+    }
+
+    /// Texture of polygon `p` of object `i` in its current frame.
+    pub(crate) fn frame_texture(&self, i: usize, p: usize) -> Option<i16> {
+        let o = self.objs.get(i)?;
+        let state = o.obj.as_ref()?.appearance.as_ref()?.get(o.appearance)?;
+        let frames = state.polygons.get(p)?;
+        let f = frames.get(*o.poly_frame.get(p).unwrap_or(&0)).or(frames.first())?;
+        (f.texture >= 0).then_some(f.texture)
     }
 
     /// Moves object `i` (used to glue `MEnc` to Mendel).
@@ -371,7 +427,7 @@ impl Sim {
             self.start_motion(i, (n - 1).max(0) as usize);
         }
         if let Some(n) = a.trigger {
-            self.trigger(i, (n - 1).max(0) as usize);
+            self.trigger(i, (n - 1).max(0) as usize, mesh);
         }
         if a.reset_timer {
             self.objs[i].ticks = 0;
@@ -416,9 +472,15 @@ impl Sim {
     }
 
     /// The class behaviour (vtable slot 0x18), for the classes we know.
-    fn trigger(&mut self, i: usize, entry: usize) {
+    fn trigger(&mut self, i: usize, entry: usize, mesh: &mut WorldMesh) {
         let Some(obj) = self.objs[i].obj.as_ref() else { return };
         let Some(p) = obj.logic.params.get(entry).copied() else { return };
+        if let Some(k) = self.predators.iter().position(|q| q.obj == i) {
+            let mut q = self.predators[k].clone();
+            q.trigger(p.shorts, p.ints, self, mesh);
+            self.predators[k] = q;
+            return;
+        }
         match &obj.kind {
             b"Fldr" => {
                 // shorts[0]: 1 = enable, 0 = disable; shorts[1] = descendants.
@@ -472,6 +534,21 @@ impl Sim {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// not in the original: send object `i`'s state machine to `state` on
+    /// the next tick, entry actions included.
+    pub fn debug_goto(&mut self, i: usize, state: u16) {
+        if let Some(o) = self.objs.get_mut(i) {
+            o.pending = Some(Actions { goto_state: Some(state as i16), ..Default::default() });
+        }
+    }
+
+    /// not in the original: run object `i`'s class trigger by hand.
+    pub fn debug_trigger(&mut self, i: usize, entry: usize, mesh: &mut WorldMesh) {
+        if i < self.objs.len() {
+            self.trigger(i, entry, mesh);
         }
     }
 

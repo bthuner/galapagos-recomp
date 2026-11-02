@@ -97,6 +97,31 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
         const [x, y, z, state] = new Int32Array(wasm.memory.buffer, wasm.sim_object_info(id), 4);
         return { position: [x, y, z], state };
       },
+      // The screen's palette flash (crates/engine/src/flash.rs): six
+      // numbers, lo/hi for red, green, blue; each channel c (0..255) is
+      // drawn as lo + c * (hi - lo) / 256. [0,255,0,255,0,255] = no flash.
+      tint: () => [...new Int32Array(wasm.memory.buffer, wasm.sim_tint_ptr(), 6)],
+      // The predators of the section (crates/engine/src/predator.rs).
+      predators() {
+        const out = [];
+        for (let k = 0; ; k++) {
+          const p = wasm.sim_predator_info(k);
+          if (!p) return out;
+          const [id, cls, mode, contact] = new Int32Array(wasm.memory.buffer, p, 4);
+          out.push({
+            id,
+            kind: ["Pred", "PBal", "PFrk", "PMan", "PPol"][cls],
+            mode: ["idle", "vanishing", "appearing", "active"][mode],
+            contact: !!contact,
+          });
+        }
+      },
+      // Teaching/debug, not in the original: run object `id`'s class
+      // trigger with params entry `entry` (section 2's ball: trigger(54, 0)).
+      trigger: (id, entry) => wasm.sim_debug_trigger(id, entry),
+      // Teaching/debug, not in the original: send object `id`'s state
+      // machine to `state` (entry actions run): goto(54, 3) in section 2.
+      goto: (id, state) => wasm.sim_debug_goto(id, state),
     },
 
     // Mendel (see crates/engine/src/creature.rs). His posed mesh is rebuilt
@@ -119,6 +144,14 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
       },
       // Right click: a ray against his mesh. Returns "left", "right" or null.
       touch: (o, d) => [null, "left", "right"][wasm.creature_touch_ray(o[0], o[1], o[2], d[0], d[1], d[2])],
+      // His affliction (crates/engine/src/affliction.rs): { kind, ticksLeft },
+      // kind 0 = none.
+      affliction() {
+        const v = wasm.creature_affliction();
+        return { kind: v & 0xff, ticksLeft: v >>> 8 };
+      },
+      // Teaching/debug, not in the original: afflict him with n (1..12).
+      afflict: (n) => wasm.creature_afflict(n),
     },
 
     // The original game camera (crates/engine/src/camera.rs), ticked with

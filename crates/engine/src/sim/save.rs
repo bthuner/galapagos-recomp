@@ -24,6 +24,7 @@
 //! is our own little-endian byte format, documented on [`Sim::save_game`].
 
 use super::{mark, write_transform, Sim};
+use crate::predator::{Class, Predator};
 use crate::world::WorldMesh;
 use galapagos_formats::logic::Actions;
 
@@ -32,7 +33,9 @@ pub const VARS: usize = 10;
 
 /// Magic and version of our saved-game format.
 pub const MAGIC: [u8; 4] = *b"GLPS";
-pub const VERSION: u32 = 1;
+/// Version 2 added the predators (in every `WorldState`) and Mendel's
+/// hazard counters; version 1 games still open (fresh predators).
+pub const VERSION: u32 = 2;
 
 /// The dynamic part of one object: everything the simulation changes.
 /// The original writes the same facts (`WorldObject` slot 0x4c @ 0x424010:
@@ -64,6 +67,10 @@ pub struct WorldState {
     pub rng: u32,
     pub picked: Option<u16>,
     pub next_pick: Option<u16>,
+    /// The predators' class state (predator.rs); the original writes it
+    /// with each object (`Pred` slot 0x4c @ 0x42a950, hunters 0x416640).
+    /// Empty when read from a version-1 save: the running ones are kept.
+    pub predators: Vec<Predator>,
 }
 
 impl Sim {
@@ -92,6 +99,7 @@ impl Sim {
             rng: self.rng.get(),
             picked: self.picked,
             next_pick: self.next_pick,
+            predators: self.predators.clone(),
         }
     }
 
@@ -128,6 +136,17 @@ impl Sim {
                 if let Some(r) = mesh.apply_frame(d, p, frames, f) {
                     mark(&mut self.dirty, r.first, r.first + r.count);
                 }
+            }
+        }
+        if w.predators.len() == self.predators.len()
+            && w.predators.iter().zip(&self.predators).all(|(a, b)| a.obj == b.obj && a.class == b.class)
+        {
+            self.predators = w.predators.clone();
+        }
+        // A blink belongs to the abandoned timeline.
+        for p in &self.predators {
+            if let Some(d) = mesh.draw_of_object.get(p.obj).copied().flatten() {
+                mesh.set_blinking(d, false);
             }
         }
         self.vars = w.vars;
@@ -168,18 +187,20 @@ impl Sim {
         ]
     }
 
-    /// Serialises the whole game. Format `GLPS` version 1, little-endian:
+    /// Serialises the whole game. Format `GLPS` version 2, little-endian:
     ///
     /// ```text
-    /// u8[4] "GLPS"   u32 version (1)
+    /// u8[4] "GLPS"   u32 version (2; 1 is still read)
     /// u32 section    u32 total_ticks   u32 level_start_ticks   u64 sim_tick
     /// WorldState     the live world
     /// u8 has_snapshot,  WorldState     the respawn snapshot
     /// u8 has_creature,  u32 brain_len, u8[brain_len]  Brain::to_bytes (.mnd)
-    ///                   SavedCreature  (creature.rs, fixed 414 bytes)
+    ///                   SavedCreature  (creature.rs, fixed 434 bytes; 414 in v1)
     ///
     /// WorldState = u32 rng; u16 picked; u16 next_pick (0 = none);
-    ///              i32 vars[10]; u32 object_count; object_count x ObjState
+    ///              i32 vars[10]; u32 object_count; object_count x ObjState;
+    ///              (v2) u32 predator_count; predator_count x
+    ///              { u32 object; u8 class; Predator (predator.rs) }
     /// ObjState   = u16 state; u16 ticks; u32 events; u32 prev_events;
     ///              u8 pending_mask; i16 x popcount(mask & 0x7e);
     ///              i32 pos[3]; i32 rot[3];
@@ -223,15 +244,15 @@ impl Sim {
     /// which must already run the saved section (see [`saved_section`]).
     pub fn load_game(&mut self, data: &[u8], mesh: &mut WorldMesh) -> Result<(), &'static str> {
         let mut r = Reader { data, at: 0 };
-        let section = header(&mut r)?;
+        let (section, version) = header(&mut r)?;
         if section as usize != self.section {
             return Err("saved game is for another section");
         }
         let total = r.u32()?;
         let start = r.u32()?;
         let tick = r.u64()?;
-        let live = read_world(&mut r)?;
-        let snapshot = if r.u8()? != 0 { Some(read_world(&mut r)?) } else { None };
+        let live = read_world(&mut r, version)?;
+        let snapshot = if r.u8()? != 0 { Some(read_world(&mut r, version)?) } else { None };
         if live.objs.len() != self.objs.len() {
             return Err("saved game has another object count");
         }
@@ -239,7 +260,7 @@ impl Sim {
         let creature = if r.u8()? != 0 {
             let n = r.u32()? as usize;
             let brain = galapagos_formats::creature::Brain::parse(r.take(n)?, 0).map_err(|_| "bad brain")?;
-            let state = crate::creature::SavedCreature::read(&mut r)?;
+            let state = crate::creature::SavedCreature::read(&mut r, version)?;
             Some((brain, state))
         } else {
             None
@@ -263,17 +284,19 @@ impl Sim {
 /// Reads the section index out of a saved game, so the host can build that
 /// section before calling [`Sim::load_game`].
 pub fn saved_section(data: &[u8]) -> Result<u32, &'static str> {
-    header(&mut Reader { data, at: 0 })
+    header(&mut Reader { data, at: 0 }).map(|(s, _)| s)
 }
 
-fn header(r: &mut Reader) -> Result<u32, &'static str> {
+/// (section, version).
+fn header(r: &mut Reader) -> Result<(u32, u32), &'static str> {
     if r.take(4)? != MAGIC {
         return Err("not a Galapagos web save");
     }
-    if r.u32()? != VERSION {
+    let version = r.u32()?;
+    if !(1..=VERSION).contains(&version) {
         return Err("unsupported save version");
     }
-    r.u32()
+    Ok((r.u32()?, version))
 }
 
 fn write_world(w: &mut Writer, s: &WorldState) {
@@ -305,9 +328,25 @@ fn write_world(w: &mut Writer, s: &WorldState) {
             w.u16(f);
         }
     }
+    w.u32(s.predators.len() as u32);
+    for p in &s.predators {
+        w.u32(p.obj as u32);
+        w.u8(class_byte(p.class));
+        p.write(w);
+    }
 }
 
-fn read_world(r: &mut Reader) -> Result<WorldState, &'static str> {
+fn class_byte(c: Class) -> u8 {
+    match c {
+        Class::Pred => 0,
+        Class::Ball => 1,
+        Class::Fork => 2,
+        Class::Man => 3,
+        Class::Pole => 4,
+    }
+}
+
+fn read_world(r: &mut Reader, version: u32) -> Result<WorldState, &'static str> {
     let rng = r.u32()?;
     let nz = |v: u16| (v != 0).then_some(v);
     let picked = nz(r.u16()?);
@@ -360,7 +399,28 @@ fn read_world(r: &mut Reader) -> Result<WorldState, &'static str> {
             skip,
         });
     }
-    Ok(WorldState { objs, vars, rng, picked, next_pick })
+    let mut predators = Vec::new();
+    if version >= 2 {
+        let n = r.u32()? as usize;
+        if n > objs.len() {
+            return Err("absurd predator count");
+        }
+        for _ in 0..n {
+            let obj = r.u32()? as usize;
+            let class = match r.u8()? {
+                0 => Class::Pred,
+                1 => Class::Ball,
+                2 => Class::Fork,
+                3 => Class::Man,
+                4 => Class::Pole,
+                _ => return Err("bad predator class"),
+            };
+            let mut p = Predator::new(obj, class);
+            p.read(r)?;
+            predators.push(p);
+        }
+    }
+    Ok(WorldState { objs, vars, rng, picked, next_pick, predators })
 }
 
 fn slots(a: &mut Actions) -> [&mut Option<i16>; 6] {
@@ -557,7 +617,7 @@ mod tests {
         println!("saved game: {} bytes", bytes.len());
         let mut w = Writer::default();
         sim.creature.as_ref().unwrap().saved().write(&mut w);
-        assert_eq!(w.0.len(), 414, "SavedCreature size documented in save_game");
+        assert_eq!(w.0.len(), 434, "SavedCreature size documented in save_game");
         assert_eq!(saved_section(&bytes), Ok(0));
 
         let (mut other, mut other_mesh) = world(&d, 0, true);

@@ -16,7 +16,8 @@
 //! think      three NERM controllers → three slew-limited actuators    0x425dc0
 //! motor      actuators → walking speed, turn rate, stance, pose       0x4189c0
 //! learn      running costs; every 65,536 cost-ticks the GA steps      0x419470
-//! surface    lethal floors, pain, delayed hazards                     0x419550
+//! effects    the running affliction (affliction.rs)                   0x405fc0
+//! surface    lethal floors, pain, delayed hazards, afflictions        0x419550
 //! ```
 //!
 //! Coordinates: world space is the section's, **Z up** (floors face +z,
@@ -35,6 +36,8 @@
 //! 7 units/tick², the stance height and the polygon flag masks. Each
 //! approximation is marked `inferred:`.
 
+use crate::affliction::{Afflictions, Ctx, NORMAL};
+use crate::predator::Prey;
 use crate::sim::save::{Reader, Writer};
 use crate::sim::{self, PortalPlace, Request, Sim};
 use crate::world::{WorldMesh, FLOATS_PER_VERTEX};
@@ -72,13 +75,11 @@ fn normalize(a: V3) -> V3 {
 const UP: V3 = [0.0, 0.0, 1.0];
 const DOWN: V3 = [0.0, 0.0, -1.0];
 
-/// Gravity, units per tick². Grounded, the mover adds −7 to the vertical
-/// speed of the body above its feet; airborne it adds `up · −0x700 >> 10`
-/// to a velocity kept in 1/256 units: −7 units/tick² both ways
-/// (`CreatureMover_Integrate` @ 0x418060, verified in the listing).
-const GRAVITY: i32 = 7;
-/// Default gait (`body+0x69c`); afflictions 3 and 7..9 change it.
-const GAIT: i32 = 24;
+// Gravity: grounded, the mover adds −7 to the vertical speed of the body
+// above its feet; airborne it adds `up · −0x700 >> 10` to a velocity kept
+// in 1/256 units: −7 units/tick² both ways (`CreatureMover_Integrate` @
+// 0x418060, verified in the listing). Afflictions 10..12 change it, and
+// afflictions 3 and 7..9 change the gait (24): see affliction.rs.
 /// A right click is felt for this many ticks (`MEnc_PopTouchSide` @ 0x4261a0).
 const TOUCH_TICKS: u8 = 4;
 /// Ticks of contact before a "delayed" (0x800000) lethal surface fires.
@@ -101,8 +102,6 @@ const FLOOR_NORMAL: f32 = 0.5;
 /// inferred: where the low "ledge" ray of each eye looks for the floor.
 const LEDGE_AHEAD: f32 = 700.0;
 const LEDGE_DROP: f32 = 250.0;
-/// inferred: falling this long means he left the world: respawn.
-const MAX_FALL_TICKS: u32 = 20 * sim::TICKS_PER_SECOND;
 /// Radius around Mendel inside which polygons are gathered each tick: the
 /// longest ray (eye range 2,000 + 206) plus the hull, with margin.
 const GATHER_RADIUS: f32 = 3200.0;
@@ -149,6 +148,14 @@ const IR_VISIBLE: u32 = 0xc0;
 const LETHAL: u32 = 0xf000;
 const DELAYED: u32 = 0x80_0000;
 const HURTS: u32 = 0x100_0000;
+/// Under affliction 1 a lethal surface with bit 22 is harmless, and an
+/// affliction surface with bit 29 afflicts no more (0x41955b..0x419590).
+const SHIELDED: u32 = 0x40_0000;
+const UNAFFLICTING: u32 = 0x2000_0000;
+const AFFLICTION_BITS: u32 = 0x1e00_0000;
+/// Falling longer than 65 ticks (130 if the last surface had bit 4) makes
+/// the game inject this surface: lethal kind 1, then death (0x41960a).
+const FELL_TOO_LONG: u32 = 0x18_1000;
 /// Frame flag bit 5: a save pad ("blue, shimmering floor panel").
 const SAVE_PAD: u32 = 0x20;
 
@@ -205,6 +212,15 @@ impl Actuator {
 }
 
 // ——— World geometry for ray casts ——————————————————————————————————————
+
+/// What a predator's probe touched: the object, the polygon's unit normal
+/// and how far the probe went past it.
+#[derive(Clone, Copy, Debug)]
+pub struct ProbeHit {
+    pub obj: usize,
+    pub normal: V3,
+    pub depth: f32,
+}
 
 /// One mesh polygon in its object's local space, with a bounding sphere so
 /// the per-tick gather can skip far polygons cheaply.
@@ -440,22 +456,42 @@ pub struct Creature {
     /// eye ray hit, and how long he had been falling if he landed.
     seen_flags: u32,
     landed_after: u32,
-    /// Per-cue silence timers (ticks), see [`SOUND_CUES`].
+    /// Silence timers (ticks): `[0]` the landing cue's (`+0xa32`), `[1]`
+    /// the one the four other cues share (`+0xa30`); `[2..]` unused.
     cue_quiet: [u16; 5],
+    /// A ray of this tick hit a `0x180000`-class polygon (event 8).
+    seen_class: bool,
+
+    // ——— Afflictions and hazards ———
+    /// The active effect manager (`creature+0x8e8`), affliction.rs.
+    pub afflictions: Afflictions,
+    /// `creature+0xae8`: surface flags handed over by the game (a
+    /// predator's bite through `MEnc`, `Game_CreatureReact` @ 0x41cb80),
+    /// felt with the next touch.
+    injected: u32,
+    /// `+0x8f4` / `+0x8f6`: airborne ticks and the fall limit (0 = unset).
+    fall_count: u16,
+    fall_limit: u16,
+    /// inferred: `+0x134`, the flags of the last ground polygon.
+    last_ground_flags: u32,
+    /// `+0xafc`, `+0xafe`: affliction 6's held sensor noise.
+    noise: [i32; 2],
+    /// The section's last texture layer (affliction 1's skin).
+    last_texture: i16,
 }
 
 /// Mendel's five sound cues (`Creature_ReadSoundCues` @ 0x417ab0, played by
 /// `Creature_HandleSurfaceEvents` @ 0x419550): the 1-based sounds of the
-/// creature bank one cue picks from, and its silence after playing as
-/// `(min, random extra)` ticks. Order: landing, agitated, saw a hazard,
-/// saw a `0x180000`-class surface, strong left/right asymmetry.
-const SOUND_CUES: [(&[i16], u16, u16); 5] =
-    [(&[5], 5, 0), (&[1, 2], 5, 32), (&[3, 4], 20, 32), (&[6, 7], 20, 32), (&[8, 9, 10, 11], 20, 32)];
+/// creature bank one cue picks from, and its minimum silence after
+/// playing (plus `0..31` ticks from the brain's LCG). Order: landing
+/// (own timer), then by priority agitated, saw a hazard, saw a
+/// `0x180000`-class surface, strong left/right asymmetry (one shared
+/// timer, one cue per tick at most).
+const SOUND_CUES: [(&[i16], u16); 5] = [(&[5], 5), (&[1, 2], 5), (&[3, 4], 20), (&[6, 7], 20), (&[8, 9, 10, 11], 20)];
 /// "Landing" means after more than this many airborne ticks.
 const LANDING_AIR_TICKS: u32 = 5;
-/// inferred: the threshold of the asymmetry cue is not in the spec; this is
-/// "one eye sees something close, the other almost nothing".
-const ASYMMETRY: i32 = 192;
+/// Event 16: `|L - R| > 230` (`Creature_SenseInfrared` @ 0x418b00).
+const ASYMMETRY: i32 = 230;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Stats {
@@ -494,6 +530,21 @@ impl Creature {
             })
             .collect();
         let menc = section.objects.iter().position(|o| o.kind() == *b"MEnc");
+        // Affliction 5's eyes (`0x414e10`): the polygons sorted by their mean
+        // x; inferred: the four most forward ones, at rest.
+        let rest = body.pose_turning(0, 128, 0, true);
+        let mut by_x: Vec<(i64, usize)> = rest
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(k, f)| {
+                let n = f.indices.len().max(1) as i64;
+                (f.indices.iter().map(|&i| rest.vertices[i as usize][0] as i64).sum::<i64>() / n, k)
+            })
+            .collect();
+        by_x.sort_by(|a, b| b.0.cmp(&a.0));
+        let eyes = core::array::from_fn(|k| by_x.get(k).map_or(0, |e| e.1));
+        let afflictions = Afflictions::new(rest.faces.len(), eyes);
         let l = section.environment.light_direction;
         // Engine's load-time pose: SetPose(128, 1, 128, 0, 0).
         let stance = 128;
@@ -543,6 +594,14 @@ impl Creature {
             seen_flags: 0,
             landed_after: 0,
             cue_quiet: [0; 5],
+            seen_class: false,
+            afflictions,
+            injected: 0,
+            fall_count: 0,
+            fall_limit: 0,
+            last_ground_flags: 0,
+            noise: [0; 2],
+            last_texture: mesh.texture_count as i16 - 1,
         };
         c.act[0] = Actuator::new(13, stance);
         c
@@ -696,6 +755,8 @@ impl Creature {
                 self.settle(on, sim);
             }
             After::Respawn => {
+                // Respawn reason 3 ends any affliction (`0x405f10` at 0x417e68).
+                self.afflictions.end();
                 if sim.restore_snapshot(mesh) {
                     sim.events.push(sim::HostEvent { kind: sim::EV_CAMERA_SNAP, a: 0, b: 0, c: 0 });
                 }
@@ -718,39 +779,51 @@ impl Creature {
         self.think();
         self.apply_motor_outputs();
         self.accumulate_cost();
-        self.surface_events();
+        // The effect manager's tick (0x405fc0), then the surface events.
+        let floor_texture = self.ground.and_then(|g| sim.frame_texture(g.obj, g.poly));
+        let last_texture = self.last_texture;
+        self.afflictions.tick(Ctx { sim, floor_texture, last_texture });
+        self.surface_events(sim);
         self.on_save_pad = self.surface & SAVE_PAD != 0 || self.touches_save_pad(sim);
         self.sound_cues(sim);
     }
 
-    /// Plays the cues whose trigger happened this tick, each respecting its
-    /// silence timer. The agitated cue needs afflictions, which aren't
-    /// ported, so it never fires yet.
+    /// The cue part of `Creature_HandleSurfaceEvents` @ 0x419550. The
+    /// landing cue has its own 5-tick silence; the four others share one
+    /// timer and play by priority, one per tick, then stay quiet for their
+    /// minimum plus `0..31` ticks drawn from the brain's LCG.
     fn sound_cues(&mut self, sim: &mut Sim) {
-        for q in &mut self.cue_quiet {
-            *q = q.saturating_sub(1);
-        }
-        let triggered = [
-            self.landed_after > LANDING_AIR_TICKS,
-            false,
-            self.seen_flags & 0x4000_0000 != 0,
-            self.seen_flags & 0x18_0000 != 0,
-            (self.left - self.right).abs() >= ASYMMETRY,
+        let landed = self.landed_after > LANDING_AIR_TICKS;
+        let agitated = matches!(self.afflictions.kind, 7..=9);
+        let events = [
+            agitated,
+            self.seen_flags & HAZARD != 0,
+            self.seen_class,
+            (self.left - self.right).abs() > ASYMMETRY,
         ];
         self.landed_after = 0;
         self.seen_flags = 0;
-        for (k, &fire) in triggered.iter().enumerate() {
-            if !fire || self.cue_quiet[k] > 0 {
-                continue;
-            }
-            let (sounds, quiet, extra) = SOUND_CUES[k];
-            // The sound system's own randomness (the CRT rand), not the
-            // brain's LCG: choosing a sound must not change his behaviour.
-            let pick = sounds[sim.rand() as usize % sounds.len()];
-            let jitter = if extra > 0 { (sim.rand() % extra as u32) as u16 } else { 0 };
-            self.cue_quiet[k] = quiet + jitter;
-            sim.events.push(sim::HostEvent { kind: sim::EV_CREATURE_SOUND, a: pick as i32 - 1, b: 0, c: 0 });
+        self.seen_class = false;
+        if self.cue_quiet[0] > 0 {
+            self.cue_quiet[0] -= 1;
+        } else if landed {
+            self.play_cue(sim, 0);
+            self.cue_quiet[0] = SOUND_CUES[0].1;
         }
+        match events.iter().position(|&e| e) {
+            Some(k) if self.cue_quiet[1] == 0 => {
+                self.play_cue(sim, k + 1);
+                self.cue_quiet[1] = SOUND_CUES[k + 1].1 + (self.rng.next() & 0x1f) as u16;
+            }
+            _ => self.cue_quiet[1] = self.cue_quiet[1].saturating_sub(1),
+        }
+    }
+
+    fn play_cue(&mut self, sim: &mut Sim, k: usize) {
+        // The sound system's own randomness (the CRT rand) picks the sample.
+        let sounds = SOUND_CUES[k].0;
+        let pick = sounds[sim.rand() as usize % sounds.len()];
+        sim.events.push(sim::HostEvent { kind: sim::EV_CREATURE_SOUND, a: pick as i32 - 1, b: 0, c: 0 });
     }
 
     /// Collects every polygon near Mendel, transformed by its object's
@@ -848,6 +921,11 @@ impl Creature {
                 self.safe_point = Some((add(self.pos, scale(UP, 200.0)), self.heading()));
             }
         }
+        // Flags the game handed him (`creature+0xae8`): a predator's bite.
+        self.surface |= std::mem::take(&mut self.injected);
+        if let Some(g) = self.ground {
+            self.last_ground_flags = sim.frame_flags(g.obj, g.poly);
+        }
         // The right click (`MEnc`): felt exactly like a bump on that side.
         if let Some((left, n)) = self.touch {
             if left { self.left = 256 } else { self.right = 256 }
@@ -916,7 +994,7 @@ impl Creature {
         self.fwd = self.dir(self.turn_d);
         let d = scale(self.fwd, self.forward as f32);
         // The body bobs above its feet: vertical speed, gravity, clamp.
-        self.hvel -= GRAVITY;
+        self.hvel += self.afflictions.gravity();
         self.height += self.hvel;
         if self.height <= self.stance_height {
             self.height = self.stance_height;
@@ -1000,7 +1078,7 @@ impl Creature {
     /// Airborne: ballistic flight (`0x41814e`), landing on the first ground
     /// polygon under the path. Walls stop the horizontal motion.
     fn fall(&mut self, near: &Near, sim: &Sim) {
-        self.air = add(self.air, scale(DOWN, GRAVITY as f32));
+        self.air = add(self.air, scale(UP, self.afflictions.gravity() as f32));
         self.air_ticks += 1;
         let mut next = add(self.pos, self.air);
         if self.clearance(near, [next[0], next[1], self.pos[2]]).0 < 1.0 {
@@ -1040,6 +1118,33 @@ impl Creature {
         if self.right == 0 {
             self.right = self.eye(near, -a, range);
         }
+        match self.afflictions.kind {
+            // Blind (0x418fe8).
+            5 => {
+                self.left = 0;
+                self.right = 0;
+            }
+            // Confused (0x418ff9): each eye holds 0 or 256, flipping on
+            // `seed & 0xf0000 == 0` draws of the brain's LCG.
+            6 => {
+                for k in 0..2 {
+                    if self.lcg_low() {
+                        self.noise[k] = 0;
+                    } else if self.lcg_low() {
+                        self.noise[k] = 256;
+                    }
+                }
+                self.left = self.noise[0];
+                self.right = self.noise[1];
+            }
+            _ => {}
+        }
+    }
+
+    /// One LCG step, true when bits 16..19 of the seed are all 0 (1 in 16).
+    fn lcg_low(&mut self) -> bool {
+        self.rng.next();
+        self.rng.0 & 0xf_0000 == 0
     }
 
     fn eye(&mut self, near: &Near, angle: i32, range: i32) -> i32 {
@@ -1049,10 +1154,15 @@ impl Creature {
         let mut best = 0;
         // inferred: the high and middle rays start at the top of the shell
         // and at his origin (the stacking offsets are not in the spec).
+        // Under affliction 1 polygons flagged 0x400000 count as IR-visible
+        // (0x419290: `flags |= 0xc0`): he sees the lethal floors.
+        let shield = self.afflictions.kind == 1;
+        let seen = move |t: &Tri| is_seen(t) || (shield && t.flags & SHIELDED != 0 && t.flags & (SOLID | HAZARD) != 0);
         for lift in [150.0, 0.0] {
-            if let Some(h) = near.cast(add(self.pos, scale(self.up, lift)), dir, reach, is_seen) {
+            if let Some(h) = near.cast(add(self.pos, scale(self.up, lift)), dir, reach, seen) {
                 best = best.max(value(h.dist));
                 self.seen_flags |= h.flags;
+                self.seen_class |= h.flags & 0x38_0000 == 0x18_0000;
             }
         }
         // The low ray (`Creature_CastIrLedgeRay` @ 0x4191f0) reports drops.
@@ -1083,10 +1193,14 @@ impl Creature {
             self.outputs[k] = n.run_chain(&p, &mut self.rng);
             self.act[k].set_target(self.outputs[k]);
         }
-        // (n38, n3c) = (1, 2) without afflictions. Turning only happens
-        // while walking: its actuator's time step is the walking speed.
-        self.act[0].step(0, 256);
-        for _ in 0..2 {
+        // (n38, n3c) = (1, 2) without afflictions (`Creature_Think` @
+        // 0x418970). Turning only happens while walking: its actuator's
+        // time step is the walking speed.
+        let (n38, n3c) = self.afflictions.actuator_steps();
+        for _ in 0..n38 {
+            self.act[0].step(0, 256);
+        }
+        for _ in 0..n3c {
             self.act[1].step(0, 256);
             let walking = (2 * self.act[1].value - 256).abs();
             self.act[2].step(0, walking);
@@ -1101,7 +1215,7 @@ impl Creature {
         self.side = turn_out >= 128;
         let speed = 2 * self.act[1].value - 256;
         self.stance = self.act[0].value;
-        let (turn, speed, gait) = (self.turn as i64, speed as i64, GAIT as i64);
+        let (turn, speed, gait) = (self.turn as i64, speed as i64, self.afflictions.gait() as i64);
         // 24-bit fractional accumulators keep the remainders between ticks.
         self.fwd_acc += (256 - turn) * speed * gait * 420;
         let fwd = self.fwd_acc >> 24;
@@ -1153,11 +1267,42 @@ impl Creature {
         }
     }
 
-    /// `Creature_HandleSurfaceEvents` @ 0x419550 (sounds and afflictions
-    /// not ported).
-    fn surface_events(&mut self) {
+    /// `Creature_HandleSurfaceEvents` @ 0x419550: the shield, the fall
+    /// limit, lethal surfaces and afflictions (the cues are [`Self::sound_cues`]).
+    fn surface_events(&mut self, sim: &mut Sim) {
+        if self.afflictions.kind == 1 {
+            if self.surface & SHIELDED != 0 {
+                self.surface &= !LETHAL;
+            }
+            if self.surface & UNAFFLICTING != 0 {
+                self.surface &= !AFFLICTION_BITS;
+            }
+        }
+        // Falling for too long is lethal (0x4195cf..0x41962a).
+        if self.ground.is_none() {
+            if self.fall_limit == 0 {
+                self.fall_limit = if self.last_ground_flags & 0x10 != 0 { 130 } else { 65 };
+            } else {
+                let n = self.fall_count;
+                self.fall_count += 1;
+                if self.fall_limit < n {
+                    self.fall_count = 0;
+                    self.surface = (self.surface & 0xffd8_1fff) | FELL_TOO_LONG;
+                } else if self.surface & 0x10 != 0 {
+                    self.fall_count = 0;
+                }
+            }
+        } else {
+            self.fall_count = 0;
+            self.fall_limit = 0;
+        }
         let f = self.surface;
-        let fell_out = self.air_ticks > MAX_FALL_TICKS || self.pos[2] < self.floor_limit;
+        // not in the original: a safety net for our approximate mover, if
+        // he leaves the world's bounding box.
+        let fell_out = self.pos[2] < self.floor_limit;
+        if f & AFFLICTION_BITS != 0 {
+            self.afflictions.apply(((f >> 25) & 15) as u8, sim);
+        }
         if f & LETHAL == 0 && !fell_out {
             if self.ground.is_some() {
                 self.delay = DELAY_TICKS;
@@ -1180,6 +1325,33 @@ impl Creature {
         // pending destination we don't have here, so they also respawn.
         self.stats.deaths += 1;
         self.mode = Mode::Vanishing(VANISH_TICKS, After::Respawn);
+    }
+
+    // ——— Predators ———
+
+    /// Mendel as `Pred` & co. see him: his position (`creature+0xa34`,
+    /// `0x4183a0`), his affliction (`0x4198e0`) and his click hull.
+    pub(crate) fn prey(&self) -> Option<Prey> {
+        (self.mode != Mode::Absent).then(|| Prey {
+            pos: self.pos.map(|c| c as i32),
+            affliction: self.afflictions.kind,
+            menc: self.menc,
+        })
+    }
+
+    /// `Game_CreatureReact` @ 0x41cb80 → 0x4198b0: OR surface flags into
+    /// `creature+0xae8`; he feels them with his next touch.
+    pub(crate) fn react(&mut self, flags: u32) {
+        self.injected |= flags;
+    }
+
+    /// A predator's probe (`World_Cast` @ 0x4089e0 on the segment `a → b`)
+    /// against polygons whose flags meet `mask`, ignoring object `skip`.
+    pub(crate) fn probe(&self, sim: &Sim, a: V3, b: V3, mask: u32, skip: usize) -> Option<ProbeHit> {
+        let len = length(sub(b, a));
+        let near = self.gather_masked(sim, a, len, mask);
+        let h = near.segment(a, b, |t| t.obj != skip)?;
+        Some(ProbeHit { obj: h.obj, normal: h.normal, depth: len - h.dist })
     }
 
     // ——— MEnc and rendering ———
@@ -1218,18 +1390,25 @@ impl Creature {
         }
         let mesh = self.body.pose_turning((self.phase >> 8) as u8, self.stance, self.turn, self.side);
         let world: Vec<V3> = mesh.vertices.iter().map(|v| add(self.pos, self.rotate(v.map(|c| c as f32)))).collect();
-        for f in &mesh.faces {
+        let look = &self.afflictions.look;
+        for (k, f) in mesh.faces.iter().enumerate() {
             if f.indices.len() < 3 {
                 continue;
             }
             let p = |k: usize| world[f.indices[k] as usize];
             let n = normalize(cross(sub(p(1), p(0)), sub(p(2), p(0))));
-            let light = 0.7 + 0.3 * dot(n, self.light).abs();
+            // An affliction's colour ramp: 0x7fff is the normal ramp, less
+            // darkens it (`0x406110`: × 2v/65535), more whitens it.
+            // inferred: whitening drawn as a brighter light, up to × 1.5.
+            let b = *look.bright.get(k).unwrap_or(&NORMAL) as f32;
+            let ramp = if b < 32768.0 { b / 32767.0 } else { 1.0 + (b - 32767.0) / 65535.0 };
+            let light = (0.7 + 0.3 * dot(n, self.light).abs()) * ramp;
+            let texture = look.texture.map_or(f.texture as f32, |t| t as f32);
             for k in 1..f.indices.len() - 1 {
                 for j in [0, k, k + 1] {
                     let v = p(j);
                     let [u, t] = f.uv[j];
-                    self.vertices.extend_from_slice(&[v[0], v[1], v[2], u / 128.0, t / 128.0, f.texture as f32, light]);
+                    self.vertices.extend_from_slice(&[v[0], v[1], v[2], u / 128.0, t / 128.0, texture, light]);
                 }
             }
         }
@@ -1305,6 +1484,9 @@ pub struct SavedCreature {
     stats: Stats,
     rng: u32,
     cue_quiet: [u16; 5],
+    /// Since save version 2: `injected`, the fall counter and limit, the
+    /// last ground flags, affliction 6's held noise.
+    hazards: (u32, u16, u16, u32, [i32; 2]),
 }
 
 impl Creature {
@@ -1337,6 +1519,7 @@ impl Creature {
             stats: self.stats,
             rng: self.rng.0,
             cue_quiet: self.cue_quiet,
+            hazards: (self.injected, self.fall_count, self.fall_limit, self.last_ground_flags, self.noise),
         }
     }
 
@@ -1376,6 +1559,10 @@ impl Creature {
         self.stats = s.stats;
         self.rng = Lcg(s.rng);
         self.cue_quiet = s.cue_quiet;
+        (self.injected, self.fall_count, self.fall_limit, self.last_ground_flags, self.noise) = s.hazards;
+        // `Creature_Read` @ 0x419950 ends any affliction (0x405f10 at
+        // 0x419967): afflictions are not part of a saved game.
+        self.afflictions.end();
         self.build_vertices();
     }
 
@@ -1477,9 +1664,16 @@ impl SavedCreature {
         [s.touches_posted, s.deaths, s.teleports, s.evolutions].iter().for_each(|&i| w.u32(i));
         w.u32(self.rng);
         self.cue_quiet.iter().for_each(|&q| w.u16(q));
+        let (injected, count, limit, ground, noise) = self.hazards;
+        w.u32(injected);
+        w.u16(count);
+        w.u16(limit);
+        w.u32(ground);
+        noise.iter().for_each(|&n| w.i32(n));
     }
 
-    pub(crate) fn read(r: &mut Reader) -> Result<Self, &'static str> {
+    /// `version` is the saved game's: version 1 lacks the hazard block.
+    pub(crate) fn read(r: &mut Reader, version: u32) -> Result<Self, &'static str> {
         fn v3(r: &mut Reader) -> Result<V3, &'static str> {
             Ok([r.f32()?, r.f32()?, r.f32()?])
         }
@@ -1539,6 +1733,11 @@ impl SavedCreature {
         for q in &mut cue_quiet {
             *q = r.u16()?;
         }
+        let hazards = if version >= 2 {
+            (r.u32()?, r.u16()?, r.u16()?, r.u32()?, [r.i32()?, r.i32()?])
+        } else {
+            (0, 0, 0, 0, [0; 2])
+        };
         Ok(SavedCreature {
             mode,
             pos,
@@ -1567,6 +1766,7 @@ impl SavedCreature {
             stats,
             rng,
             cue_quiet,
+            hazards,
         })
     }
 }
@@ -1577,12 +1777,12 @@ mod tests {
     use galapagos_formats::creature::overlay_for_age;
     use galapagos_formats::worlds::Archive;
 
-    fn data() -> Option<Vec<u8>> {
+    pub(super) fn data() -> Option<Vec<u8>> {
         std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../originals/mounted/install/data/worlds")).ok()
     }
 
     /// Section `s` with Mendel loaded (not spawned) and the level-3 brain.
-    fn world(d: &[u8], s: usize) -> (Sim, WorldMesh) {
+    pub(super) fn world(d: &[u8], s: usize) -> (Sim, WorldMesh) {
         let a = Archive::parse(d).unwrap();
         let section = a.world(s).unwrap();
         let mesh = WorldMesh::build(&section);
@@ -1805,5 +2005,224 @@ mod tests {
         }
         assert!(tried > 0);
         assert!(found > 0, "Mendel can stand on a save pad and click it");
+    }
+}
+
+/// Afflictions and predators against the CD (docs/re/mendel.md §2.4,
+/// docs/re/predators.md). They skip themselves without game data.
+#[cfg(test)]
+mod hazard_tests {
+    use super::tests::{data, world};
+    use galapagos_formats::worlds::Archive;
+    use super::*;
+    use crate::affliction::DURATION;
+
+    /// Section 0 after the Space-key skip: Mendel alive on the arrival pad.
+    fn alive_in_section0(d: &[u8]) -> (Sim, WorldMesh) {
+        let (mut sim, mut mesh) = world(d, 0);
+        for _ in 0..10 * sim::TICKS_PER_SECOND {
+            sim.skip_held = (120..122).contains(&sim.tick);
+            sim.step(&mut mesh);
+        }
+        sim.skip_held = false;
+        assert_eq!(sim.creature.as_ref().unwrap().mode, Mode::Alive);
+        (sim, mesh)
+    }
+
+    /// The speed affliction (3) of section 1's #166 / section 5's #176
+    /// (frame flags 0x06000100): felt through his surface, it switches the
+    /// gait to 53 and the muscles to (1, 6) steps, plays sound 39 and the
+    /// strobe, and ends exactly 1440 ticks later.
+    #[test]
+    fn speed_affliction_changes_gait_and_ends_on_time() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = alive_in_section0(&d);
+        sim.events.clear();
+        sim.creature.as_mut().unwrap().react(0x0600_0100);
+        sim.step(&mut mesh);
+        let c = sim.creature.as_ref().unwrap();
+        assert_eq!(c.afflictions.kind, 3, "the surface afflicted him");
+        assert_eq!((c.afflictions.gait(), c.afflictions.actuator_steps()), (53, (1, 6)));
+        assert!(sim.events.iter().any(|e| e.kind == sim::EV_AFFLICTION_SOUND && e.a == 0x27 - 1), "sound 39");
+        sim.step(&mut mesh);
+        assert_eq!(sim.flash.remap, Some([255, 255, 255, 255, 255, 255]), "the screen strobes white");
+        let start = sim.tick - 1;
+        let mut ended = None;
+        for _ in 0..2000 {
+            sim.step(&mut mesh);
+            let c = sim.creature.as_ref().unwrap();
+            if c.mode != Mode::Alive {
+                break;
+            }
+            if c.afflictions.kind == 0 {
+                ended = Some(sim.tick - start);
+                break;
+            }
+        }
+        println!("affliction 3 lasted {ended:?} ticks");
+        assert_eq!(ended, Some(DURATION[3] as u64 + 1), "1440 ticks of effect, gone on the next");
+        assert_eq!(sim.creature.as_ref().unwrap().afflictions.gait(), 24);
+    }
+
+    /// Afflictions 7/8/9 live on "delayed" lethal floors (e.g. section 3,
+    /// 0x2ed93002: affliction 7, lethal kind 3 after 80 ticks): standing on
+    /// one he is agitated (gait 40, cue sounds 1 and 2, flickers), then dies.
+    #[test]
+    fn agitating_floor_agitates_then_kills() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = alive_in_section0(&d);
+        sim.events.clear();
+        let mut agitated_ticks = 0;
+        let mut died_at = None;
+        for t in 0..200 {
+            if let Some(c) = sim.creature.as_mut() {
+                c.react(0x2ed9_3002);
+            }
+            sim.step(&mut mesh);
+            let c = sim.creature.as_ref().unwrap();
+            if c.afflictions.kind == 7 {
+                agitated_ticks += 1;
+                assert_eq!(c.afflictions.gait(), 40);
+            }
+            if matches!(c.mode, Mode::Vanishing(..)) {
+                died_at = Some(t);
+                break;
+            }
+        }
+        let cues = sim.events.iter().filter(|e| e.kind == sim::EV_CREATURE_SOUND && (e.a == 0 || e.a == 1)).count();
+        let crackles = sim.events.iter().filter(|e| e.kind == sim::EV_AFFLICTION_SOUND).count();
+        println!("agitated {agitated_ticks} ticks, died at {died_at:?}, {cues} agitated cues, {crackles} crackles");
+        assert!(agitated_ticks >= 79, "agitated while he stands there");
+        assert_eq!(died_at, Some(79), "the delayed floor kills after 80 ticks of contact");
+        assert!(cues >= 2, "the agitated cue (sounds 1, 2) plays");
+        assert!(crackles >= 1, "crackles");
+        // Death ends the affliction (respawn reason 3).
+        for _ in 0..60 {
+            sim.step(&mut mesh);
+        }
+        assert_eq!(sim.creature.as_ref().unwrap().afflictions.kind, 0);
+    }
+
+    /// Under the shield (affliction 1) a lethal floor with bit 22 is
+    /// harmless, and he sees it: the most common lethal floor on the CD,
+    /// 0x01582380 (kind 2, pain), does nothing to him.
+    #[test]
+    fn shield_makes_lethal_floors_harmless() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = alive_in_section0(&d);
+        sim.creature.as_mut().unwrap().react(0x0200_0100);
+        sim.step(&mut mesh);
+        assert_eq!(sim.creature.as_ref().unwrap().afflictions.kind, 1);
+        for _ in 0..50 {
+            sim.creature.as_mut().unwrap().react(0x0158_2380);
+            sim.step(&mut mesh);
+        }
+        let c = sim.creature.as_ref().unwrap();
+        assert_eq!(c.mode, Mode::Alive, "still alive on a lethal floor");
+        assert!(c.afflictions.look.texture.is_some(), "shimmering skin");
+    }
+
+    /// The affliction sounds are world-bank sounds (1-based), the same
+    /// slots in every world. Those of the afflictions the CD uses (1, 3,
+    /// and 7/8/9's crackles) and of 5 exist in all eight banks; those of
+    /// the unused 4, 6, 10, 11, 12 (40, 42, 52..54) are empty slots
+    /// everywhere: the designers never shipped them.
+    #[test]
+    fn affliction_sounds_exist_in_every_world() {
+        let Some(d) = data() else { return };
+        let a = Archive::parse(&d).unwrap();
+        for s in 0..a.sections.len() {
+            let bank = crate::sound::Bank::decode(&d, &a.world(s).unwrap().sounds, 1);
+            let has = |n: usize| bank.sounds.get(n - 1).is_some_and(|x| x.is_some());
+            for n in [0x25, 0x27, 0x29, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30] {
+                assert!(has(n), "section {s}: sound {n}");
+            }
+            for n in [0x28, 0x2a, 0x34, 0x35, 0x36] {
+                assert!(!has(n), "section {s}: sound {n} is an empty slot");
+            }
+        }
+    }
+
+    /// Section 2's ball `PBal` #54, activated as its state machine does
+    /// (trigger 1 → `shorts [2, 1, 1, 1]`: appear at the `PPol` #55), chases
+    /// Mendel and kills him on contact through his click hull `MEnc`.
+    #[test]
+    fn ball_appears_chases_and_bites_mendel() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 2);
+        sim.wake_all = true;
+        // Let the section start, spawn Mendel by its Strt.
+        for _ in 0..20 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            if sim.creature.as_ref().unwrap().mode == Mode::Alive {
+                break;
+            }
+        }
+        let c = sim.creature.as_ref().unwrap();
+        assert_eq!(c.mode, Mode::Alive, "spawned in section 2");
+        let ball = 54 - 1;
+        let dist = |sim: &Sim| {
+            let p = sim.position_of(ball as u16 + 1).map(|v| v as f32);
+            length(sub(p, sim.creature.as_ref().unwrap().pos))
+        };
+        // 1. Its state 3 is what the launcher #55 sends it to: entry
+        // trigger 1 (`shorts [2, 1, 1, 1]`), two ticks later state 1, where
+        // it hunts for 100 ticks, then state 2 (trigger 2: vanish).
+        sim.debug_goto(ball, 3);
+        sim.step(&mut mesh);
+        let k = sim.predators.iter().position(|p| p.obj == ball).unwrap();
+        assert!(matches!(sim.predators[k].mode, 2 | 3), "appearing");
+        let mut first = None;
+        let mut closest = f32::MAX;
+        let mut parked = None;
+        for t in 0..300 {
+            sim.step(&mut mesh);
+            let mode = sim.predators[k].mode;
+            if first.is_none() && mode == 3 {
+                first = Some(dist(&sim));
+            }
+            if mode == 3 {
+                closest = closest.min(dist(&sim));
+            }
+            // Mid-chase, a saved game carries the ball's state (GLPS v2).
+            if t == 40 {
+                sim.take_snapshot(); // what the Save dialog does
+                let bytes = sim.save_game();
+                let (mut other, mut other_mesh) = world(&d, 2);
+                other.load_game(&bytes, &mut other_mesh).unwrap();
+                assert!(other.predators == sim.predators, "predators restored");
+                assert!(other.save_game() == bytes, "load then save is the identity");
+            }
+            if first.is_some() && mode == 0 {
+                parked = Some((t, sim.position_of(ball as u16 + 1)));
+                break;
+            }
+        }
+        let d0 = first.expect("the ball becomes active");
+        println!("ball: active {d0:.0} away, came within {closest:.0}, vanished {parked:?}");
+        assert!(closest < d0 - 15_000.0, "it chases him");
+        assert_eq!(parked.map(|p| p.1), Some([100_000; 3]), "after 100 ticks it vanishes and is parked");
+
+        // 2. Launched close to him (Mendel dropped 1,500 under the launcher),
+        // it bites within a second or two, before a fall could kill him.
+        let deaths = sim.creature.as_ref().unwrap().stats.deaths;
+        let pole = sim.position_of(55).map(|v| v as f32);
+        sim.events.clear();
+        let c = sim.creature.as_mut().unwrap();
+        c.place(add(pole, [0.0, 0.0, -1500.0]), 0);
+        c.mode = Mode::Alive;
+        sim.debug_goto(ball, 3);
+        let mut bite = None;
+        for t in 0..60 {
+            sim.step(&mut mesh);
+            if sim.creature.as_ref().unwrap().stats.deaths > deaths {
+                bite = Some(t);
+                break;
+            }
+        }
+        let growls = sim.events.iter().filter(|e| e.kind == sim::EV_PREDATOR_SOUND).count();
+        println!("bitten after {bite:?} ticks, {growls} predator sounds");
+        assert!(bite.is_some_and(|t| t < 50), "the ball kills Mendel through MEnc");
+        assert!(growls > 0, "it growls / bites (predator bank)");
     }
 }

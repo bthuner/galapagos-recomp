@@ -100,6 +100,22 @@ export function createSfx(engine, ctx, out = ctx.destination) {
       const { position } = engine.creature.state();
       play(1, sound, { position, near: 15000, far: 16000 });
     },
+    // An affliction's sound (engine event kind 8): a world-bank sound heard
+    // at Mendel, with the effect manager's distances (2000 / 20000). `packed`
+    // holds the volume (low 16 bits) and the pitch variation >> 8 (high).
+    affliction(sound, pitch, packed) {
+      const { position } = engine.creature.state();
+      const volume = packed & 0xffff;
+      const variation = (packed >>> 16) << 8;
+      play(0, sound, { position, near: 2000, far: 20000, volume, pitch, variation });
+    },
+    // A predator's cue (engine event kind 9): bank 2, from the predator.
+    // Sound 0 (the growl) carries 5000..10000 units, sound 1 (the bite,
+    // half pitch) 5000 (the two cues of Pred 0x42a5a0).
+    predator(sound, objectId, pitch) {
+      const position = engine.sim.object(objectId).position;
+      play(2, sound, { position, near: 500, far: sound === 0 ? 10000 : 5000, pitch });
+    },
     // The camera is the listener.
     listen(eye, forward, up) {
       const l = ctx.listener;
