@@ -295,16 +295,32 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     const { draws } = current;
     const transforms = current.transforms();
     const visible = current.visible?.();
-    const drawWorld = () => {
+    const cull = current.cull?.();
+    // Faces (world.rs `culls_glass`): a polygon is seen from the side its
+    // normal (v2 − v1) × (v0 − v1) points to, which our counter-clockwise
+    // triangles make WebGL's front. Textured polygons always lose their
+    // back (Direct3D CULLMODE counter-clockwise on its reversed fans, and
+    // the mesh draw's own test 0x402490); glass only when its object's
+    // backface flag is on (`cull`: its last polygon is not glass).
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+    gl.frontFace(gl.CCW);
+    const drawWorld = (glass) => {
       for (let i = 0; i < draws.length / 2; i++) {
         if (visible && !visible[i]) continue; // hidden by a -5 appearance frame
+        if (glass) {
+          if (cull && !cull[i]) gl.disable(gl.CULL_FACE);
+          else gl.enable(gl.CULL_FACE);
+        }
         gl.uniformMatrix4fv(uModel, false, transforms.subarray(i * 16, i * 16 + 16));
         gl.drawArrays(gl.TRIANGLES, draws[i * 2], draws[i * 2 + 1]);
       }
     };
     gl.uniform1i(uGlass, 0);
-    drawWorld();
-    // Mendel: a few hundred triangles, re-uploaded every frame.
+    drawWorld(false);
+    // Mendel: a few hundred triangles, re-uploaded every frame. His body
+    // is a mesh like any other (backface flag on, 0x402150), so he is
+    // culled the same way.
     const mendel = current.creatureVertices?.();
     if (mendel && mendel.length) {
       gl.bindVertexArray(mvao);
@@ -322,8 +338,9 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     gl.depthMask(false);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE);
-    drawWorld();
+    drawWorld(true);
     gl.disable(gl.BLEND);
+    gl.disable(gl.CULL_FACE);
     gl.depthMask(true);
   }
 

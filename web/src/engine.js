@@ -68,6 +68,8 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
             liveVertices: () => new Float32Array(wasm.memory.buffer, wasm.world_vertices_ptr(), verts * 10),
             // Objects hidden by a -5 appearance frame (fresh view each frame).
             visible: () => new Uint8Array(wasm.memory.buffer, wasm.world_visible_ptr(), wasm.world_draw_count()),
+            // Objects whose glass is back-face culled too (fresh view each frame).
+            cull: () => new Uint8Array(wasm.memory.buffer, wasm.world_cull_ptr(), wasm.world_draw_count()),
             farClip: wasm.world_far_clip(),
             // Lighting (crates/engine/src/world.rs, `light_level`): the
             // section's materials (4 floats each, indexed by a vertex's

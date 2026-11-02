@@ -47,8 +47,12 @@ pub struct PolyAttr {
     /// Index of a section colour ramp (re-registered with the renderer per
     /// section by `Creature_ReadWorldSection` @ 0x4177d0). Values 4 and 8.
     pub color_ramp: u16,
-    /// Stored at polygon +0x5c / +0x5e; meaning unknown.
-    pub unknown: [u16; 2],
+    /// Texel offset `(u, v)` at polygon +0x5c / +0x5e: the same field a
+    /// world polygon's appearance frame sets (`0x402420`). The Direct3D
+    /// draw adds `(offset & 0x1ff) / 128` to the texture coordinates
+    /// (`0x40e850`), the software one `offset & 0x7f` texels (`0x404100`):
+    /// with wrapping textures, the same shift.
+    pub offset: [i16; 2],
 }
 
 /// One of the three body parts: the shell, or one stance variant of the legs.
@@ -115,7 +119,7 @@ impl BodyPart {
         }
         let mut attrs = Vec::with_capacity(n);
         for _ in 0..n {
-            attrs.push(PolyAttr { texture: c.u16()?, color_ramp: c.u16()?, unknown: [c.u16()?, c.u16()?] });
+            attrs.push(PolyAttr { texture: c.u16()?, color_ramp: c.u16()?, offset: [c.u16()? as i16, c.u16()? as i16] });
         }
         Ok(Self { offset, polygons, uv, frames, attrs })
     }
@@ -170,6 +174,8 @@ pub struct Face {
     pub texture: u16,
     /// The section colour ramp (material) of the polygon (4 or 8).
     pub color_ramp: u16,
+    /// Texel offset added to `uv` when drawn ([`PolyAttr::offset`]).
+    pub offset: [i16; 2],
 }
 
 impl CreatureBody {
@@ -249,7 +255,8 @@ impl CreatureBody {
                     idx.reverse();
                 }
                 let uv = polygon_uvs(&vertices, &idx, &part.uv[i]);
-                faces.push(Face { indices: idx, uv, texture: part.attrs[i].texture + TEXTURE_BASE, color_ramp: part.attrs[i].color_ramp });
+                let a = part.attrs[i];
+                faces.push(Face { indices: idx, uv, texture: a.texture + TEXTURE_BASE, color_ramp: a.color_ramp, offset: a.offset });
             }
         }
         PosedMesh { vertices, faces }
@@ -684,6 +691,33 @@ mod tests {
         // the four skins exist in every section
         for i in 0..a.sections.len() {
             assert!(a.world(i).unwrap().textures.len() > 19);
+        }
+    }
+
+    /// His materials and texel offsets (`0x426c50` → polygon +0x60, +0x5c,
+    /// +0x5e). The head is the shell's polygons 0..=6 (texture 18, the skin
+    /// with the glowing stripe); its four front faces 2..=5 are the only
+    /// polygons on material 8 (brighter base) and 61 of 78 polygons carry
+    /// an offset: the head's first is
+    /// (134, −2974), i.e. (6, 98) texels into the 128-texel skin, which is
+    /// what puts the stripe in view.
+    #[test]
+    fn body_materials_and_offsets() {
+        let Some(d) = data() else { return };
+        let a = Archive::parse(&d).unwrap();
+        let body = CreatureBody::parse(&d, a.header.creature as usize).unwrap();
+        let ramps: Vec<u16> = [&body.shell, &body.legs_a, &body.legs_b].iter().flat_map(|p| p.attrs.iter().map(|a| a.color_ramp)).collect();
+        assert!(ramps.iter().all(|&r| r == 4 || r == 8));
+        assert_eq!(ramps.iter().filter(|&&r| r == 8).count(), 4);
+        assert_eq!(body.shell.attrs[0].offset, [134, -2974]);
+        assert_eq!(body.shell.attrs[0].texture + TEXTURE_BASE, 18);
+        let with_offset = [&body.shell, &body.legs_a, &body.legs_b].iter().flat_map(|p| p.attrs.iter()).filter(|a| a.offset != [0, 0]).count();
+        assert_eq!(with_offset, 61);
+        // every section gives materials 4 and 8 the same values (m1 = 0:
+        // never brighter than the plain texture)
+        for i in 0..a.sections.len() {
+            let r = a.world(i).unwrap().color_ramps;
+            assert_eq!((r[4], r[8]), ([41574, 0, 65535, 65535, 0, 65535], [62873, 0, 65535, 65535, 0, 65535]));
         }
     }
 

@@ -1053,11 +1053,14 @@ impl Creature {
             let level = world::light_level(m, &self.light, n);
             let (light, fog) = (-1.0 - level as f32, m[5]);
             let texture = look.texture.map_or(f.texture as f32, |t| t as f32);
+            // The polygon's texel offset (+0x5c/+0x5e), added by the
+            // Direct3D draw as `(offset & 0x1ff) / 128` (0x40e850).
+            let [du, dv] = f.offset.map(|o| (o & 0x1ff) as f32);
             for k in 1..f.indices.len() - 1 {
                 for j in [0, k, k + 1] {
                     let v = p(j);
                     let [u, t] = f.uv[j];
-                    self.vertices.extend_from_slice(&[v[0], v[1], v[2], u / 128.0, t / 128.0, texture, light, fog, 0.0, 0.0]);
+                    self.vertices.extend_from_slice(&[v[0], v[1], v[2], (u + du) / 128.0, (t + dv) / 128.0, texture, light, fog, 0.0, 0.0]);
                 }
             }
         }
@@ -1653,6 +1656,47 @@ mod tests {
         println!("then: {:?} at {:?}, {:?}", c.mode, c.pos.map(|v| v as i32), c.stats);
         assert!(c.stats.walked > 2000.0, "walked {}", c.stats.walked);
         assert!(c.pos[2].abs() < 40_000.0, "inside the level, z = {}", c.pos[2]);
+    }
+
+    /// Culling never hides the floor under him: in section 0 (after the
+    /// skip, a minute of walking) and at section 2's upside-down start,
+    /// the triangles the renderer draws for the polygon he stands on turn
+    /// counter-clockwise seen from his side, i.e. he stands on their front
+    /// (the side `0x402490` and Direct3D keep, world.rs `culls_glass`).
+    #[test]
+    fn mendel_stands_on_the_drawn_side_of_his_floors() {
+        let Some(d) = data() else { return };
+        let front = |sim: &Sim, mesh: &WorldMesh| -> Option<bool> {
+            let c = sim.creature.as_ref().unwrap();
+            let (o, p) = c.ground()?;
+            let r = mesh.poly_ranges[mesh.draw_of_object[o]?][p];
+            let m = sim::transform(sim.pose(o).0, sim.pose(o).1);
+            let v = |i: u32| {
+                let k = i as usize * FLOATS_PER_VERTEX;
+                sim::apply(&m, [mesh.vertices[k], mesh.vertices[k + 1], mesh.vertices[k + 2]])
+            };
+            let (a, b, t) = (v(r.first), v(r.first + 1), v(r.first + 2));
+            Some(dot(cross(sub(b, a), sub(t, a)), sub(c.pos, a)) > 0.0)
+        };
+        let (mut sim, mut mesh) = world(&d, 0);
+        run(&mut sim, &mut mesh, 10, Some(5));
+        let (mut grounded, mut on_front) = (0, 0);
+        for _ in 0..60 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            if let Some(f) = front(&sim, &mesh) {
+                grounded += 1;
+                on_front += f as u32;
+            }
+        }
+        assert!(grounded > 50 * sim::TICKS_PER_SECOND);
+        assert_eq!(on_front, grounded, "always on the drawn side");
+
+        let (mut sim, mut mesh) = world(&d, 2);
+        while sim.creature.as_ref().unwrap().mode == Mode::Absent {
+            sim.step(&mut mesh);
+        }
+        assert!(sim.creature.as_ref().unwrap().up[2] < -0.999, "upside down");
+        assert_eq!(front(&sim, &mesh), Some(true), "under a ceiling that faces him");
     }
 
     /// After the skip, a minute of walking around the main area: whatever

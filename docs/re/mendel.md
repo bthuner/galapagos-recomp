@@ -87,7 +87,7 @@ u32 polygon_count                               asserted == expected
 polygon_count x { u32 n; u16 index[n] }         n = 3..7
 polygon_count x f32[6]                          texture coordinates (below)
 128 x { u32 vertex_count; vertex_count x i16[3] }   key frames, vertex_count asserted
-polygon_count x { u16 texture; u16 color_ramp; u16 unk0; u16 unk1 }
+polygon_count x { u16 texture; u16 color_ramp; i16 u; i16 v }
 ```
 
 On load each frame vertex `(x,y,z)` is transformed (`CreatureBody_ReadPart`,
@@ -107,9 +107,12 @@ Indices are offset into the shared vertex buffer and, for the shell and
 **Textures** (observed): `texture + 16` is a slot of the *current world
 section*. Slots 16..19 of all eight sections hold the same four blue-violet
 skins, each repainted in its section's palette. `color_ramp` (4 or 8) is a
-section colour-ramp index that `Creature_ReadWorldSection` @ `0x4177d0`
-re-registers with the renderer each time a section loads. `unk0/unk1`
-(polygon `+0x5c/+0x5e`) are unknown.
+section colour-ramp index (a material, §1.3). `u, v` (polygon
+`+0x5c/+0x5e`) are a **texel offset**, the same field a world polygon's
+appearance frame sets (`0x402420`, mesh vtable slot 6): the Direct3D
+draw adds `(u & 0x1ff) / 128, (v & 0x1ff) / 128` to the texture
+coordinates (`0x40e850`), the software one `u & 0x7f, v & 0x7f` texels
+(`0x404100`). 61 of the 78 polygons carry one.
 
 **Texture coordinates** (observed by rendering): unlike the world meshes,
 Mendel has real UVs, in texels (128 = one texture). The six floats are
@@ -143,6 +146,47 @@ Proof: `walk_sheet.png` (four phases, two views) and `obj/mendel.obj` +
 committed: they are game data). Rest pose = phase 0, stance 128 (the
 engine's load-time call is `SetPose(128, 1, 128, 0, 0)`). Mendel is a flat,
 crab-like shell on four long two-segment legs, 105 vertices / 78 polygons.
+
+### 1.3 His colours: materials, light, offsets, culling — observed
+
+Mendel is lit exactly like the world (worlds.md §5.3); nothing about him
+is special-cased in the renderer. What makes him look the way the 1997
+footage shows is in the data:
+
+* **Materials.** `CreatureBody_ReadPart` stores `color_ramp` at polygon
+  `+0x60` (`0x426c50`). The first time a section is read
+  (`0x41cc20` → `0x4177d0`, only while `+0xaf4/+0xaf8` are still null)
+  each of his 78 polygons gets its own copy of that section material,
+  appended to the renderer's table (vtable `+8` = `0x405620`), and
+  `+0x60` is pointed at the copy; `+0xaf8` keeps the original index,
+  `+0xaf4` the copy. The affliction manager's tick (`0x405fc0`) copies
+  the *current* section's material over every copy before the effects
+  run, so an effect's brightness (`0x406110`) lasts one tick. The look
+  object at `+0x8f0` (`0x4105d0`) keeps a second polygon array with a
+  second set of copies, refilled by `0x4109a0`, `0x410ba0`, `0x410c20`
+  through the "set material n" `0x4056d0` (inferred: what camouflage
+  draws with). On the CD only materials 4 (`m0` = 0.63)
+  and 8 (`m0` = 0.96) are used, with `m1 = 0`, `m2 = m3 = m5 = 1`, the
+  same in all eight sections: a face turned to the light reaches row 15
+  (the plain texture), one turned away `trunc(m0/2 · 31)` = 9 or 14, and
+  he never takes a specular highlight. Material 8 is the four front
+  faces of the head (shell polygons 2..=5).
+* **Normals.** One per polygon (flat), from the posed vertices
+  (`0x4019a0`, recomputed when the mesh changes, `+0x2c`) and turned by
+  his matrix (`0x401640`); the light is the section's, every frame.
+  There are no vertex normals and no Gouraud shading.
+* **Skins.** Textures 16..19 of the section (the engine adds 16 on
+  load, `0x426c50`), paletted like any section texture. Skin 18, the
+  head's, has a bright cyan-white stripe; the **texel offsets** put it
+  in view on the head's front and underside (head polygon 0 is offset
+  by (134, −2974), i.e. (6, 98) texels).
+* **Culling.** His body is a mesh with the backface flag on (`0x402150`),
+  so his back faces are dropped like the world's (worlds.md §5.3).
+
+The port had the materials and the light right but ignored the offsets
+(`unk0/unk1`): the head showed the violet part of skin 18 and he looked
+darker and plainer than on the footage. With the offsets the glowing
+stripe appears where the footage has it (3:00, 7:50).
 
 ## 2. Locomotion — observed
 
@@ -654,9 +698,9 @@ surviving genomes are the ones that keep Mendel still or turning away
 ## 5. The 468-byte trailer — observed layout, inferred meaning
 
 It is **camera** data, read by `Camera_ReadMotionProfiles` @ `0x414060`;
-`Creature_ReadWorldSection` @ `0x4177d0` reads nothing from the section (it
-re-registers Mendel's colour ramps and seeks to the global creature sound
-set).
+`Creature_ReadWorldSection` @ `0x4177d0` reads nothing from the section (on
+the first section only it registers Mendel's per-polygon material copies,
+§1.3; then it seeks to the global creature sound set).
 
 ```text
 u32 unknown            1520 in every section
