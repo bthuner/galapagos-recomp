@@ -11,7 +11,12 @@
 // might allocate, never cache them.
 
 export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
-  const { instance } = await WebAssembly.instantiateStreaming(fetch(url), {});
+  // `no-cache` means "ask the server before reusing a cached copy" (a 304
+  // costs a few bytes), not "never cache". Without it a browser may keep
+  // running an engine from before the last deploy: servers that send no
+  // Cache-Control (python's http.server) leave freshness to the browser's
+  // own guess, and an old engine replays bugs that were already fixed.
+  const { instance } = await WebAssembly.instantiateStreaming(fetch(url, { cache: "no-cache" }), {});
   const wasm = instance.exports;
   const u8 = (ptr, len) => new Uint8Array(wasm.memory.buffer, ptr, len);
 
