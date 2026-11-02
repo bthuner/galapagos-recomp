@@ -644,6 +644,31 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           frames always sit inside flip-books, so "previous" now means the last real texture earlier in the same
           flip-book: the same picture, computed from state alone.
         </p>
+        <h3>A byte that meant "solid", not "visible"</h3>
+        <p>
+          After the walker landed, Mendel stood sideways on section 1's pad #49, apparently on thin air. Every
+          animation frame carries an <code>enabled</code> byte, and we had read it as "draw this frame". The exe
+          disagrees: its frame appliers (<code>0x423730</code>, <code>0x423810</code>) set texture, shade and scroll for
+          every frame and never look at it. Only the three routines that copy collision flags into the polygon
+          (<code>0x42df50</code>, <code>0x42e050</code>, <code>0x42e130</code>) test <code>enabled &gt; 0</code>. So the byte
+          means "this frame changes what the polygon <em>is</em>", not whether you can see it. Pad #49 runs one real
+          frame followed by 31 "keep the texture, scroll a little" frames, so we drew it one tick in 32. Thousands of
+          flip-book polygons in every section had the same flicker; all are now steady.
+        </p>
+        <p>
+          The same misreading had broken clicks: a flip-book polygon was only clickable on its first frame. Picking
+          now reads the polygon's own flag array, as the exe does (<code>0x408730</code>).
+        </p>
+        <h3>The belt that really does throw him off</h3>
+        <p>
+          Section 2's green belt swept Mendel off its edge at 139 units per tick, and he died. That looked like a
+          units bug, so we redid the whole calculation from the exe. The texture scrolls by 8 texels a tick, the
+          polygon's texel-to-world map (<code>0x41d6d0</code>) stretches that to 139 units, and the conveyor step
+          (<code>0x41dc30</code>) moves him by exactly that. The belt runs from the first tick, across its width, and
+          Mendel walks onto it on his own about two seconds after birth. The port was right; it's the level that is
+          hard. Checking a number against the code before "fixing" it kept us from inventing a slower belt that never
+          existed.
+        </p>
       </section>
 
       <section id="journal" class="chapter">
@@ -667,6 +692,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> The red start disc: −5 frames hide whole objects (the start pad is an invisible elevator). Audio measured for clipping, balance and DC; limiter and Sound test panel added.</li>
           <li><time>2026‑11‑02</time> All twelve afflictions (floor-driven, with palette-script screen effects) and all five predator classes, ported. Saves move to GLPS v2.</li>
           <li><time>2026‑11‑02</time> The original polygon walker replaces our ray-cast controller: Mendel stands on sideways and upside-down pads, rides platforms in their own coordinates, and saves remember places on polygons (GLPS v3). Fixed the object rotation order and the three motion-path modes on the way.</li>
+          <li><time>2026‑11‑02</time> The "enabled" byte gates collision flags, not drawing: flip-book polygons (pad #49 and thousands more) stop flickering and stay clickable. Section 2's fast belt checked against the exe: 139 units per tick is the original speed.</li>
         </ol>
       </section>
 
