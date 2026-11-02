@@ -34,6 +34,7 @@ use crate::affliction::{Afflictions, Ctx, NORMAL};
 use crate::predator::Prey;
 use crate::sim::save::{Reader, Writer};
 use crate::sim::{self, Request, Sim};
+use crate::transition::{self, Transition};
 use crate::walker::{
     self, add, cross, dot, length, local_polys, normalize, ray_tri, scale, sub, turns, Drive, Faces, Frame, LocalPoly, Mover, Near, Tri,
     FLOOR, HAZARD, IDENTITY, SOLID, UP, V3,
@@ -54,10 +55,6 @@ const DELAY_TICKS: u16 = 80;
 /// Pain: added to all three brain costs (`Creature_HandleSurfaceEvents` @ 0x419550).
 const PAIN: i64 = 500 << 16;
 
-/// inferred: length of the dematerialise / rematerialise effect (`+0x8ec`).
-/// The real effect's duration lives in the effect code, not ported.
-const VANISH_TICKS: u16 = 30;
-const APPEAR_TICKS: u16 = 12;
 /// Radius around Mendel inside which polygons are gathered each tick: the
 /// longest ray (eye range 2,000 + 256) plus the hull, with margin.
 const GATHER_RADIUS: f32 = 3200.0;
@@ -180,6 +177,9 @@ pub enum After {
     Respawn,
     /// Reasons 1/2: a teleporter's destination (`Game+0x17efd6..`).
     Teleport(Place),
+    /// Reasons 4/5: the level ends (`0x41c8c0`); the host gets the event.
+    /// (A saved game keeps it as a respawn.)
+    LevelEnd(sim::HostEvent),
 }
 
 /// A spot for Mendel the way the game stores one (`Game+0x17efc4..`, the
@@ -283,6 +283,9 @@ pub struct Creature {
     noise: [i32; 2],
     /// The section's last texture layer (affliction 1's skin).
     last_texture: i16,
+    /// `creature+0x8ec`: the dematerialise/materialise effect
+    /// (transition.rs), what modes 0 and 1 wait for.
+    transition: Transition,
 }
 
 /// Mendel's five sound cues (`Creature_ReadSoundCues` @ 0x417ab0, played by
@@ -378,6 +381,7 @@ impl Creature {
             fall_limit: 0,
             noise: [0; 2],
             last_texture: mesh.texture_count as i16 - 1,
+            transition: Transition::default(),
         };
         c.act[0] = Actuator::new(13, stance);
         c
@@ -440,14 +444,22 @@ impl Creature {
             self.request(r, sim);
         }
         self.on_save_pad = false;
+        // `Creature_Update` @ 0x417da0: modes 0 and 1 step the effect
+        // (`+0x8ec` slot 1, 0x424960) until it says done.
         match self.mode {
             Mode::Absent => return,
-            Mode::Appearing(n) => self.mode = if n <= 1 { Mode::Alive } else { Mode::Appearing(n - 1) },
+            Mode::Appearing(n) => {
+                self.mode = if self.effect(sim, |t, c| t.update(c)) { Mode::Appearing(n.saturating_add(1)) } else { Mode::Alive };
+            }
             Mode::Vanishing(n, then) => {
-                if n > 1 {
-                    self.mode = Mode::Vanishing(n - 1, then);
+                if self.effect(sim, |t, c| t.update(c)) {
+                    self.mode = Mode::Vanishing(n.saturating_add(1), then);
                 } else {
                     self.finish_vanishing(then, sim, mesh);
+                    // Mode 1's first step runs the same tick (0x417e8e).
+                    if !self.effect(sim, |t, c| t.update(c)) {
+                        self.mode = Mode::Alive;
+                    }
                 }
             }
             Mode::Alive => self.live(sim),
@@ -466,35 +478,92 @@ impl Creature {
     /// Spawn, teleport and save requests queued by the portals this tick.
     fn request(&mut self, r: Request, sim: &mut Sim) {
         match r {
-            Request::Spawn { at, heading, on } => {
+            Request::Spawn { at, heading, on, effect } => {
                 // `Game_SpawnCreature` @ 0x41c590: the first call places
                 // him; every call (section 0's arrival pad #83 makes one
-                // while he is alive) overwrites the respawn point.
+                // while he is alive) overwrites the respawn point. A
+                // non-zero effect kind materialises him (`0x4198f0`: the
+                // effect backwards, mode 1); without one he is simply
+                // there (mode 2, the creature's initial `+0x8fa`).
                 let place = Place::of_request(at, heading, on);
                 self.respawn = Some(place);
                 if self.mode == Mode::Absent {
                     self.place(place, sim);
-                    self.mode = Mode::Appearing(APPEAR_TICKS);
+                    self.mode = if effect[0] != 0 {
+                        let h = self.stance_height as i16;
+                        self.effect(sim, |t, c| {
+                            t.start_reversed(effect[0], effect[1], h, c);
+                            true
+                        });
+                        Mode::Appearing(0)
+                    } else {
+                        Mode::Alive
+                    };
                 }
             }
-            Request::Teleport { at, heading, snap, on } => {
+            Request::Teleport { at, heading, snap, on, effect } => {
                 // inferred: a request whose destination he is already close
                 // to is ignored. Pads repeat their trigger every tick until
                 // he touches them; without this he would never land.
                 if self.mode == Mode::Alive && length(sub(at, self.pos)) > 1500.0 {
-                    self.mode = Mode::Vanishing(VANISH_TICKS, After::Teleport(Place::of_request(at, heading, on)));
+                    self.dematerialise(effect, sim);
+                    self.mode = Mode::Vanishing(0, After::Teleport(Place::of_request(at, heading, on)));
                     self.stats.teleports += 1;
                     if snap {
                         sim.events.push(sim::HostEvent { kind: sim::EV_CAMERA_SNAP, a: 0, b: 0, c: 0 });
                     }
                 }
             }
-            Request::Respawn => {
+            Request::LevelEnd(ev) => {
+                // Reactions 0x251000 / 0x2d1000: effect 1 v5, reason 4/5.
                 if self.mode == Mode::Alive {
-                    self.mode = Mode::Vanishing(VANISH_TICKS, After::Respawn);
+                    self.dematerialise([1, 5], sim);
+                    self.mode = Mode::Vanishing(0, After::LevelEnd(ev));
+                } else {
+                    sim.events.push(ev);
+                }
+            }
+            Request::Respawn => {
+                // Portal kind 6's reaction 0x1b2000: effect 2 v3, reason 3.
+                if self.mode == Mode::Alive {
+                    self.dematerialise([2, 3], sim);
+                    self.mode = Mode::Vanishing(0, After::Respawn);
                 }
             }
         }
+    }
+
+    // ——— The transition effect (`+0x8ec`, transition.rs) ———
+
+    /// Runs `f` on the effect with his current shape (re-posed: modes 0
+    /// and 1 never pose him, so it is the last pose), heading and the CRT
+    /// `rand()`, then applies what it did: a burst spins his heading (the
+    /// mover's `+0x50`, the short `0x4105d0` was given), flashes, sounds.
+    fn effect(&mut self, sim: &mut Sim, f: impl FnOnce(&mut Transition, &transition::Ctx) -> bool) -> bool {
+        let mut t = std::mem::take(&mut self.transition);
+        let running = {
+            let shape = || {
+                let posed = self.body.pose_turning((self.phase >> 8) as u8, self.stance, self.turn, self.side);
+                transition::shape_of_posed(&posed, |r| self.materials.get(r as usize).copied().unwrap_or([0xffff, 0, 0, 0, 0, 0]))
+            };
+            let rand = || sim.rand();
+            f(&mut t, &transition::Ctx { shape: &shape, spin: self.mover.heading, rand: &rand })
+        };
+        if let Some(h) = t.spin() {
+            self.mover.heading = h & 0x3ff;
+        }
+        transition::emit(&mut t, sim, 0);
+        self.transition = t;
+        running
+    }
+
+    /// `0x424870(kind, variant, stance height)` + `0x4249b0`: mode 0 starts.
+    fn dematerialise(&mut self, [kind, variant]: [u16; 2], sim: &mut Sim) {
+        let h = self.stance_height as i16;
+        self.effect(sim, |t, c| {
+            t.start(kind, variant, h, c);
+            true
+        });
     }
 
     /// The mover's placement (slot 1, `0x418310` → `Mover_Place` @
@@ -530,6 +599,9 @@ impl Creature {
     fn finish_vanishing(&mut self, then: After, sim: &mut Sim, mesh: &mut WorldMesh) {
         match then {
             After::Teleport(p) => self.place(p, sim),
+            // The host shows the time screen and builds the next section
+            // (a new Mendel); until it does, this one comes back in place.
+            After::LevelEnd(ev) => sim.events.push(ev),
             After::Respawn => {
                 // Respawn reason 3 ends any affliction (`0x405f10` at 0x417e68).
                 self.afflictions.end();
@@ -541,7 +613,12 @@ impl Creature {
                 }
             }
         }
-        self.mode = Mode::Appearing(APPEAR_TICKS);
+        // `0x4248c0`: the same effect backwards (it reads his new heading).
+        self.effect(sim, |t, c| {
+            t.reverse(c);
+            true
+        });
+        self.mode = Mode::Appearing(0);
     }
 
     fn live(&mut self, sim: &mut Sim) {
@@ -933,7 +1010,9 @@ impl Creature {
         // pending destination we don't have here, so they also respawn.
         self.fall_count = 0;
         self.stats.deaths += 1;
-        self.mode = Mode::Vanishing(VANISH_TICKS, After::Respawn);
+        // The effect of the floor: kind (f >> 12) & 15, variant (f >> 16) & 7.
+        self.dematerialise([((f >> 12) & 15) as u16, ((f >> 16) & 7) as u16], sim);
+        self.mode = Mode::Vanishing(0, After::Respawn);
     }
 
 
@@ -1019,16 +1098,17 @@ impl Creature {
         self.vertices.clear();
         let visible = match self.mode {
             Mode::Absent => false,
-            // A crude stand-in for the materialise effect: blink.
-            Mode::Appearing(n) | Mode::Vanishing(n, _) => n % 4 < 2,
+            // The transition effect draws him (`dress` below).
+            Mode::Appearing(_) | Mode::Vanishing(..) => true,
             Mode::Alive => true,
         };
         if !visible {
             return;
         }
         let mesh = self.body.pose_turning((self.phase >> 8) as u8, self.stance, self.turn, self.side);
+        let (mesh, look) = self.transition.dress(mesh, &self.afflictions.look);
         let world: Vec<V3> = mesh.vertices.iter().map(|v| add(self.pos, self.rotate(v.map(|c| c as f32)))).collect();
-        let look = &self.afflictions.look;
+        let look = &look;
         for (k, f) in mesh.faces.iter().enumerate() {
             if f.indices.len() < 3 {
                 continue;
@@ -1599,7 +1679,7 @@ mod tests {
                 continue;
             }
             match c.ground().map(|g| g.0 + 1) {
-                Some(57) if on_disc.is_none() => on_disc = Some((t, c.up, c.pos)),
+                Some(57) if on_disc.is_none() => on_disc = Some((t, c.up, c.pos, c.stance_height)),
                 Some(3) if on_capsule.is_none() => on_capsule = Some(t),
                 Some(83) if on_pad.is_none() => on_pad = Some((t, c.up)),
                 _ => {}
@@ -1607,9 +1687,9 @@ mod tests {
         }
         let c = sim.creature.as_ref().unwrap();
         println!("intro: disc {on_disc:?}, capsule at {on_capsule:?}, pad {on_pad:?}; then {:?} at {:?}, {:?}", c.mode, c.pos.map(|v| v as i32), c.stats);
-        let (_, up, pos) = on_disc.expect("born standing on the Strt disc");
+        let (_, up, pos, h) = on_disc.expect("born standing on the Strt disc");
         assert!(up[2] > 0.99, "upright on a floor facing +z: up {up:?}");
-        assert!((pos[2] - (-284148.0 + c.stance_height as f32)).abs() < 30.0, "his origin floats his stance height above the disc, z = {}", pos[2]);
+        assert!((pos[2] - (-284148.0 + h as f32)).abs() < 30.0, "his origin floats his stance height above the disc, z = {}", pos[2]);
         assert!(on_capsule.is_some(), "the capsule picks him up");
         let (t, up) = on_pad.expect("the capsule delivers him to the arrival pad");
         assert!(up[2] > 0.99, "upright on the pad: up {up:?}");
@@ -1903,7 +1983,7 @@ mod hazard_tests {
         assert!(cues >= 2, "the agitated cue (sounds 1, 2) plays");
         assert!(crackles >= 1, "crackles");
         // Death ends the affliction (respawn reason 3).
-        for _ in 0..60 {
+        for _ in 0..120 { // effect 3 v1: 60 ticks flattening, 40 held
             sim.step(&mut mesh);
         }
         assert_eq!(sim.creature.as_ref().unwrap().afflictions.kind, 0);
@@ -1926,6 +2006,118 @@ mod hazard_tests {
         let c = sim.creature.as_ref().unwrap();
         assert_eq!(c.mode, Mode::Alive, "still alive on a lethal floor");
         assert!(c.afflictions.look.texture.is_some(), "shimmering skin");
+    }
+
+    /// The most common lethal floor, 0x01582380 (effect kind 2 v0): he
+    /// bursts into pieces for 100 ticks (flash 6, sound 10), respawns, and
+    /// the pieces fly back together for 60 (effect 2 v0x40), then he lives.
+    /// He is drawn all along: no blinking.
+    #[test]
+    fn lethal_floor_bursts_him_and_he_reassembles() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = alive_in_section0(&d);
+        sim.events.clear();
+        sim.creature.as_mut().unwrap().react(0x0158_2380);
+        let (mut dying, mut coming, mut alive_at) = (0, 0, None);
+        let mut widest = 0.0f32;
+        for t in 0..400 {
+            sim.step(&mut mesh);
+            let c = sim.creature.as_ref().unwrap();
+            match c.mode {
+                Mode::Vanishing(..) => dying += 1,
+                Mode::Appearing(_) => coming += 1,
+                _ => {}
+            }
+            if c.mode != Mode::Alive {
+                assert!(!c.vertices.is_empty(), "drawn on tick {t}");
+                let far = c.vertices.chunks(FLOATS_PER_VERTEX).map(|v| length(sub([v[0], v[1], v[2]], c.pos))).fold(0.0, f32::max);
+                widest = widest.max(far);
+            } else if dying > 0 {
+                alive_at = Some(t);
+                break;
+            }
+        }
+        println!("burst: {dying} ticks dying, {coming} coming back, alive at {alive_at:?}, pieces up to {widest:.0} away");
+        assert_eq!(dying, 101, "the tick it starts, then 100 steps");
+        assert_eq!(coming, 60);
+        assert!(widest > 1000.0, "the pieces fly apart");
+        assert_eq!(sim.creature.as_ref().unwrap().stats.deaths, 1);
+        let sounds: Vec<i32> = sim.events.iter().filter(|e| e.kind == sim::EV_EFFECT_SOUND).map(|e| e.a + 1).collect();
+        assert_eq!(sounds, [10, 18], "the burst's and the reassembly's");
+    }
+
+    /// A dimensional gate (portal kind 3, reaction 0x251000): he fades
+    /// out polygon by polygon (effect 1 v5) while the screen bleaches to
+    /// white (flash 4: 40 ticks, then 10 frames to white, 254 after the
+    /// 8.8 lerp, which stays),
+    /// and only then does the host get the section change. The footage
+    /// shows the white-out ~1 s before the time screen (t = 594 s).
+    #[test]
+    fn a_gate_whites_out_before_the_section_changes() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = alive_in_section0(&d);
+        sim.events.clear();
+        let ev = sim::HostEvent { kind: sim::EV_SECTION, a: 1, b: 0, c: 0 };
+        sim.requests.push(Request::LevelEnd(ev));
+        let (mut white_at, mut sent_at) = (None, None);
+        for t in 0..400 {
+            sim.step(&mut mesh);
+            if white_at.is_none() && sim.flash.current().iter().all(|&c| c >= 250) {
+                white_at = Some(t);
+            }
+            if sim.events.iter().any(|e| *e == ev) {
+                sent_at = Some(t);
+                break;
+            }
+        }
+        println!("gate: white at {white_at:?}, section change at {sent_at:?}");
+        assert!(white_at.is_some_and(|t| (49..=52).contains(&t)), "40 held + 10 frames of the ramp");
+        let sent = sent_at.expect("the section change is sent");
+        assert!(sent > 60 && sent < 150, "after the effect, not at the touch: {sent}");
+    }
+
+    /// The transition effects the predators play: the ball's appearance
+    /// (`shorts [2, 1, 1, 1]`: effect 1 v1 backwards = 0x41, every polygon
+    /// fading in from black within 7 ticks) paints its polygons, and the
+    /// paint is gone when it ends.
+    #[test]
+    fn the_ball_fades_in() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 2);
+        sim.wake_all = true;
+        for _ in 0..20 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            if sim.creature.as_ref().unwrap().mode == Mode::Alive {
+                break;
+            }
+        }
+        let ball = 54 - 1;
+        let draw = mesh.draw_of_object[ball].unwrap();
+        let r = mesh.draws[draw];
+        let range = r.first as usize * FLOATS_PER_VERTEX..(r.first + r.count) as usize * FLOATS_PER_VERTEX;
+        let clean = mesh.vertices[range.clone()].to_vec();
+        sim.debug_goto(ball, 3);
+        let k = sim.predators.iter().position(|p| p.obj == ball).unwrap();
+        let mut ticks = 0;
+        let mut lit_seen = false;
+        for _ in 0..40 {
+            sim.step(&mut mesh);
+            let v = &mesh.vertices[range.clone()];
+            lit_seen |= v.chunks(FLOATS_PER_VERTEX).any(|v| v[6] < 0.0);
+            if sim.predators[k].mode == 2 {
+                ticks += 1;
+            }
+            if sim.predators[k].mode == 3 {
+                break;
+            }
+        }
+        assert_eq!(sim.predators[k].mode, 3, "active after its effect");
+        assert!(lit_seen, "polygons brightened by the effect");
+        assert!((7..=9).contains(&ticks), "{ticks} ticks appearing");
+        let v = &mesh.vertices[range.clone()];
+        for (a, b) in v.chunks(FLOATS_PER_VERTEX).zip(clean.chunks(FLOATS_PER_VERTEX)) {
+            assert_eq!(a[3..], b[3..], "its own uv, layer, material and normal again");
+        }
     }
 
     /// The affliction sounds are world-bank sounds (1-based), the same
@@ -2151,13 +2343,15 @@ mod walker_tests {
         }
         let c = sim.creature.as_ref().unwrap();
         let (o, p) = c.ground().expect("standing from the first tick");
-        println!("section 2 start: on #{} poly {p}, up {:?}, pos {:?}", o + 1, c.up, c.pos);
+        println!("section 2 start: on #{} poly {p}, up {:?}, pos {:?}, stance {}", o + 1, c.up, c.pos, c.stance_height);
         assert_eq!(o + 1, 194, "on the Strt object");
         assert!(c.up[2] < -0.999, "upside down: up {:?}", c.up);
-        // His origin hangs his stance height *below* the polygon.
+        // His origin hangs his stance height *below* the polygon. Spawned
+        // without an effect (`ints[5] = 0`) he is alive at once (mode 2):
+        // that first tick's muscles may already move his stance a little.
         let lp = &c.polys[o][p];
         let plane = sim::apply(&sim::transform(sim.pose(o).0, sim.pose(o).1), lp.points[0]);
-        assert!((plane[2] - c.pos[2] - c.stance_height as f32).abs() < 2.0, "origin {} under the plane {}", c.pos[2], plane[2]);
+        assert!((plane[2] - c.pos[2] - c.stance_height as f32).abs() < 4.0, "origin {} under the plane {}", c.pos[2], plane[2]);
     }
 
     /// Section 2's belt #197 (polygon 2, flags 0x6, facing −z next to the

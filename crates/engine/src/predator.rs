@@ -28,6 +28,7 @@
 use crate::camera::{approx_len, filter3, Filter, Mover, Trig};
 use crate::sim::save::{Reader, Writer};
 use crate::sim::{self, HostEvent, Sim};
+use crate::transition::{self, Skin, Transition};
 use crate::world::WorldMesh;
 
 type I3 = [i32; 3];
@@ -98,11 +99,9 @@ fn tuning(c: Class) -> Tuning {
     }
 }
 
-/// inferred: how long the vanish/appear transition effect (`+0x210`, the
-/// same effect class as Mendel's dematerialisation, 0x424520) runs. Its
-/// timing lives in the effect code, not ported; the state machines leave it
-/// 8 ticks (PBal's vanish) and more.
-pub const EFFECT_TICKS: u16 = 12;
+/// The height a predator hands its transition effect (`0x424870(kind,
+/// variant, 0x88)` at 0x42a40a / 0x42a510): the effect's floor is 0x88 − 10.
+const EFFECT_HEIGHT: i16 = 0x88;
 /// "Close to Mendel" for the growl (`cmp eax, 0x3e8` at 0x415310).
 const GROWL_DISTANCE: i32 = 1000;
 /// Silence after the "got him" sound (`+0x23c = 0x1e`).
@@ -139,8 +138,9 @@ pub struct Predator {
     effect: bool,
     kind: i16,
     variant: i16,
-    /// inferred stand-in for the effect object's own timer.
-    effect_left: u16,
+    /// `+0x210`: the effect (transition.rs) and its paint on our polygons.
+    transition: Transition,
+    skin: Skin,
     // ——— the chase (`+0x2b8` mover + tracker, `+0x348` target) ———
     mover: Mover,
     filter: [Filter; 3],
@@ -173,7 +173,8 @@ impl Predator {
             effect: false,
             kind: 0,
             variant: 0,
-            effect_left: 0,
+            transition: Transition::default(),
+            skin: Skin::default(),
             mover: Mover::default(),
             filter: [Filter::default(); 3],
             centre: [0; 3],
@@ -219,7 +220,7 @@ impl Predator {
 
     /// Mode 1 (`0x42a3e0`): the effect, then park it out of the world.
     fn vanish(&mut self, sim: &mut Sim, mesh: &mut WorldMesh) {
-        if self.effect && self.run_effect(sim, mesh) {
+        if self.effect && self.run_effect(false, sim, mesh) {
             return;
         }
         self.mode = 0;
@@ -241,27 +242,50 @@ impl Predator {
                 return;
             }
         }
-        if self.run_effect(sim, mesh) {
+        if self.run_effect(true, sim, mesh) {
             return;
         }
         self.mode = 3;
         self.started = false;
     }
 
-    /// Steps the transition effect; true while it runs. inferred: a blink
-    /// stands in for the original's explosion/implosion effects.
-    fn run_effect(&mut self, _sim: &mut Sim, mesh: &mut WorldMesh) -> bool {
-        if !self.started {
-            self.started = true;
-            self.effect_left = EFFECT_TICKS;
+    /// Steps the transition effect (`+0x210` slot 1); true while it runs.
+    /// The first call starts it (`0x424870(kind, variant, 0x88)`, then
+    /// `0x4249b0` to vanish or `0x4248c0` to appear). A burst spins the
+    /// object's `+0x74` (our `rot[2]`).
+    fn run_effect(&mut self, appear: bool, sim: &mut Sim, mesh: &mut WorldMesh) -> bool {
+        let Some(draw) = mesh.draw_of_object.get(self.obj).copied().flatten() else { return false };
+        let (pos, rot) = sim.pose(self.obj);
+        let mut t = std::mem::take(&mut self.transition);
+        let running = {
+            let shape = || Skin::shape(mesh, draw);
+            let rand = || sim.rand();
+            let ctx = transition::Ctx { shape: &shape, spin: rot[2], rand: &rand };
+            if !self.started {
+                self.started = true;
+                let (k, v) = (self.kind as u16, self.variant as u16);
+                if appear {
+                    t.start_reversed(k, v, EFFECT_HEIGHT, &ctx);
+                } else {
+                    t.start(k, v, EFFECT_HEIGHT, &ctx);
+                }
+            }
+            t.update(&ctx)
+        };
+        if let Some(s) = t.spin() {
+            sim.set_pose(self.obj, pos, [rot[0], rot[1], s & 0x3ff], mesh);
         }
-        self.effect_left = self.effect_left.saturating_sub(1);
-        let draw = mesh.draw_of_object.get(self.obj).copied().flatten();
-        let running = self.effect_left > 0;
-        if let Some(d) = draw {
-            mesh.set_blinking(d, running && self.effect_left % 4 < 2);
-        }
+        self.skin.paint(t.frame(), mesh, draw, sim);
+        transition::emit(&mut t, sim, self.obj as i32 + 1);
+        self.transition = t;
         running
+    }
+
+    /// Puts our own polygons back (a snapshot replaces this timeline).
+    pub(crate) fn unpaint(&mut self, sim: &mut Sim, mesh: &mut WorldMesh) {
+        if let Some(d) = mesh.draw_of_object.get(self.obj).copied().flatten() {
+            self.skin.paint(None, mesh, d, sim);
+        }
     }
 
     /// Slot 0x9c: PBal (0x4153a0) starts where the section's `PPol` is
@@ -463,7 +487,7 @@ impl Predator {
         w.u8(self.effect as u8);
         w.u16(self.kind as u16);
         w.u16(self.variant as u16);
-        w.u16(self.effect_left);
+        w.u16(0); // was a blink timer; the effect restarts nothing on load
         write_mover(w, &self.mover);
         for f in self.filter.iter().chain(&self.heading).chain(&self.pole.filter) {
             write_filter(w, f);
@@ -483,7 +507,7 @@ impl Predator {
         self.effect = r.u8()? != 0;
         self.kind = r.u16()? as i16;
         self.variant = r.u16()? as i16;
-        self.effect_left = r.u16()?;
+        r.u16()?;
         self.mover = read_mover(r)?;
         for f in self.filter.iter_mut().chain(&mut self.heading).chain(&mut self.pole.filter) {
             *f = read_filter(r)?;

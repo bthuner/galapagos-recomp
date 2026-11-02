@@ -32,7 +32,7 @@ pub mod save;
 pub const TICKS_PER_SECOND: u32 = 24;
 
 /// Something the browser has to do on the engine's behalf.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct HostEvent {
     pub kind: u32,
@@ -55,6 +55,11 @@ pub const EV_AFFLICTION_SOUND: u32 = 8;
 /// A predator's cue (predator.rs): a = predator-bank sound (0-based: 0 =
 /// the growl near Mendel, 1 = the bite), b = object id, c = pitch (16.16).
 pub const EV_PREDATOR_SOUND: u32 = 9;
+/// A transition effect's sound (transition.rs), heard at its owner: a =
+/// world-bank sound (0-based), b = object id (0 = Mendel), c = pitch >> 4
+/// (bits 0..12, 16.16 pitch) | variation >> 8 (bits 13..20) | volume >> 2
+/// (bits 21..27) | 1 << 28 for distances 10000/20000 instead of 3000/30000.
+pub const EV_EFFECT_SOUND: u32 = 10;
 
 /// What a portal or save pad asks of Mendel; the creature picks these up
 /// on its tick (`Game_RequestTeleport` @ 0x41c690 queues them the same way).
@@ -62,12 +67,21 @@ pub const EV_PREDATOR_SOUND: u32 = 9;
 pub enum Request {
     /// `Game_SpawnCreature` @ 0x41c590: appear at `at` facing `heading`,
     /// standing on `on` (see [`PortalPlace`]).
-    Spawn { at: [f32; 3], heading: i32, on: Option<PortalPlace> },
-    /// Portal kinds 1, 2 and 7.
-    Teleport { at: [f32; 3], heading: i32, snap: bool, on: Option<PortalPlace> },
+    /// `effect` is the materialise effect (kind, variant; `ints[5..6]`,
+    /// kind 0 = none), played backwards.
+    Spawn { at: [f32; 3], heading: i32, on: Option<PortalPlace>, effect: [u16; 2] },
+    /// Portal kinds 1, 2 and 7. `effect` is the dematerialise effect of
+    /// the portal's reaction (`Portal_InitReactions` @ 0x41b140: kind 1
+    /// `0xf1000` → effect 1 v7, kind 2 `0x161000` → 1 v6, kind 7
+    /// `0x151000` → 1 v5).
+    Teleport { at: [f32; 3], heading: i32, snap: bool, on: Option<PortalPlace>, effect: [u16; 2] },
     /// Portal kind 6: Mendel dissolves and respawn reason 3 runs (the
     /// world snapshot comes back, he reappears at the respawn point).
     Respawn,
+    /// Portal kinds 3 and 5: Mendel dissolves (effect 1 v5, the
+    /// white-out), then respawn reason 4/5 ends the level: the event
+    /// (`EV_SECTION` / `EV_GAME_COMPLETE`) goes to the host.
+    LevelEnd(HostEvent),
 }
 
 /// Where a portal puts Mendel: a polygon of the portal (`ints[0]`) and
@@ -547,6 +561,16 @@ impl Sim {
     }
 
     /// The class behaviour (vtable slot 0x18), for the classes we know.
+    /// A gate or the last portal: Mendel dissolves first (creature.rs
+    /// sends `ev` when his effect ends); without him, at once.
+    fn level_end(&mut self, ev: HostEvent) {
+        if self.creature.is_some() {
+            self.requests.push(Request::LevelEnd(ev));
+        } else {
+            self.events.push(ev);
+        }
+    }
+
     fn trigger(&mut self, i: usize, entry: usize, mesh: &mut WorldMesh) {
         let Some(obj) = self.objs[i].obj.as_ref() else { return };
         let Some(p) = obj.logic.params.get(entry).copied() else { return };
@@ -565,25 +589,34 @@ impl Sim {
             b"Tele" | b"Strt" | b"STel" => {
                 let place = |off: [i32; 3], mode: i32| self.portal_place(i, mode.max(0) as usize, off);
                 match p.portal() {
+                    // Kind 3's reaction 0x251000 (and kind 5's 0x2d1000)
+                    // dissolve Mendel with effect 1 v5 (the white-out)
+                    // before respawn reason 4 (5) ends the level.
                     PortalAction::ChangeSection { section, level } => {
-                        self.events.push(HostEvent { kind: EV_SECTION, a: section as i32, b: level as i32, c: 0 })
+                        self.level_end(HostEvent { kind: EV_SECTION, a: section as i32, b: level as i32, c: 0 })
                     }
                     // `mode` (ints[0]) is the polygon he lands on; the
                     // offset is measured on it (see `PortalPlace`).
-                    PortalAction::Spawn { offset, heading, mode, .. } => {
+                    PortalAction::Spawn { offset, heading, mode, extra } => {
                         let (at, on) = place(offset, mode);
-                        self.requests.push(Request::Spawn { at, heading, on })
+                        let effect = [extra[0] as u16, extra[1] as u16];
+                        self.requests.push(Request::Spawn { at, heading, on, effect })
                     }
                     PortalAction::Teleport { offset, heading, snap_camera, mode } => {
                         let (at, on) = place(offset, mode);
-                        self.requests.push(Request::Teleport { at, heading, snap: snap_camera, on })
+                        let effect = match p.shorts[0] {
+                            2 => [1, 6],
+                            7 => [1, 5],
+                            _ => [1, 7],
+                        };
+                        self.requests.push(Request::Teleport { at, heading, snap: snap_camera, on, effect })
                     }
                     // Kinds 5 and 6 only differ by the reaction they hand
                     // Mendel (`Portal_InitReactions` @ 0x41b140): kind 5's
                     // 0x2d1000 ends in respawn reason 5, the end of the
                     // game; kind 6's 0x1b2000 in reason 3, a respawn.
                     PortalAction::ReactOnly if p.shorts[0] == 5 => {
-                        self.events.push(HostEvent { kind: EV_GAME_COMPLETE, a: 8, b: 9, c: 0 })
+                        self.level_end(HostEvent { kind: EV_GAME_COMPLETE, a: 8, b: 9, c: 0 })
                     }
                     PortalAction::ReactOnly if p.shorts[0] == 6 => self.requests.push(Request::Respawn),
                     PortalAction::ReactOnly | PortalAction::Other(_) => {}

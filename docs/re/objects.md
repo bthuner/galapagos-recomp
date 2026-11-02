@@ -365,7 +365,7 @@ classes:
 | `Rend` | `0x419ee0` | `0x45fcd0` | `0x419f40` | 9-way switch on `shorts[0]` (0..8): renderer effects (unknown) |
 | `Over` | `0x419e30` | `0x45fc20` | `0x419e90` | `0x419c50(shorts[0])`: overlay (unknown) |
 | `MEnc` | `0x4260d0` | `0x460c10` | base | at (0,0,0) in every section; Update `0x426150`: when picked, makes Mendel react (`0x41cb80`); its polygons carry pick bit 0 (inferred: Mendel's own click target) |
-| `Pred` | `0x42a1a0` | `0x460ea8` | `0x42a2d0` | predator (observed, see **predators.md**): `shorts[0]` 1 = vanish (then parked at 100000), 2 = appear at home then active; ignored while one runs; `shorts[1]` play the transition effect, `shorts[2..3]` its kind and variant (the same effect class as Mendel's dematerialisation, `0x424520`/`0x424870`) |
+| `Pred` | `0x42a1a0` | `0x460ea8` | `0x42a2d0` | predator (observed, see **predators.md**): `shorts[0]` 1 = vanish (then parked at 100000), 2 = appear at home then active; ignored while one runs; `shorts[1]` play the transition effect, `shorts[2..3]` its kind and variant (the same effect class as Mendel's dematerialisation, `0x424520`/`0x424870`; ported in transition.rs, see predators.md) |
 | `PBal`, `PFrk`, `PMan` | `0x415020`, `0x415480`, `0x415930` | `0x45f6c0`, `0x45f7b0`, `0x45f8a0` | `0x42a2d0` (shared with `Pred`) | hunters: once active, a trapezoidal mover lunges past Mendel; six probes (mask 0x103) touch his click hull `MEnc`, which hands him the predator's flags (`0x405b2100` / `0x40582100`: lethal kind 2, death). Bit 30 on their polygons makes his eyes see them |
 | `PPol` | `0x4292b0` | `0x460de8` | `0x429430` | the launcher: `ints` = mode, radius, angle, bob amplitude/phase, wobble amplitude/phase, lift; circles its home towards Mendel's bearing; `PBal` appears where it is (`Game+0x17efc0`) |
 | `Cmra` | `0x412700` | `0x45f608` | — | camera, section 8 |
@@ -386,7 +386,14 @@ classes:
 Kinds 1, 2, 3, 5, 6, 7 also call `Game_CreatureReact` @ `0x41cb80` with a
 per-kind constant (`Portal_InitReactions` @ `0x41b140`: `0xf1000`,
 `0x161000`, `0x251000`, `0x2d1000`, `0x1b2000`, `0x151000`), handed to the
-creature (`0x4198b0`; see the creature spec).
+creature (`0x4198b0`; see the creature spec). Read as surface flags they
+pick Mendel's transition effect and what follows it (mendel.md §2.3.1):
+kind 1 → effect 1 v7, reason 1; kind 2 → 1 v6, reason 2; kind 3 → 1 v5
+(the white-out), reason 4 (the gate: the time screen comes only after
+the effect, the port defers `EV_SECTION`); kind 5 → 1 v5, reason 5;
+kind 6 → 2 v3, reason 3; kind 7 → 1 v5, reason 2. Kind 4 (spawn) passes
+`ints[5..6]` as the materialise effect (`0x41c590` → `0x4198f0`; kind 0 =
+none: s0 #57 uses 3 v3, s0 #83 1 v6, every other `Strt` none).
 
 ### The gate table: why 8 sections and 5 worlds
 
@@ -616,7 +623,8 @@ creature code asks.
 * Portals/gates/spawn, `Voic` music (Smacker files already decoded),
   the per-polygon camera (ported: camera.rs, §6).
 * Predators (`Pred`, `PBal`, `PFrk`, `PPol`; predator.rs, predators.md).
-* Still missing: `Rend`, `Over`, the transition effects, the save-pad
+* Transition effects: transition.rs (mendel.md §2.3.1).
+* Still missing: `Rend`, `Over`, the save-pad
   dialog wiring.
 
 ## Open questions

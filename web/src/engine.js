@@ -166,6 +166,9 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
       },
       // Teaching/debug, not in the original: afflict him with n (1..12).
       afflict: (n) => wasm.creature_afflict(n),
+      // Teaching/debug, not in the original: hand him surface flags, as a
+      // bite does; 0x01582380 kills him with transition effect 2 v0.
+      react: (flags) => wasm.creature_react(flags >>> 0),
     },
 
     // The original game camera (crates/engine/src/camera.rs), ticked with

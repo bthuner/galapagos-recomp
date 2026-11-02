@@ -114,6 +114,13 @@ impl Sim {
         if w.objs.len() != self.objs.len() {
             return false;
         }
+        // A transition effect's paint belongs to the abandoned timeline
+        // (before the frames below are re-applied over the clean vertices).
+        let mut old = std::mem::take(&mut self.predators);
+        for p in &mut old {
+            p.unpaint(self, mesh);
+        }
+        self.predators = old;
         for (o, s) in self.objs.iter_mut().zip(&w.objs) {
             o.state = s.state;
             o.ticks = s.ticks;
@@ -672,7 +679,7 @@ mod tests {
 
         sim.requests.push(Request::Respawn); // portal kind 6 / a lethal floor
         let mut learnt = None;
-        for _ in 0..60 {
+        for _ in 0..200 { // effect 2 v3 (portal kind 6): 60 ticks
             learnt = Some(sim.creature.as_ref().unwrap().brain.clone());
             sim.step(&mut mesh);
             if matches!(sim.creature.as_ref().unwrap().mode, Mode::Appearing(_)) {

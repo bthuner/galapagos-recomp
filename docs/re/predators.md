@@ -67,8 +67,27 @@ appearance's business: the load (`0x42a740`) clears the object's draw flag
 (`+0x34+0x28`, `0x4022e0(0)`), and every appearance change re-sets it
 (`-5` frames clear it: `0x4237e3`), so the state machine decides.
 
-**inferred**: the transition effect is not ported; the engine blinks the
-object for 12 ticks (`EFFECT_TICKS`).
+**The effect** (observed; the class is mendel.md §2.3.1): the `Pred`
+ctor builds its own effect mesh (`0x4105d0(obj+0x34, obj+0x74)`: the
+short a burst spins is the object's `+0x74`, our `rot[2]`) and manager
+(`+0x210`, height 0x88, so its floor is 126 in object y). Mode 1 starts
+it on the first tick (`+0x218`), mode 2 starts it backwards; both step it
+that same tick, then every tick until it returns 0 (vanish: the object
+gets its mesh back and is parked; appear: mode 3). The sounds play from
+the predator (cue `+0x98` = owner `+0x30`, its position). On the CD:
+
+| Object | Vanish | Appear (backwards) | Ticks |
+|---|---|---|---|
+| s2 `PBal` #54 | 1 v1: all polygons fade at once | 1 v0x41: all fade in from black | 7 / 7 |
+| s2 `PFrk` #130 | 2 v0: burst, flash 6 | 2 v0x40: shards fly in, spinning `rot[2]` | 100 / 60 |
+| s7 `Pred` #115..#117 | 2 v2: burst, vertical spread / 8 | — | 100 |
+| s7 `Pred` #118 | 2 v0 | — | 100 |
+
+Port: predator.rs `run_effect` drives transition.rs; `Skin` writes the
+effect mesh into the object's own vertices (corners moved, hidden
+polygons on layer −2, replaced brightness pre-lit with the shader's
+level formula and the object's turned normal) and restores them when it
+ends (and before a snapshot is restored).
 
 ## 3. The chase — observed (constants), inferred (bounce)
 
@@ -180,8 +199,6 @@ cue 2 = sound 2, pitch 0.5, 5000/500/5000. Host event 9
 
 ## Open questions
 
-* The transition effects (`0x424520` family: kinds 1..7 with variants,
-  sounds and palette flashes) — shared with Mendel's death; not ported.
 * `0x4084e0` (called before the probes).
 * The object rotation order (`0x402370` only stores the three angles);
   we write `(+0x70, +0x72, +0x74)` into our `rot[0..3]` as the motion
