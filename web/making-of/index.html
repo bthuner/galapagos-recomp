@@ -346,6 +346,17 @@ pos = first_stream_with_valid_crc(overlay)
           hunts for a hundred ticks and then vanishes, a fork that always chases, and a polygon thing that circles his
           side; section 7's predators are lethal walls that explode away when a machine reaches the right state.
         </p>
+        <p>
+          When a predator's probe hits something it bounces off, and for a while we only approximated how. The
+          routine behind it, <code>0x408c50</code>, turned out to be a small, careful piece of geometry. It casts a
+          second short segment from the probe's tip along the wall's normal. If that segment crosses the wall
+          (the tip went <em>behind</em> it), the push is exactly the way back onto the plane. If it doesn't, there
+          is no push at all. The caller then adds a fixed nudge along the normal as stored in the polygon record:
+          an 8-unit margin for the camera, more for a predator. Two consequences we had wrong: a probe that
+          grazes a wall at an angle used to be pushed by its whole overshoot instead of the perpendicular
+          distance, and a predator touching a polygon from behind still counts as a touch. Only the push is
+          one-sided.
+        </p>
         <h3 id="walker">Walking on polygons, any way up</h3>
         <p>
           A modern character controller asks "where is the ground under me?" every frame. The 1997 walker asks a
@@ -766,6 +777,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> The "enabled" byte gates collision flags, not drawing: flip-book polygons (pad #49 and thousands more) stop flickering and stay clickable. Section 2's fast belt checked against the exe: 139 units per tick is the original speed.</li>
           <li><time>2026‑11‑02</time> Glass: <code>−4</code> frames are additive, untextured panes, and the "colour ramps" are materials. The intro capsule turns into the footage's grey veil when its ride starts.</li>
           <li><time>2026‑11‑02</time> The original lighting: per-polygon levels from materials, Direct3D diffuse plus specular, per-vertex fog (white in World 1), and Brightness as the palette adjustment it really was.</li>
+          <li><time>2026‑11‑02</time> The bounce response (<code>0x408c50</code>) ported exactly, for predators and the camera: a perpendicular push only when the probe went behind the wall, plus the stored normal's nudge.</li>
           <li><time>2026‑11‑02</time> Level load enters every initial state before the first tick, as <code>0x4222d0</code> does: World 2 (and World 1) now spawn Mendel without "Wake every machine".</li>
           <li><time>2026‑11‑02</time> Blinking reported again: traced to a browser serving the pre-fix engine from its cache. Checked against the footage; the engine is now always revalidated before use.</li>
         </ol>

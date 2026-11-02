@@ -100,8 +100,17 @@ Appearing (slot `0x9c`): `PBal` (`0x4153a0`) starts at the `PPol`'s
 current position (`0x41cbd0` reads `Game+0x17efc0`); `PFrk`/`PMan`
 (`0x416300`) where they are. Both reset the mover and prime the tracker.
 
-**inferred**: `0x408c50`'s response vector (a second cast along the hit
-normal) is approximated by pulling the probe tip back to the surface.
+**The bounce — observed.** `0x408c50` rotates the hit polygon's normal
+into the world (`0x409880`) and casts a 0x400-long segment from the probe's
+tip along it, against that polygon alone (`0x408670`, `0x407740`). If the
+segment crosses (the tip lies behind the polygon, at most 1,024 deep) it
+returns `crossing − tip`, the perpendicular way back onto the plane, and
+the caller adds the polygon's *stored* normal (`puVar3[0xc]`: object-local,
+×1024, not rotated) `>> shift`. If it doesn't cross there is no push. The
+touch itself (contact flag `+0x31c`, `PostEvent`) happens on any hit of
+`World_Cast` (`0x4089e0`), which accepts polygons facing either way. The
+camera's wall probes (`0x413cb0`) use the same response with shift 7
+(8 units).
 
 ## 4. How a predator hurts Mendel — observed
 
@@ -173,7 +182,7 @@ cue 2 = sound 2, pitch 0.5, 5000/500/5000. Host event 9
 
 * The transition effects (`0x424520` family: kinds 1..7 with variants,
   sounds and palette flashes) — shared with Mendel's death; not ported.
-* `0x408c50`'s exact response; `0x4084e0` (called before the probes).
+* `0x4084e0` (called before the probes).
 * The object rotation order (`0x402370` only stores the three angles);
   we write `(+0x70, +0x72, +0x74)` into our `rot[0..3]` as the motion
   paths do.

@@ -610,17 +610,16 @@ impl Camera {
     }
 
     /// `Camera_Collide` @ 0x413cb0 (modes 7, 8, 9): six probes of 700
-    /// units from the last eye; a wall (flags 0x102) crossing one pushes
-    /// the camera out so that the probe's tip lies 8 units in front of it.
+    /// units from the last eye; a wall (flags 0x102) the probe's tip went
+    /// behind pushes the camera back onto it, plus 8 units along the
+    /// wall's stored normal (`0x408c50` + `normal >> 7`).
     fn collide(&mut self, sim: &Sim) {
         let Some(c) = sim.creature.as_ref() else { return };
         let from = self.last_eye;
         for d in PROBES {
             let to = add(from, d);
             let f = |v: I3| v.map(|c| c as f32);
-            let Some((a, n)) = c.camera_probe(sim, f(from), f(to)) else { continue };
-            let depth = (a[0] - to[0] as f32) * n[0] + (a[1] - to[1] as f32) * n[1] + (a[2] - to[2] as f32) * n[2];
-            let push = n.map(|c| c * (depth + 8.0)).map(|v| v.round() as i32);
+            let Some(push) = c.camera_probe(sim, f(from), f(to)) else { continue };
             self.eye = add(self.eye, push);
             self.mover.pos = add(self.mover.pos, push);
             for (i, fl) in self.eye_f.iter_mut().enumerate() {
