@@ -235,12 +235,78 @@ last save pad and put Mendel back on it** (the brain is *not* restored: he
 keeps what he learned), 4/5 = level transitions. Then mode 1 (rematerialise)
 → 2 (alive). `Game_TeleportCreature` @ `0x41c590` stores the respawn point.
 
-**Afflictions** (inferred meaning, observed effect): 12 polygon-triggered
-states held in `creature+0x8fc` by an effect manager that also alters his
-look (`Afflictions_Select` @ `0x406350`). Seen in Mendel's code: 5 = blind
-(both IR inputs 0), 6 = random sensor noise, 3 = fast gait, 7/8/9 = gait
-40 + agitated sounds + faster actuators, 10/11/12 = gravity changes, 1 = IR
-also sees polygons flagged `0x400000`.
+Two more rules at the top of `0x419550` (observed):
+
+* under affliction 1, a surface with bit 22 (`0x400000`) loses its lethal
+  bits, and one with bit 29 (`0x20000000`) loses its affliction bits;
+* **falling too long kills**: airborne, `+0x8f6` is set to 65 ticks (130
+  if `+0x134 & 0x10`; inferred: the flags of the last ground polygon),
+  `+0x8f4` counts; past the limit the surface becomes `0x181000` (lethal
+  kind 1, then death). Touching a `0x10` surface resets the count. On
+  landing, more than 5 airborne ticks is event 4 (the landing cue).
+
+Flags handed over by the game (`creature+0xae8`, `0x4198b0`, e.g. a
+predator's bite through `MEnc`, see predators.md) join the surface flags
+at the next touch.
+
+### 2.4 Afflictions — observed (effects, durations), inferred (names)
+
+`creature+0x8e8` is an *active effect manager* (`ActiveEffects_ctor` @
+`0x405820`, 0xd8 bytes, created by `Creature_ReadWorldSection`); the
+current affliction is the short at `creature+0x8fc` (set by `0x4198d0`,
+read by `0x4198e0`). Port: `crates/engine/src/affliction.rs`.
+
+**Trigger**: only surfaces. `Creature_HandleSurfaceEvents` calls
+`Afflictions_Apply` @ `0x405e20((f >> 25) & 15, 0)` whenever the surface
+flags have bits in `0x1e000000` — every tick he touches such a polygon.
+Apply ends a *different* running affliction (restores his polygons,
+`0x405f10`), stores the number, and calls `Afflictions_Select` @
+`0x406350`, which starts that affliction's effect object (vtable slot 1)
+with its duration and plays its start sound and palette flash.
+
+**Lifetime**: each effect (base `0x406840`; tick `0x4068f0`) runs a
+lead-in delay, `duration` ticks of its visual (slot 4), a lead-out delay,
+then ends (slot 2). Both delays are 0 for all twelve, so the affliction
+lasts exactly `duration` ticks and is gone on the next. The manager's
+tick (`0x405fc0`) runs in `Creature_Update` after the cost and before the
+surface events, and first restores every polygon's colour ramp. Effects
+1, 3, 4, 5 re-arm their duration on every Apply (standing on the polygon
+keeps them going); 2, 6, 10..12 (`0x4241b0`) and 7..9 (`0x424390`) only
+start when idle. Death (respawn reason 3, `0x417e68`) and loading a saved
+game (`Creature_Read` → `0x405f10` at `0x419967`) end it.
+
+| # | ticks | effect class | what changes (where it is read) | start sound / flash |
+|---|---|---|---|---|
+| 1 | 1440 | `0x42b150` | **shield**: lethal surfaces with bit 22 and affliction surfaces with bit 29 are ignored (0x41955b); his IR rays see polygons with bit 22 (`flags |= 0xc0`, 0x419290); skin: last texture slot, `+0x5c += 8`, brightness from four triangle-wave oscillators plus noise (`0x42b200`) | 37 / `0x17` (blue flash) |
+| 2 | 1440 | `0x42db50` | actuator steps (4, 7) (`0x418970`); no visual | — |
+| 3 | 1440 | `0x42cb90` | **speed**: gait 53 (`0x4189c0`), actuator steps (1, 6); visual `0x42cc00` restores ramps every 20..23 ticks (no visible change) | 39 / `0x18` (strobe) |
+| 4 | 4320 | `0x4072b0` | **camouflage**: every polygon takes the texture and ramp of the floor polygon he stands on (`0x407350` via the mover's `0x4124a0`); `PBal` stops chasing (`0x415237`) | 40 / `0x19` |
+| 5 | 240 | `0x414e10` | **blind**: both eyes 0 (`0x418fe8`); his four first polygons by mean x (the front, inferred) go dark (ramp 6000), fading back over the last 24 ticks (`0x414f80`) | 41 at half pitch / `0x1a` (white-out) |
+| 6 | 720 | `0x424160` | **confused**: each eye holds 0 or 256, re-drawn when `seed & 0xf0000 == 0` on the brain's LCG (1/16 → 0, else 1/16 → 256; `0x418ff9`) | 42 / `0x1b` (negative screen 30 s) |
+| 7, 8, 9 | 96 | `0x424340`, `0x407420`, `0x406ce0` | **agitated**: gait 40, actuator steps (4, 7), event 1 (the agitated cue, sounds 1/2) every tick; while ≥ 49 ticks are left, every `rand & 31` ticks a palette flicker (7: `0x1d..0x1f` warm, 8: `0x21..0x23` cold, 9: `0x25..0x27` green, priority 0) and a crackle (world sounds 43..45 / 46..48, pitch variation ±0.5 / ±0.25, random volume) | — |
+| 10, 11, 12 | 100 | `0x42f280`, `0x42f2d0`, `0x406c90` | gravity −2, 0, +7 instead of −7 (`0x418060`) | 53 / 54 / 55, `0x28..0x2a` |
+
+Sounds are 1-based world-bank sounds (manager cue template `+0x9c`:
+bank `Game+0x17ee7a`, pitch 1.0, distances 2000/20000, volume 256). The
+banks of all eight worlds share those slots; the sounds of 4, 6, 10, 11,
+12 are **empty slots** on the CD (test `affliction_sounds_exist_in_every_world`).
+The flashes are palette scripts (`Palette_InitScripts` @ `0x438290`,
+played by `0x438830(id, priority)`, stepped once a tick by `0x437690`):
+see `crates/engine/src/flash.rs`.
+
+**On the CD** (`hazard_probe`): only 1 (section 1 #103, `0x02000100`),
+3 (section 1 #166, section 5 #176, `0x06000100`) and 7/8/9. Every 7/8/9
+polygon is also a *delayed* lethal floor (`0x2ed93002`: affliction 7,
+lethal kind 3, after 80 ticks, bit 29): standing there he is agitated,
+then dies. 2, 4, 5, 6, 10..12 are unused.
+
+**Brain**: afflictions never touch the cost directly; they change what
+the brain senses (5, 6, 1), how fast its muscles move (2, 3, 7..9) and so
+what the cost measures. Pain stays the lethal-surface flag `0x1000000`.
+
+inferred (port): the start sound and flash are played when the affliction
+starts, not on every Apply (the exe replays them each tick of contact);
+a ramp brightness above 0x7fff is drawn as a brighter light.
 
 ## 3. Senses — observed (logic), inferred (exact ray geometry)
 
@@ -440,13 +506,16 @@ plays them:
 
 | Cue | Sounds | Trigger | Then silent for |
 |---|---|---|---|
-| `+0x978` | 5 | landing after more than 5 airborne ticks (event 4) | 5 ticks (own timer) |
-| `+0x900` | 1, 2 | agitated (event 1: afflictions 7/8/9) | 5..36 ticks |
+| `+0x978` | 5 | landing after more than 5 airborne ticks (event 4) | 5 ticks (own timer `+0xa32`) |
+| `+0x900` | 1, 2 | agitated (event 1: afflictions 7/8/9, every tick) | 5..36 ticks |
 | `+0x93c` | 3, 4 | eye ray hit a `0x40000000` polygon (event 2) | 20..51 ticks |
-| `+0x9b4` | 6, 7 | eye ray hit a `0x180000`-class polygon (event 8) | 20..51 ticks |
-| `+0x9f0` | 8, 9, 10, 11 | strong left/right asymmetry (event 16) | 20..51 ticks |
+| `+0x9b4` | 6, 7 | eye ray hit a polygon with `(flags & 0x380000) == 0x180000` (event 8) | 20..51 ticks |
+| `+0x9f0` | 8, 9, 10, 11 | `|L - R| > 230` (event 16) | 20..51 ticks |
 
-A random member of the cue is chosen by the sound system.
+The last four share one silence timer (`+0xa30`) and one plays per tick,
+in the table's order; the extra `0..31` ticks come from the brain's LCG
+(`0x468640`), so playing a cue advances his random sequence. A random
+member of the cue is chosen by the sound system (CRT `rand`, `0x42b5f0`).
 
 ## 7. The tick
 
@@ -520,6 +589,8 @@ Running Mendel in the live section-0 simulation confirmed or corrected:
   (stale caches written mid-evolution, or non-zero third input at
   authoring time?).
 * Camera profile fields `a, b, c, d`; the `u32 1520`.
-* Exact names of the 12 afflictions; the full list of what each one does
-  outside the creature code.
+* The transition effect (`+0x8ec`, `0x424520`: kinds 1..7, variants) and
+  what `+0x5c += 8` does to a polygon (affliction 1).
+* `creature+0x134` (the fall limit's bit 4) is written by the mover
+  (`0x411bcb`, `0x412157`); "last ground flags" is inferred.
 * Overlay 0 is unreachable from the age slider: used elsewhere?
