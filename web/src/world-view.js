@@ -534,6 +534,15 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       cam.target = [...point];
       cam.dist = dist;
     },
+    // Put the orbit camera's eye at `eye`, looking at `target` (for
+    // reproducing a footage frame from DevTools; leave follow mode first).
+    aim(eye, target) {
+      const d = eye.map((e, i) => e - target[i]);
+      cam.target = [...target];
+      cam.dist = Math.hypot(...d);
+      cam.yaw = Math.atan2(d[0], d[1]);
+      cam.pitch = Math.asin(Math.max(-1, Math.min(1, d[2] / (cam.flip * cam.dist))));
+    },
     // Flip the up axis, for exploring the geometry upside down.
     flipUp() { cam.flip = -cam.flip; },
     // Show the original camera; `creature` returns engine.creature.state()

@@ -2436,8 +2436,8 @@ mod walker_tests {
     /// (0, 0) (0, −602.8) at vertices 0, 1, 2: `t` runs along v1→v2, the
     /// belt's length, about 19.9 units a texel, stored × −256 as 5100;
     /// `0x41dc30` moves him `(4400 · −8 >> 8) >> 0 = −138` along the
-    /// polygon's `u` every tick, along the belt to the wall at its end,
-    /// which holds him. inferred: no footage of section 2. (With the
+    /// polygon's `u` every tick, along the belt and through the opening
+    /// at its end. inferred: no footage of section 2. (With the
     /// initialiser's texels (0,127) (0,0) (127,0), which the port used
     /// before shape frames were ported, the flow ran *across* the belt.)
     #[test]
@@ -2468,7 +2468,7 @@ mod walker_tests {
         let drive = Drive { forward: 0, turn: 0, stance: 124, gravity: -7, injected: 0 };
         let mut posted = Vec::new();
         let mut steps = Vec::new();
-        for _ in 0..60 {
+        for _ in 0..32 {
             let (u, v) = (w.u, w.v);
             let near = Near::gather(&c.polys, &sim, w.pos, 3200.0, SOLID | FLOOR | HAZARD);
             w.step(&c.polys, &mut sim, &near, &drive, &mut posted);
@@ -2476,10 +2476,23 @@ mod walker_tests {
             assert_eq!(w.v, v, "nothing moves him across it");
             steps.push(w.u - u);
         }
-        assert!(steps[..32].iter().all(|&d| d == -138.0), "one conveyor step a tick: {:?}", &steps[..32]);
-        // The hull meets the wall at the belt's end (u ≈ 450 from it) and
-        // holds him there against the flow.
-        assert!((420.0..460.0).contains(&w.u) && steps[50..].iter().all(|&d| d == 0.0), "held at the end, u {}", w.u);
+        assert!(steps.iter().all(|&d| d == -138.0), "one conveyor step a tick: {steps:?}");
+        // The belt runs into the wall #201 (polygon 7, x = −19980), but
+        // through the opening that wall is drawn round (a keyhole polygon,
+        // framed by polygon 8), onto the next belt #177 (polygon 2, flags
+        // 0x6) on the far side. The opening's frame nudges him to the
+        // middle; nothing holds him.
+        let next = 177 - 1;
+        let mut on = vec![w.on];
+        for _ in 0..80 {
+            let near = Near::gather(&c.polys, &sim, w.pos, 3200.0, SOLID | FLOOR | HAZARD);
+            w.step(&c.polys, &mut sim, &near, &drive, &mut posted);
+            assert!(w.grounded, "never falls: {:?}", w.pos);
+            if on.last() != Some(&w.on) {
+                on.push(w.on);
+            }
+        }
+        assert!(on.contains(&Some((next, 2))) && w.pos[0] < -20500.0, "carried through the opening onto #177: {on:?}, at {:?}", w.pos);
     }
 
     /// Section 1's sideways pads are drawn on every tick. Their flip-books
@@ -2506,6 +2519,92 @@ mod walker_tests {
             }
         }
         assert_eq!(layer(&mesh, 49 - 1, 0).1, 8.0, "#49 keeps texture 8");
+    }
+
+    /// The intro capsule #3 flies its motion path through openings in the
+    /// walls (footage 0:44..1:40): it enters the octagonal hall through
+    /// the hexagonal hole of wall #101 (x = 14060, z ≈ 14000). Every tick
+    /// of the ride, until it has dropped Mendel on the arrival pad #83,
+    /// the segment its origin moves along crosses no drawn, solid polygon
+    /// of another object; with the keyhole walls fanned it crossed #101.
+    /// (Afterwards it rises straight through the hall's ceiling #97, a
+    /// convex octagon: its motion path, not checked against footage.)
+    #[test]
+    fn intro_capsule_flies_through_openings_when_data_present() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 0);
+        let capsule = 3 - 1;
+        let polys = walker::local_polys(&Archive::parse(&d).unwrap().world(0).unwrap());
+        let mut prev = sim.pose(capsule).0.map(|c| c as f32);
+        let (mut moved, mut crossed) = (0.0, Vec::new());
+        for _ in 0..140 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            let c = sim.creature.as_ref().unwrap();
+            if c.mode == Mode::Alive && c.ground().map(|g| g.0 + 1) == Some(83) {
+                break;
+            }
+            let now = sim.pose(capsule).0.map(|c| c as f32);
+            let len = length(sub(now, prev));
+            if len > 0.0 {
+                moved += len;
+                let near = Near::gather(&polys, &sim, prev, len, SOLID);
+                for h in near.segment_all(prev, now, |t| t.obj != capsule) {
+                    let draw = mesh.draw_of_object[h.obj].unwrap();
+                    let r = mesh.poly_ranges[draw][h.poly];
+                    let drawn = mesh.visible[draw] == 1 && r.count > 0 && mesh.vertices[r.first as usize * world::FLOATS_PER_VERTEX + 5] >= 0.0;
+                    if drawn {
+                        crossed.push((sim.tick, h.obj + 1, h.poly, h.point.map(|c| c as i32)));
+                    }
+                }
+            }
+            prev = now;
+        }
+        println!("capsule flew {moved:.0} units until tick {}; crossed {crossed:?}", sim.tick);
+        assert!(moved > 300_000.0 && sim.tick < 140 * sim::TICKS_PER_SECOND as u64, "the capsule flies and delivers him: {moved}");
+        assert!(crossed.is_empty(), "through drawn solid polygons: {crossed:?}");
+    }
+
+    /// Section 0's walkway #94 (top polygon 4, z = 2960, from y = −370 to
+    /// −15170) ends at the octagonal hall's wall #100, where a window
+    /// (x −2220..0, z 2960..5920, framed by #100's grey polygon 0) opens
+    /// on the corridor #79 (floor polygon 2, z = 2960, on to y = −22200),
+    /// where #77 (texture 14, flags 0x15e2380: solid, with event bits)
+    /// stands across it at y ≈ −17000..−18600. #100's wall
+    /// polygon 2 (flags 0x340: solid) is one keyhole outline round that
+    /// window; fanned, it bricked the window up and the hull stopped him
+    /// 450 units short of it. Triangulated as the exe draws it (and as
+    /// `World_Cast`'s even-odd test `0x407830` sees it) he walks through.
+    #[test]
+    fn section0_walkway_leads_through_the_window_when_data_present() {
+        let Some(d) = data() else { return };
+        let (mut sim, _mesh) = world(&d, 0);
+        let c = sim.creature.take().unwrap();
+        let (walkway, corridor, wall) = (94 - 1, 79 - 1, 100 - 1);
+        let mut w = Mover::default();
+        // Heading −y (768 = three quarters of a turn).
+        w.place(&c.polys, &mut sim, None, [-1110.0, -12000.0, 3060.0], 768, 124);
+        assert!(w.grounded && w.on == Some((walkway, 4)), "on the walkway: {:?}", w.on);
+        let mut posted = Vec::new();
+        let mut on = vec![w.on];
+        for _ in 0..400 {
+            let near = Near::gather(&c.polys, &sim, w.pos, 3200.0, SOLID | FLOOR | HAZARD);
+            let drive = Drive { forward: 30, turn: 0, stance: 124, gravity: -7, injected: 0 };
+            w.step(&c.polys, &mut sim, &near, &drive, &mut posted);
+            assert!(w.grounded, "never falls: at {:?}", w.pos);
+            if on.last() != Some(&w.on) {
+                on.push(w.on);
+            }
+        }
+        println!("walkway → corridor: polygons {on:?}, now at {:?}", w.pos);
+        assert!(w.pos[1] < -16000.0, "through the window, into the corridor: {:?}", w.pos);
+        assert!(on.contains(&Some((corridor, 2))), "on the corridor's floor: {on:?}");
+        // The wall is still a wall beside the window: the same hull ray,
+        // 2000 units to the side, is stopped by #100's polygon 2.
+        let near = Near::gather(&c.polys, &sim, [-1110.0, -15170.0, 3500.0], 6000.0, SOLID);
+        let ray = |x: f32| near.segment([x, -14500.0, 3500.0], [x, -15800.0, 3500.0], Faces::Both, |t| t.flags & SOLID != 0).map(|h| (h.obj, h.poly));
+        assert_eq!(ray(-1110.0), None, "the window is open");
+        assert_eq!(ray(-4000.0), Some((wall, 2)), "the wall beside it is solid");
+        assert_eq!(ray(2500.0), Some((wall, 2)), "on both sides");
     }
 
     /// Walking across the seam between two polygons of one floor never
@@ -2735,8 +2834,11 @@ mod level_load_tests {
         assert!(!report.is_empty());
     }
 
-    /// Section 2 specifically: alive on #194's downward polygon 6 a few
+    /// Section 2 specifically: alive on #194's downward polygon 1 a few
     /// seconds in (the `Strt` waits 100 ticks, then 11 of rematerialising).
+    /// Polygon 1 is the hexagonal plate the portal names, set 74 units
+    /// into the ceiling inside the ring polygon 6 (a keyhole outline round
+    /// it): with the ring fanned, its filled hole caught the probe first.
     #[test]
     fn section2_spawns_mendel_on_194() {
         let Some(d) = data() else { return };
@@ -2746,7 +2848,7 @@ mod level_load_tests {
         }
         let c = sim.creature.as_ref().unwrap();
         assert_eq!(c.mode, Mode::Alive);
-        assert_eq!(c.ground().map(|(o, p)| (o + 1, p)), Some((194, 6)), "standing on the Strt's polygon 6");
+        assert_eq!(c.ground().map(|(o, p)| (o + 1, p)), Some((194, 1)), "standing on the Strt's polygon 1");
     }
 }
 

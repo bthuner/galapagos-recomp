@@ -507,6 +507,45 @@ areas add up to the polygon's own). Clicks (`World_Pick` → `0x4076d0` →
 there too; `Sim::pick_hit` now uses the same triangles, and a click in
 the pool reaches the save pad `#84` instead of the ring.
 
+**Walls with doorways are rings too** — observed. Section 0's octagonal
+hall is walled by `#100`, `#101`, `#102` (texture 2, flags `0x340`:
+drawn and solid) and `#148`, `#149` (texture 22), each one keyhole
+polygon round a window, with a second keyhole (texture 27, the grey
+panels) as the window's frame: `#100` polygon 2 is `[12, 13, 9, 0, 3, 2,
+1, 0, 9, 8]`, the window at x −2220..0, z 2960..5920 of the wall y =
+−15170, where the walkway `#94` meets the white-ceilinged corridor `#79`;
+`#101` polygon 2 holds both a window near the floor (y −2960..0, z
+−25900..−23680, the footage's 2:45, Mendel climbing past it) and the
+hexagonal hole high up that the intro capsule flies in by (y ≈
+−5153..5153, z 11840..16280). Fanned,
+every one of them was bricked up: a dark wall with the grey frame
+z-fighting on it where the footage shows the lattice-lit corridor beyond
+and, worse, **solid**:
+
+Collision never triangulates. `World_Cast` (`0x4089e0` → `0x408730` →
+`0x4076d0`) first crosses the polygon's plane (`0x407740`, integer
+normal, either way), then counts the crossings of a ray from the hit
+point over the polygon's own edges in a coordinate plane picked by the
+record's `+0x24` (`0x407830`; its state machine counts a vertex the ray
+passes exactly once): an even-odd test of the outline, for which a
+bridge drawn twice cancels and a ring's hole is a hole. The port's casts
+(`walker.rs` `Near::gather`, every probe and hull ray of Mendel, the
+camera's collision and the predators' probes) fanned each polygon from
+its first vertex, so the hull stopped Mendel 450 units short of every
+doorway. They now cast against `triangulate`'s triangles (`LocalPoly::tris`),
+which cover exactly the even-odd area (the tiling test). Consequences,
+all tests: Mendel walks off `#94` through `#100`'s window into `#79`
+(`section0_walkway_leads_through_the_window_when_data_present`, stopped
+only by `#77` standing across the corridor); the intro capsule's path
+crosses no drawn solid polygon until it has dropped him
+(`intro_capsule_flies_through_openings_when_data_present`); section 2's
+belt `#197` carries him through the opening of wall `#201` onto the next
+belt `#177` instead of pinning him to a filled hole; section 2's `Strt`
+`#194` stands him on its own polygon 1 (the hexagonal plate, recessed 74
+units inside the ring polygon 6) rather than on the ring's filled hole.
+inferred: triangles and the exe's edge count can disagree only on a
+polygon's boundary (a ray through a vertex), a set of measure zero.
+
 The flip-book itself was right: it runs while the pad's folder chain
 (`#81` < `#80` < `#74`, the second room) is awake. `#74` switches its
 97 descendants off on tick 2 while Mendel is elsewhere and back on when

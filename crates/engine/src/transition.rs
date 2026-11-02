@@ -1246,7 +1246,8 @@ pub(crate) struct Skin {
 use crate::world::{WorldMesh, FLOATS_PER_MATERIAL, FLOATS_PER_VERTEX};
 
 impl Skin {
-    /// The object's polygons, rebuilt from their triangle fans.
+    /// The object's polygons, rebuilt from their triangles (each vertex
+    /// knows which corner it is, `WorldMesh::corner`).
     pub(crate) fn shape(mesh: &WorldMesh, draw: usize) -> Shape {
         let mut s = Shape::default();
         for r in &mesh.poly_ranges[draw] {
@@ -1256,9 +1257,11 @@ impl Skin {
             };
             let mut p = Vec::new();
             if r.count >= 3 {
-                p.extend([v(0), v(1), v(2)]);
-                for t in 1..r.count / 3 {
-                    p.push(v(t * 3 + 2));
+                p = vec![[0; 3]; r.count as usize / 3 + 2];
+                for i in 0..r.count {
+                    if let Some(c) = p.get_mut(mesh.corner[(r.first + i) as usize] as usize) {
+                        *c = v(i);
+                    }
                 }
             }
             s.polys.push(p);
@@ -1303,13 +1306,8 @@ impl Skin {
                 let o = (pr.first as usize) * FLOATS_PER_VERTEX - a + t * FLOATS_PER_VERTEX;
                 let at = o + a;
                 mesh.vertices[at..at + FLOATS_PER_VERTEX].copy_from_slice(&orig[o..o + FLOATS_PER_VERTEX]);
-                // Fan corner of this triangle vertex: 0, k, k+1.
-                let (tri, j) = (t / 3, t % 3);
-                let c = match j {
-                    0 => 0,
-                    1 => tri + 1,
-                    _ => tri + 2,
-                };
+                // The polygon corner this triangle vertex stands for.
+                let c = mesh.corner[pr.first as usize + t] as usize;
                 if let Some(v) = corners.get(c) {
                     mesh.vertices[at..at + 3].copy_from_slice(&v.map(|x| x as f32));
                 }
