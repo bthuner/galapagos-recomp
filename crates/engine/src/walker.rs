@@ -144,6 +144,10 @@ pub(crate) fn turns(a: i32) -> f32 {
 /// 0x41d6d0).
 pub(crate) struct LocalPoly {
     pub points: Vec<V3>,
+    /// Its triangles ([`world::triangulate`]): a keyhole polygon, a wall
+    /// with a doorway, keeps its doorway open (`World_Cast`'s even-odd
+    /// test, `0x407830`).
+    pub tris: Vec<[usize; 3]>,
     pub centre: V3,
     pub radius: f32,
     pub normal: V3,
@@ -210,7 +214,8 @@ pub(crate) fn local_poly(points: Vec<V3>, texels: [f32; 6]) -> LocalPoly {
     } else {
         (UP, IDENTITY, [0.0; 4])
     };
-    LocalPoly { points, centre, radius, normal, frame, texel, normal_i, frame_i, angles }
+    let tris = world::triangulate(&points);
+    LocalPoly { points, tris, centre, radius, normal, frame, texel, normal_i, frame_i, angles }
 }
 
 /// `∂(u, v)/∂(s, t)` in the polygon's frame (`0x41d6d0`): the edges v1→v2
@@ -322,8 +327,8 @@ pub(crate) struct Tri {
     pub a: V3,
     pub e1: V3,
     pub e2: V3,
-    /// The polygon's unit normal; `a` is its first vertex (a point of its
-    /// plane), whichever fan triangle this is.
+    /// The polygon's unit normal; `a` is a corner of the triangle, so a
+    /// point of the polygon's plane.
     pub normal: V3,
     pub obj: usize,
     pub poly: usize,
@@ -402,8 +407,8 @@ impl Near {
                 }
                 let w: Vec<V3> = lp.points.iter().map(|&v| sim::apply(&m, v)).collect();
                 let normal = normalize(cross(sub(w[1], w[0]), sub(w[2], w[0])));
-                for k in 1..w.len() - 1 {
-                    out.push(Tri { a: w[0], e1: sub(w[k], w[0]), e2: sub(w[k + 1], w[0]), normal, obj: i, poly: p, flags });
+                for &[a, b, c] in &lp.tris {
+                    out.push(Tri { a: w[a], e1: sub(w[b], w[a]), e2: sub(w[c], w[a]), normal, obj: i, poly: p, flags });
                 }
             }
         }

@@ -260,6 +260,9 @@ pub struct WorldMesh {
     pub light: Light,
     /// Texture coordinates before any per-frame offset, 2 per vertex.
     pub base_uv: Vec<f32>,
+    /// For each vertex: which corner of its polygon it is (the polygon's
+    /// triangles are [`triangulate`]'s, not always a fan from corner 0).
+    pub corner: Vec<u16>,
     /// The appearance frame's texel offset of each vertex's polygon, in
     /// textures, 2 per vertex: drawn UV = `base_uv + uv_offset`, kept apart
     /// so a shape frame can replace `base_uv` exactly.
@@ -491,6 +494,7 @@ impl WorldMesh {
         let mut transforms = Vec::new();
         let mut draw_of_object = Vec::new();
         let mut poly_ranges = Vec::new();
+        let mut corner = Vec::new();
         let mut bounds = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN];
         let mut objects_drawn = 0;
 
@@ -503,7 +507,7 @@ impl WorldMesh {
             if obj.mesh.is_some() {
                 objects_drawn += 1;
                 let first = (vertices.len() / FLOATS_PER_VERTEX) as u32;
-                poly_ranges.push(emit_object(obj, &mut vertices, &mut bounds));
+                poly_ranges.push(emit_object(obj, &mut vertices, &mut corner, &mut bounds));
                 let count = (vertices.len() / FLOATS_PER_VERTEX) as u32 - first;
                 draws.push(DrawRange { first, count });
                 let [x, y, z] = obj.position.map(|c| c as f32);
@@ -540,7 +544,7 @@ impl WorldMesh {
             .collect();
         let mut mesh = WorldMesh {
             vertices, draws, draw_of_object, poly_ranges, hides_object, blinking, visible, cull, material, materials, light,
-            base_uv, uv_offset, transforms, textures, texture_count, bounds, objects_drawn, far_clip, fog,
+            base_uv, corner, uv_offset, transforms, textures, texture_count, bounds, objects_drawn, far_clip, fog,
         };
         // Apply each polygon's initial appearance frame (layer, UV offset).
         for object in &section.objects {
@@ -670,6 +674,7 @@ impl WorldMesh {
                     self.vertices[o + 3] = uv[i].0 + self.uv_offset[v * 2];
                     self.vertices[o + 4] = uv[i].1 + self.uv_offset[v * 2 + 1];
                     self.vertices[o + 7..o + 10].copy_from_slice(&n);
+                    self.corner[v] = i as u16;
                     v += 1;
                 }
             }
@@ -692,7 +697,7 @@ fn obj_index(section: &Section, obj: &WorldObject) -> usize {
         .unwrap()
 }
 
-fn emit_object(obj: &WorldObject, out: &mut Vec<f32>, bounds: &mut [f32; 6]) -> Vec<DrawRange> {
+fn emit_object(obj: &WorldObject, out: &mut Vec<f32>, corner: &mut Vec<u16>, bounds: &mut [f32; 6]) -> Vec<DrawRange> {
     let mut ranges = Vec::new();
     let mesh = obj.mesh.as_ref().unwrap();
     let origin = obj.position.map(|c| c as f32);
@@ -720,6 +725,7 @@ fn emit_object(obj: &WorldObject, out: &mut Vec<f32>, bounds: &mut [f32; 6]) -> 
                     bounds[a + 3] = bounds[a + 3].max(origin[a] + p[a]);
                 }
                 out.extend_from_slice(&[p[0], p[1], p[2], uv[i].0, uv[i].1, -1.0, 0.0, nx, ny, nz]);
+                corner.push(i as u16);
             }
         }
         let count = (out.len() / FLOATS_PER_VERTEX) as u32 - first;
@@ -930,6 +936,41 @@ mod tests {
         }
         println!("ear-clipped polygons: {clipped:?}");
         assert!(clipped.contains(&(0, 87, 5, 14)), "section 0's save-pad ring");
+    }
+
+    /// Does one of `tris` (of the planar polygon `pts`) cover `p`?
+    fn covers(pts: &[V3], tris: &[[usize; 3]], p: V3) -> bool {
+        let n = normalize(cross(sub(pts[2], pts[1]), sub(pts[0], pts[1])));
+        tris.iter().any(|&[a, b, c]| {
+            let side = |u: V3, v: V3| dot(cross(sub(v, u), sub(p, u)), n);
+            side(pts[a], pts[b]) >= 0.0 && side(pts[b], pts[c]) >= 0.0 && side(pts[c], pts[a]) >= 0.0
+        })
+    }
+
+    /// Walls have holes too. Section 0's octagonal hall wall #100
+    /// (polygon 2, texture 2, flags 0x340: drawn and solid) is one keyhole
+    /// outline round a window, `[12, 13, 9, 0, 3, 2, 1, 0, 9, 8]`, and the
+    /// window's grey frame (polygon 0, texture 27) is another round the
+    /// same opening (x −2220..0, z 2960..5920 at y = −15170), where the
+    /// walkway #94 meets the corridor #79. A fan bricked it up; the ear
+    /// clipper leaves it open and keeps the wall around it.
+    #[test]
+    fn section0_hall_window_is_open_when_data_present() {
+        let Some(d) = data() else { return };
+        let ar = Archive::parse(&d).unwrap();
+        let sec = ar.world(0).unwrap();
+        let Object::World(w) = &sec.objects[100 - 1] else { panic!() };
+        let m = w.mesh.as_ref().unwrap();
+        let local = |p: [i32; 3]| [0, 1, 2].map(|a| (p[a] - w.position[a]) as f32);
+        let pts = |p: usize| m.polygons[p].iter().map(|&i| m.vertices[i as usize].map(|c| c as f32)).collect::<Vec<V3>>();
+        let (wall, frame) = (pts(2), pts(0));
+        let window = local([-1110, -15170, 4440]);
+        let fan: Vec<[usize; 3]> = (1..wall.len() - 1).map(|k| [0, k, k + 1]).collect();
+        assert!(covers(&wall, &fan, window), "a fan fills the window");
+        assert!(!covers(&wall, &triangulate(&wall), window), "the wall leaves the window open");
+        assert!(!covers(&frame, &triangulate(&frame), window), "and so does its frame");
+        assert!(covers(&wall, &triangulate(&wall), local([-5000, -15170, 0])), "the wall is still there");
+        assert!(covers(&frame, &triangulate(&frame), local([-1800, -15170, 6300])), "the frame too");
     }
 
     /// The winding the renderer culls by: the top of section 0's arrival

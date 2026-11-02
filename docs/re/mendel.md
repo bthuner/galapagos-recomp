@@ -356,6 +356,14 @@ seen from afar).
    Then `+0xe4` = the polygon's flags, ORed into the surface flags unless
    a wall brought lethal or affliction bits (`& 0x1e00f000`, `0x41215d`).
 
+**Casts see the polygon's outline** (`0x4076d0`: plane crossing
+`0x407740`, then the even-odd edge count `0x407830`), not triangles: a
+wall drawn as one keyhole polygon round a doorway lets him through the
+doorway. The port casts against the ear-clipped triangles of
+`world::triangulate`, which cover the same area (worlds.md, "Walls with
+doorways are rings too"); it used to fan them, which filled every
+doorway.
+
 **So:** there is no adjacency search and no edge test. He crosses from
 polygon to polygon because the probe under him hits the next one
 (across objects too: the probe sees every gathered object); at an edge
@@ -444,8 +452,11 @@ frames `v = 0, −8, … −120`, applied by its initial state 2; texels (111.4,
 (`t` runs along `v1→v2`): the stored basis `(+8, +0xc, +0xa, +0xe)` is
 `(0, 4400, −5100, 0)` (17.2 units a texel of `t` along the frame's `x`,
 19.9 a texel of `s` along `y`), so `(4400 · −8) >> 8 = −138` along the
-polygon's `u` per tick. Placed on it, Mendel is carried to the wall at its end and held
-there (test `section2_belt_carries_him_at_the_exes_speed`). Before the
+polygon's `u` per tick. Placed on it, Mendel is carried to the wall #201
+at its end and through the opening that wall is drawn round, onto the
+next belt #177 (test `section2_belt_carries_him_at_the_exes_speed`; the
+port held him at the wall while it fanned #201's keyhole polygon, see
+worlds.md "Walls with doorways are rings too"). Before the
 shape texels were ported the port had the flow *across* the belt and
 swept him off its side in 16 ticks. inferred: not checked against
 footage (the reference video never leaves section 0).
@@ -992,9 +1003,10 @@ Running Mendel in the live simulation confirmed or corrected:
   #64, #66, #73, #117, #163) land him on the pad's polygon, his up = +y,
   at his stance height, and he walks on (test
   `teleports_onto_tilted_pads_in_section1`). Section 2's `Strt` #194
-  stands him upside down (up −z) on its polygon 6, which the probe meets
-  74 units before the portal's polygon 1 (test
-  `section2_starts_on_its_downward_start_polygon`).
+  stands him upside down (up −z) on its polygon 1, a hexagonal plate set
+  74 units into the ceiling inside the ring polygon 6 (a keyhole outline
+  round it; while the port fanned the ring, its filled hole caught the
+  probe first; test `section2_starts_on_its_downward_start_polygon`).
 * **One-sided polygons** (observed): the mover's hit test `0x408c50`
   accepts a polygon only from the side `(v1-v0) x (v2-v0)` points to.
 * **The intro is a ride**: Mendel is born standing on the `Strt` disc #57,
@@ -1015,7 +1027,7 @@ Running Mendel in the live simulation confirmed or corrected:
   level load enters all initial states before the first tick
   (`World_Read` @ `0x4222d0`, objects.md §2), so section 2's folder #193
   sees #178 in state 1 and keeps `Strt` #194 awake; he appears on its
-  polygon 6 at tick 100 (tests `every_start_spawns_mendel_without_waking_all`,
+  polygon 1 at tick 100 (tests `every_start_spawns_mendel_without_waking_all`,
   `section2_spawns_mendel_on_194`). Spawn ticks: sections 0..7 = 333, 12,
   100, 60, 60, 20, 50, 1067.
 * **Conveyors push hard, faithfully**: section 2's belt #197 sweeps him
