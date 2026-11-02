@@ -50,7 +50,7 @@ cargo test --workspace
 
 Playable as a living world: the Anark intro and the soundtrack play; all
 eight worlds render, and their 2,089 object state machines run at 24 Hz with
-3-D sound; Mendel spawns, walks with his real NERM brain, wakes the world with
+3-D sound; Mendel spawns, walks polygon to polygon (any way up) with his real NERM brain, wakes the world with
 his footsteps, reacts to touch, suffers the floors' afflictions and is hunted by
 predators; the original camera follows him; save pads,
 saved games and the time screen work; the original menus and preferences too.
