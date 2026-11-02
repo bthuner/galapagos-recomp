@@ -32,7 +32,7 @@ pub mod save;
 pub const TICKS_PER_SECOND: u32 = 24;
 
 /// Something the browser has to do on the engine's behalf.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct HostEvent {
     pub kind: u32,
@@ -78,6 +78,10 @@ pub enum Request {
     /// Portal kind 6: Mendel dissolves and respawn reason 3 runs (the
     /// world snapshot comes back, he reappears at the respawn point).
     Respawn,
+    /// Portal kinds 3 and 5: Mendel dissolves (effect 1 v5, the
+    /// white-out), then respawn reason 4/5 ends the level: the event
+    /// (`EV_SECTION` / `EV_GAME_COMPLETE`) goes to the host.
+    LevelEnd(HostEvent),
 }
 
 /// Where a portal puts Mendel: a polygon of the portal (`ints[0]`) and
@@ -557,6 +561,16 @@ impl Sim {
     }
 
     /// The class behaviour (vtable slot 0x18), for the classes we know.
+    /// A gate or the last portal: Mendel dissolves first (creature.rs
+    /// sends `ev` when his effect ends); without him, at once.
+    fn level_end(&mut self, ev: HostEvent) {
+        if self.creature.is_some() {
+            self.requests.push(Request::LevelEnd(ev));
+        } else {
+            self.events.push(ev);
+        }
+    }
+
     fn trigger(&mut self, i: usize, entry: usize, mesh: &mut WorldMesh) {
         let Some(obj) = self.objs[i].obj.as_ref() else { return };
         let Some(p) = obj.logic.params.get(entry).copied() else { return };
@@ -575,8 +589,11 @@ impl Sim {
             b"Tele" | b"Strt" | b"STel" => {
                 let place = |off: [i32; 3], mode: i32| self.portal_place(i, mode.max(0) as usize, off);
                 match p.portal() {
+                    // Kind 3's reaction 0x251000 (and kind 5's 0x2d1000)
+                    // dissolve Mendel with effect 1 v5 (the white-out)
+                    // before respawn reason 4 (5) ends the level.
                     PortalAction::ChangeSection { section, level } => {
-                        self.events.push(HostEvent { kind: EV_SECTION, a: section as i32, b: level as i32, c: 0 })
+                        self.level_end(HostEvent { kind: EV_SECTION, a: section as i32, b: level as i32, c: 0 })
                     }
                     // `mode` (ints[0]) is the polygon he lands on; the
                     // offset is measured on it (see `PortalPlace`).
@@ -599,7 +616,7 @@ impl Sim {
                     // 0x2d1000 ends in respawn reason 5, the end of the
                     // game; kind 6's 0x1b2000 in reason 3, a respawn.
                     PortalAction::ReactOnly if p.shorts[0] == 5 => {
-                        self.events.push(HostEvent { kind: EV_GAME_COMPLETE, a: 8, b: 9, c: 0 })
+                        self.level_end(HostEvent { kind: EV_GAME_COMPLETE, a: 8, b: 9, c: 0 })
                     }
                     PortalAction::ReactOnly if p.shorts[0] == 6 => self.requests.push(Request::Respawn),
                     PortalAction::ReactOnly | PortalAction::Other(_) => {}

@@ -178,6 +178,9 @@ pub enum After {
     Respawn,
     /// Reasons 1/2: a teleporter's destination (`Game+0x17efd6..`).
     Teleport(Place),
+    /// Reasons 4/5: the level ends (`0x41c8c0`); the host gets the event.
+    /// (A saved game keeps it as a respawn.)
+    LevelEnd(sim::HostEvent),
 }
 
 /// A spot for Mendel the way the game stores one (`Game+0x17efc4..`, the
@@ -512,6 +515,15 @@ impl Creature {
                     }
                 }
             }
+            Request::LevelEnd(ev) => {
+                // Reactions 0x251000 / 0x2d1000: effect 1 v5, reason 4/5.
+                if self.mode == Mode::Alive {
+                    self.dematerialise([1, 5], sim);
+                    self.mode = Mode::Vanishing(0, After::LevelEnd(ev));
+                } else {
+                    sim.events.push(ev);
+                }
+            }
             Request::Respawn => {
                 // Portal kind 6's reaction 0x1b2000: effect 2 v3, reason 3.
                 if self.mode == Mode::Alive {
@@ -588,6 +600,9 @@ impl Creature {
     fn finish_vanishing(&mut self, then: After, sim: &mut Sim, mesh: &mut WorldMesh) {
         match then {
             After::Teleport(p) => self.place(p, sim),
+            // The host shows the time screen and builds the next section
+            // (a new Mendel); until it does, this one comes back in place.
+            After::LevelEnd(ev) => sim.events.push(ev),
             After::Respawn => {
                 // Respawn reason 3 ends any affliction (`0x405f10` at 0x417e68).
                 self.afflictions.end();
@@ -1950,6 +1965,36 @@ mod hazard_tests {
         assert_eq!(sim.creature.as_ref().unwrap().stats.deaths, 1);
         let sounds: Vec<i32> = sim.events.iter().filter(|e| e.kind == sim::EV_EFFECT_SOUND).map(|e| e.a + 1).collect();
         assert_eq!(sounds, [10, 18], "the burst's and the reassembly's");
+    }
+
+    /// A dimensional gate (portal kind 3, reaction 0x251000): he fades
+    /// out polygon by polygon (effect 1 v5) while the screen bleaches to
+    /// white (flash 4: 40 ticks, then 10 frames to white, 254 after the
+    /// 8.8 lerp, which stays),
+    /// and only then does the host get the section change. The footage
+    /// shows the white-out ~1 s before the time screen (t = 594 s).
+    #[test]
+    fn a_gate_whites_out_before_the_section_changes() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = alive_in_section0(&d);
+        sim.events.clear();
+        let ev = sim::HostEvent { kind: sim::EV_SECTION, a: 1, b: 0, c: 0 };
+        sim.requests.push(Request::LevelEnd(ev));
+        let (mut white_at, mut sent_at) = (None, None);
+        for t in 0..400 {
+            sim.step(&mut mesh);
+            if white_at.is_none() && sim.flash.current().iter().all(|&c| c >= 250) {
+                white_at = Some(t);
+            }
+            if sim.events.iter().any(|e| *e == ev) {
+                sent_at = Some(t);
+                break;
+            }
+        }
+        println!("gate: white at {white_at:?}, section change at {sent_at:?}");
+        assert!(white_at.is_some_and(|t| (49..=52).contains(&t)), "40 held + 10 frames of the ramp");
+        let sent = sent_at.expect("the section change is sent");
+        assert!(sent > 60 && sent < 150, "after the effect, not at the touch: {sent}");
     }
 
     /// The transition effects the predators play: the ball's appearance

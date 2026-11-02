@@ -388,6 +388,7 @@ pub extern "C" fn world_transforms_ptr() -> *const f32 {
 /// | 7 | game completed | level 8, picture 9 |
 /// | 8 | affliction sound, at Mendel | world-bank sound, pitch 16.16, volume \| variation>>8 << 16 |
 /// | 9 | predator sound | predator-bank sound (0 growl, 1 bite), object id, pitch 16.16 |
+/// | 10 | transition effect sound | world-bank sound, object id (0 = Mendel), packed cue (`sim::EV_EFFECT_SOUND`) |
 #[no_mangle]
 pub extern "C" fn sim_tick(n: u32) -> u32 {
     WORLDS.with(|w| {
@@ -611,6 +612,19 @@ pub extern "C" fn creature_afflict(n: u32) {
         if let Some(mut c) = sim.creature.take() {
             c.afflictions.apply(n.min(255) as u8, sim);
             sim.creature = Some(c);
+        }
+    });
+}
+
+/// Teaching/debug switch, not in the original: hand Mendel surface flags
+/// as a predator's bite does (`Game_CreatureReact` @ 0x41cb80), felt with
+/// his next touch. `0x01582380` is the commonest lethal floor (transition
+/// effect kind 2, variant 0); bits 12..18 pick any other effect.
+#[no_mangle]
+pub extern "C" fn creature_react(flags: u32) {
+    with_sim_mut(|sim| {
+        if let Some(c) = sim.creature.as_mut() {
+            c.react(flags);
         }
     });
 }
