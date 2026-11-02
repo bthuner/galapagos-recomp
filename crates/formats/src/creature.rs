@@ -721,6 +721,52 @@ mod tests {
         }
     }
 
+    /// The colour his legs show: every leg face (both sides) is skin 19,
+    /// and its texels (UVs plus the per-face offset `& 0x1ff`, as the
+    /// Direct3D draw adds it, `0x40e850`) cover a part of that skin that is
+    /// mostly violet with teal streaks: averaged, a blue-violet of hue
+    /// ≈ 237° (60 % of the texels violet). Rendered and lit, the port's
+    /// legs measure hue 227–230°, the 1997 footage 225–229° (40–56 % violet
+    /// pixels; docs/re/mendel.md §1.3): no channel swap or palette shift.
+    #[test]
+    fn leg_skin_colour_when_data_present() {
+        let Some(d) = data() else { return };
+        let a = Archive::parse(&d).unwrap();
+        let s = a.world(0).unwrap();
+        let body = CreatureBody::parse(&d, a.header.creature as usize).unwrap();
+        let mesh = body.pose(0, 128);
+        let (mut sum, mut n, mut violet) = ([0f64; 3], 0usize, 0usize);
+        for f in &mesh.faces[34..] {
+            assert_eq!(f.texture, 19, "legs wear skin 19");
+            let rgb = s.texture_rgb(f.texture as usize);
+            let off = f.offset.map(|o| (o & 0x1ff) as f32);
+            // sample the face's texture triangles on a barycentric grid
+            for k in 1..f.uv.len() - 1 {
+                let t = [f.uv[0], f.uv[k], f.uv[k + 1]];
+                const G: usize = 12;
+                for i in 0..=G {
+                    for j in 0..=G - i {
+                        let (b1, b2) = (i as f32 / G as f32, j as f32 / G as f32);
+                        let b0 = 1.0 - b1 - b2;
+                        let uv: [f32; 2] = core::array::from_fn(|c| b0 * t[0][c] + b1 * t[1][c] + b2 * t[2][c] + off[c]);
+                        let [x, y] = uv.map(|c| (c.floor() as i32).rem_euclid(128) as usize);
+                        let p = &rgb[(y * 128 + x) * 3..][..3];
+                        (0..3).for_each(|c| sum[c] += p[c] as f64);
+                        n += 1;
+                        let (r, g, b) = (p[0] as f64, p[1] as f64, p[2] as f64);
+                        let hue = if b >= r && b >= g { 240.0 + 60.0 * (r - g) / (b - r.min(g)).max(1.0) } else { 0.0 };
+                        violet += (hue > 230.0) as usize;
+                    }
+                }
+            }
+        }
+        let [r, g, b] = sum.map(|c| c / n as f64);
+        let hue = 240.0 + 60.0 * (r - g) / (b - r.min(g));
+        println!("legs: mean rgb ({r:.0}, {g:.0}, {b:.0}), hue {hue:.0}, violet share {:.0} %", 100.0 * violet as f64 / n as f64);
+        assert!(b > r && b > g, "blue dominates");
+        assert!((215.0..240.0).contains(&hue), "a blue-violet, not cyan (hue {hue:.0})");
+    }
+
     #[test]
     fn brains_match_retail_cd() {
         let Some(d) = data() else { return };

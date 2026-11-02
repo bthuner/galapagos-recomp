@@ -103,8 +103,8 @@ void main() {
     return;
   }
   if (vLayer < -1.5) discard; // hidden in the current appearance state
-  // Textures repeat, as in the original's wrap-around texel addressing.
-  vec3 t = vLayer < 0.0 ? vec3(0.55) : texture(uTex, vec3(fract(vUV), vLayer)).rgb;
+  // Textures repeat (the sampler's REPEAT wrap, Direct3D's default WRAP).
+  vec3 t = vLayer < 0.0 ? vec3(0.55) : texture(uTex, vec3(vUV, vLayer)).rgb;
   // MODULATE by the diffuse grey, add the specular, then fog.
   vec3 c = min(brighten(t) * vColour.x + vColour.y, 1.0);
   c = mix(uFog, c, vFog);
@@ -236,8 +236,17 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     const layers = Math.max(1, world.textureCount);
     gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA8, 128, 128, layers, 0, gl.RGBA, gl.UNSIGNED_BYTE,
       world.textureCount ? world.textures : new Uint8Array(128 * 128 * 4));
-    gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
-    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    // Sampling as the 1997 Direct3D renderer set it up (0x40a640): render
+    // states TEXTUREMAG (0x11) and TEXTUREMIN (0x12) both D3DFILTER_LINEAR
+    // (2), i.e. bilinear with no mip-maps (its textures are single 128×128
+    // surfaces, 0x40adc0), and the default WRAP addressing, so a texture
+    // repeats. We used to build mip-maps; besides blurring distant walls,
+    // they drew a dashed seam wherever a repeat began (the shader's fract()
+    // jumps there, and the jump picked the smallest mip level).
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.REPEAT);
 
     const [x0, y0, z0, x1, y1, z1] = world.bounds;
     cam.target = [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2];

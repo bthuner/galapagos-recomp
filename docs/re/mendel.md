@@ -188,6 +188,29 @@ The port had the materials and the light right but ignored the offsets
 darker and plainer than on the footage. With the offsets the glowing
 stripe appears where the footage has it (3:00, 7:50).
 
+**The legs' colour — measured, no port bug.** All 44 leg faces (both
+sides; side B is `legs_b`, which repeats `legs_a`'s skins, offsets and,
+within a texel, its UVs) wear skin 19 on material 4. The skins reach
+Direct3D through the raw section palette, high byte of each channel, in
+R, G, B order (`0x42eba0` → `+0x17e958`, read by `0x40adc0` as `[0]` red,
+`[1]` green, `[2]` blue), truncated to the display's 16-bit format
+(averaged leg hue 237° → 235°): no channel swap, no hue-turning rounding,
+and the brightness preference never reaches them (worlds.md §5.2). The
+texels his leg faces cover average to a blue-violet, hue ≈ 237°, 60 %
+violet (test `leg_skin_colour_when_data_present`). Measured on rendered
+pixels (hue 150–320°, saturation > 0.2), the footage's legs give hue
+225–229° with 40–56 % violet and 22–34 % teal pixels (0:24, 0:34); the
+port's, rendered alone at the same moments, hue 227–230°, 47–48 % violet,
+27–32 % teal (near legs at 0:34: footage (55, 77, 147) mean RGB, port
+(57, 73, 147)). The colours are the same. What differs is the size of the
+pattern: the port shows skin 19's violet and teal streaks finely and
+crisply, the 480p video blurs them together; passing the port's frame
+through 4:2:0 chroma subsampling and JPEG alone moves its legs to hue
+232°, 57 % violet, 20 % teal — the "lavender" impression. The footage's
+streaks are also coarser than the port's, which fits its different
+texel density (worlds.md, "Texture coordinates and sampling"), not a
+colour error.
+
 ## 2. Locomotion — observed
 
 ### 2.1 From brain to motion
