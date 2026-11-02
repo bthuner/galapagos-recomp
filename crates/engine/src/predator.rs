@@ -16,14 +16,24 @@
 //!   by an alpha-beta tracker (0x406a50); six probes around the body touch
 //!   walls, floors and Mendel's click hull `MEnc`. Touching `MEnc` hands
 //!   Mendel the predator's surface flags (`MEnc` Update 0x426150 →
-//!   `Game_CreatureReact` @ 0x41cb80 → `creature+0xae8`): a lethal surface
-//!   of kind 2, so he dies and respawns.
+//!   `Game_CreatureReact` @ 0x41cb80 → `creature+0xae8`): for `PBal` and
+//!   `PFrk` a lethal surface of kind 2, so he dies and respawns. `PMan`
+//!   (0x415930, on no CD section) is `PFrk`'s twin with `PBal`'s targeting,
+//!   a long asymmetric body of probes and *harmless* flags: it only scares.
 //! * **`PPol`** (0x4292b0, trigger 0x429430, update 0x429600) circles its
 //!   home on the side Mendel is on, bobbing; `PBal` appears where it is.
 //!
+//! **Angles.** The exe's object matrix is `Math_RotationMatrix(yaw =
+//! +0x72, pitch = +0x70, roll = +0x74)` (`0x4096a0` → `0x430ce0(+0xf2,
+//! +0xf0, +0xf4)`, applied transposed by `0x409880` → `0x431ad0`), and
+//! `sim::transform` reads `rot` as (yaw, pitch, roll); so a predator's
+//! `rot` here is (`+0x72`, `+0x70`, `+0x74`), and a body's local +y is the
+//! direction `Math_VectorAngles` (0x430c50) turned it to.
+//!
 //! Each probe and timer constant below comes from the constructors
-//! (`0x415f50` base, `0x4150d0` PBal, `0x415590` PFrk); the per-class
-//! chase is `0x415220` (PBal) and `0x4156a0` (PFrk).
+//! (`0x415f50` base, `0x4150d0` PBal, `0x415590` PFrk, `0x415a40` PMan);
+//! the per-class chase is `0x415220` (PBal), `0x4156a0` (PFrk) and
+//! `0x415c40` (PMan).
 
 use crate::camera::{approx_len, filter3, Filter, Mover, Trig};
 use crate::sim::save::{Reader, Writer};
@@ -62,9 +72,21 @@ impl Class {
     fn hunts(self) -> bool {
         matches!(self, Class::Ball | Class::Fork | Class::Man)
     }
+    /// `PBal` (0x415220) and `PMan` (0x415c40) go home when Mendel is
+    /// camouflaged (affliction 4, `0x4198e0`); `PFrk` (0x4156a0, through
+    /// `Game` 0x41c540) always follows him.
+    fn spares_camouflage(self) -> bool {
+        matches!(self, Class::Ball | Class::Man)
+    }
+    /// `PFrk` and `PMan` turn to face their lunge (their own tracker at
+    /// `+0x354`, `Math_VectorAngles` 0x430c50); `PBal` just spins.
+    fn faces(self) -> bool {
+        matches!(self, Class::Fork | Class::Man)
+    }
 }
 
-/// A hunter's constants (`+0x338..+0x346`, `+0x20c`, `+0x224`).
+/// A hunter's constants (`+0x338..+0x346`, the probe table `+0x318`,
+/// `+0x20c`, `+0x224`).
 #[derive(Clone, Copy, Debug)]
 struct Tuning {
     accel: i16,
@@ -75,14 +97,25 @@ struct Tuning {
     d: i32,
     /// A bounce pushes by the hit normal (×1024) `>> shift` (`+0x344`).
     shift: u32,
-    /// Probe length along each body axis (`+0x346`).
-    probe: i32,
+    /// The six probe tips in the body's frame (`+0x318`, `+0x314` = 6),
+    /// each cast from the centre.
+    probes: [I3; 6],
+    /// `+0x346`: half the size of the box `0x4084e0` gathers candidate
+    /// objects in (`± (broad + 400)` around the body, 0x41648f). Every
+    /// probe tip lies inside it, so the port's own gather (creature.rs
+    /// `Near`, sized by the probe) finds the same polygons.
+    broad: i16,
     /// The surface flags it hands what it touches (`+0x20c`).
     flags: u32,
     /// Where it waits while vanished (`+0x224`).
     park: i32,
-    /// Distance under which it growls (sound 1), and how often.
+    /// Silence after a growl (`+0x23a`).
     growl_quiet: u16,
+}
+
+/// The base's probe table (0x415f50, also PBal's): `±r` along each axis.
+const fn axes(r: i32) -> [I3; 6] {
+    [[r, 0, 0], [-r, 0, 0], [0, r, 0], [0, -r, 0], [0, 0, r], [0, 0, -r]]
 }
 
 fn tuning(c: Class) -> Tuning {
@@ -90,12 +123,30 @@ fn tuning(c: Class) -> Tuning {
         // 0x4150d0. 0x405b2100 = hazard (bit 30) + lethal kind 2,
         // variant 3, then respawn reason 3, immune under affliction 1
         // (bit 22). No pain bit.
-        Class::Ball => Tuning { accel: 30, max: 300, overshoot: 500, d: 0xe666, shift: 7, probe: 700, flags: 0x405b_2100, park: 100_000, growl_quiet: 200 },
-        // 0x415590: kind 2, variant 0.
-        Class::Fork => Tuning { accel: 15, max: 150, overshoot: 4000, d: 0xc000, shift: 5, probe: 300, flags: 0x4058_2100, park: 1_500_000, growl_quiet: 15 },
-        // The base (0x415f50); `+0x20c` stays 0 from the Pred ctor.
-        // inferred: PMan's chase (0x415c40) was not read; no PMan on the CD.
-        _ => Tuning { accel: 10, max: 100, overshoot: 5000, d: 0xcccc, shift: 5, probe: 300, flags: 0, park: 100_000, growl_quiet: 15 },
+        Class::Ball => Tuning { accel: 30, max: 300, overshoot: 500, d: 0xe666, shift: 7, probes: axes(700), broad: 1000, flags: 0x405b_2100, park: 100_000, growl_quiet: 200 },
+        // 0x415590: kind 2, variant 0. The probes stay the base's (±300).
+        Class::Fork => Tuning { accel: 15, max: 150, overshoot: 4000, d: 0xc000, shift: 5, probes: axes(300), broad: 300, flags: 0x4058_2100, park: 1_500_000, growl_quiet: 15 },
+        // 0x415a40: PFrk's mover and bounce, a stiffer tracker (0xd999),
+        // a nearer park (150,000), and a body shaped by its own probe
+        // table: a nose 1,554 ahead on its +y, two "arms" at (±999, 1,295),
+        // a short fin up and down at 925 ahead (±296), a tail 1,406 behind.
+        // Its flags 0x40000100 are only "a hazard he sees" (bit 30) and
+        // bit 8, the creature's contact class: no lethal bits, no pain.
+        Class::Man => Tuning {
+            accel: 15,
+            max: 150,
+            overshoot: 4000,
+            d: 0xd999,
+            shift: 5,
+            probes: [[0, 0x612, 0], [999, 0x50f, 0], [-999, 0x50f, 0], [0, 0x39d, 0x128], [0, 0x39d, -0x128], [0, -0x57e, 0]],
+            broad: 0x640,
+            flags: 0x4000_0100,
+            park: 150_000,
+            growl_quiet: 15,
+        },
+        // The base (0x415f50); `+0x20c` stays 0 from the Pred ctor. No CD
+        // object is a bare hunter or a Pred that hunts.
+        _ => Tuning { accel: 10, max: 100, overshoot: 5000, d: 0xcccc, shift: 5, probes: axes(300), broad: 300, flags: 0, park: 100_000, growl_quiet: 15 },
     }
 }
 
@@ -146,8 +197,16 @@ pub struct Predator {
     filter: [Filter; 3],
     /// `+0x2fc`: the tracker's output, the body's centre.
     centre: I3,
-    /// `+0x354` (PFrk): the tracker smoothing its heading.
+    /// `+0x354` (PFrk, PMan): the tracker smoothing its heading. Built
+    /// once by the class ctor (d 0xf333, 0x401140) and never reset.
     heading: [Filter; 3],
+    /// `+0x32c`: target − position, taken when the mover re-aims
+    /// (0x416360); what the heading tracker is fed every tick.
+    toward: I3,
+    /// `+0xf0..+0xf4`: the angles `0x416360` copies at the end of each
+    /// tick, from which `PMan`'s probe step (slot 0xb0 = 0x415c20)
+    /// rebuilds the body matrix (`0x4096a0`) before probing.
+    probe_rot: I3,
     /// `+0x23a`, `+0x23c`: growl and bite silences.
     quiet: [u16; 2],
     /// `+0x31c`: a probe touched something this tick.
@@ -178,7 +237,13 @@ impl Predator {
             mover: Mover::default(),
             filter: [Filter::default(); 3],
             centre: [0; 3],
-            heading: [Filter::default(); 3],
+            heading: {
+                let mut f = Filter::default();
+                f.reset(0xf333);
+                [f; 3]
+            },
+            toward: [0; 3],
+            probe_rot: [0; 3],
             quiet: [0; 2],
             contact: false,
             pole: Pole::default(),
@@ -307,41 +372,53 @@ impl Predator {
             f.reset(t.d);
         }
         self.centre = filter3(&mut self.filter, at);
-        for f in &mut self.heading {
-            f.reset(0xf333);
-        }
+        let (_, rot) = sim.pose(self.obj);
+        self.probe_rot = rot;
     }
 
-    /// Mode 3 of the hunters (`0x415220` PBal, `0x4156a0` PFrk), with the
-    /// shared step `0x416360` and the probes `0x4160d0`.
+    /// Mode 3 of the hunters (`0x415220` PBal, `0x4156a0` PFrk, `0x415c40`
+    /// PMan), with the shared step `0x416360` and the probes `0x4160d0`
+    /// (PMan: `0x415c20`, the same after rebuilding its matrix).
     fn chase(&mut self, sim: &mut Sim, mesh: &mut WorldMesh, prey: Option<Prey>) {
         let trig = trig();
         let t = tuning(self.class);
         let (pos, mut rot) = sim.pose(self.obj);
-        // PBal leaves a camouflaged Mendel (affliction 4) alone and goes
-        // home; PFrk always follows him.
+        // The target (`+0x348`). PBal and PMan leave a camouflaged Mendel
+        // (affliction 4) alone and go home (`+0xd0`); PFrk always follows
+        // him. (Both also test `mode == 3`: slot 0xa4 = 0x415df0 re-enters
+        // the chase in mode 4, which nothing sets.)
         let target = match prey {
-            Some(p) if self.class != Class::Ball || p.affliction != 4 => p.pos,
+            Some(p) if !(self.class.spares_camouflage() && p.affliction == 4) => p.pos,
             _ => sim.rest_of(self.obj),
         };
         // 0x416360: when the mover has arrived, aim again, `overshoot`
-        // past the target along the line from here.
+        // past the target along the line from here; that line is also
+        // the heading's input `+0x32c` until the next re-aim.
         self.mover.step();
         let mut out = filter3(&mut self.filter, self.mover.pos);
         if !self.mover.moving {
             let d = [target[0] - pos[0], target[1] - pos[1], target[2] - pos[2]];
+            self.toward = d;
             let len = approx_len(d).max(1);
             let aim = [0, 1, 2].map(|k| target[k] + t.overshoot * d[k] / len);
             self.mover.set_target(aim);
         }
-        // 0x4160d0: six probes along the body's axes.
+        // 0x4160d0: the six probes of the class's table, turned by the
+        // body (`0x409880`), each from the current centre (a push moves
+        // the centre for the probes after it). PMan's slot 0xb0 rebuilds
+        // its matrix from `+0xf0`, last tick's copy of the angles (taken
+        // before that tick's turn); inferred: the others' matrix is the
+        // current pose (theirs is refreshed elsewhere, and their probe
+        // sets are symmetric).
+        let body = if self.class == Class::Man { self.probe_rot } else { rot };
+        self.probe_rot = rot;
         self.contact = false;
-        let m = sim::transform(out, rot);
-        for k in 0..6 {
-            let mut off = [0.0f32; 3];
-            off[k / 2] = if k % 2 == 0 { t.probe as f32 } else { -t.probe as f32 };
+        for off in t.probes {
+            // The broad phase (0x4084e0) would miss nothing beyond the tip.
+            debug_assert!(off.iter().all(|c| c.abs() <= t.broad as i32 + 400));
+            let m = sim::transform(out, body);
             let from = out.map(|c| c as f32);
-            let to = sim::apply(&m, off);
+            let to = sim::apply(&m, off.map(|c| c as f32));
             let Some(hit) = sim.creature.as_ref().and_then(|c| c.probe(sim, from, to, PROBE_MASK, self.obj, t.shift)) else { continue };
             self.contact = true;
             // `WorldObject_PostEvent` with the predator's flags; MEnc
@@ -363,26 +440,28 @@ impl Predator {
         }
         self.centre = out;
         // The body's spin or heading.
-        match self.class {
-            Class::Ball => {
-                rot = [rot[0] - 20, rot[1] + 20, rot[2] + 20];
-            }
-            _ => {
-                // PFrk faces where it is heading: `+0x32c` (target − here)
-                // smoothed by its own tracker, then `Math_VectorAngles`.
-                let d = [target[0] - pos[0], target[1] - pos[1], target[2] - pos[2]];
-                let s = filter3(&mut self.heading, d);
-                let (yaw, pitch) = trig.dir_angles(s);
-                // inferred: `+0x70, +0x72, +0x74` are our rot[0..3] (as the
-                // motion paths' rotations), 0x430c50 writes (+0x72, +0x70).
-                rot = [pitch & 0x3ff, yaw & 0x3ff, rot[2] + 10];
-            }
+        if self.class.faces() {
+            // PFrk / PMan face where they lunge: `+0x32c` smoothed by their
+            // own tracker (0x401300), then `Math_VectorAngles` (0x430c50)
+            // writes yaw to `+0x72` and pitch to `+0x70`; then `+0x74`
+            // rolls by 10. In our angle order (module docs) the nose (+y)
+            // points along the lunge, as in the exe.
+            let s = filter3(&mut self.heading, self.toward);
+            let (yaw, pitch) = trig.dir_angles(s);
+            rot = [yaw & 0x3ff, pitch & 0x3ff, rot[2] + 10];
+        } else {
+            // PBal: (+0x70, +0x72, +0x74) += (−20, +20, +20) (0x41528f),
+            // in our order (+0x72, +0x70, +0x74).
+            rot = [rot[0] + 20, rot[1] - 20, rot[2] + 20];
         }
         sim.set_pose(self.obj, out, rot.map(|r| r & 0x3ff), mesh);
-        // Sounds (predator bank): a growl near Mendel, a bite on contact.
+        // Sounds (predator bank, identical in all three): a growl when
+        // Mendel is nearer than 1,000 to where it now is (`+0xe4`, which
+        // 0x416360 just set) (cue `+0x240`), a bite on contact (cue
+        // `+0x27c`), each followed by its silence.
         if self.quiet[0] == 0 {
             if let Some(p) = prey {
-                let d = [p.pos[0] - pos[0], p.pos[1] - pos[1], p.pos[2] - pos[2]];
+                let d = [p.pos[0] - out[0], p.pos[1] - out[1], p.pos[2] - out[2]];
                 if approx_len(d) < GROWL_DISTANCE {
                     self.sound(sim, 0, 0x10000);
                     self.quiet[0] = t.growl_quiet;
@@ -472,11 +551,12 @@ impl Predator {
         let a = wob + p.angle as i32;
         let at = [home[0] + (c(a) * p.radius >> 14), home[1] + (s(a) * p.radius >> 14), z];
         let out = filter3(&mut p.filter, at);
-        // It faces Mendel.
+        // It faces Mendel (0x4298ea: yaw to `+0x72`, pitch to `+0x70`, then
+        // its matrix at once, 0x42990e), in our angle order (module docs).
         let d = [prey.pos[0] - out[0], prey.pos[1] - out[1], prey.pos[2] - out[2]];
         let (yaw, pitch) = trig.dir_angles(d);
         let (_, rot) = sim.pose(self.obj);
-        sim.set_pose(self.obj, out, [pitch & 0x3ff, yaw & 0x3ff, rot[2]], mesh);
+        sim.set_pose(self.obj, out, [yaw & 0x3ff, pitch & 0x3ff, rot[2]], mesh);
     }
 
     // ——— snapshot / saved game ———
@@ -495,13 +575,16 @@ impl Predator {
         self.centre.iter().for_each(|&c| w.i32(c));
         self.quiet.iter().for_each(|&q| w.u16(q));
         w.u8(self.contact as u8);
+        self.toward.iter().chain(&self.probe_rot).for_each(|&c| w.i32(c));
         let p = &self.pole;
         for v in [p.mode as i32, p.radius, p.angle as i32, p.bob_amp, p.bob as i32, p.wobble_amp as i32, p.wobble as i32, p.lift] {
             w.i32(v);
         }
     }
 
-    pub(crate) fn read(&mut self, r: &mut Reader) -> Result<(), &'static str> {
+    /// `version` is the saved game's (save.rs): 4 added `toward` and
+    /// `probe_rot`; older saves leave them zero.
+    pub(crate) fn read(&mut self, r: &mut Reader, version: u32) -> Result<(), &'static str> {
         self.mode = r.u16()? as i16;
         self.started = r.u8()? != 0;
         self.effect = r.u8()? != 0;
@@ -519,6 +602,11 @@ impl Predator {
             *q = r.u16()?;
         }
         self.contact = r.u8()? != 0;
+        if version >= 4 {
+            for c in self.toward.iter_mut().chain(&mut self.probe_rot) {
+                *c = r.i32()?;
+            }
+        }
         let mut v = [0i32; 8];
         for x in &mut v {
             *x = r.i32()?;
@@ -570,4 +658,279 @@ fn write_filter(w: &mut Writer, f: &Filter) {
 
 fn read_filter(r: &mut Reader) -> Result<Filter, &'static str> {
     Ok(Filter { d: r.i32()?, alpha: r.i32()?, beta: r.i32()?, vel: r.i32()?, out: r.i32()?, primed: r.u8()? != 0 })
+}
+
+/// `PMan` against the CD. No section has one, so the tests take section
+/// 2's fork `PFrk` #130 and re-class it, as if the factory had read
+/// `PMan` for it (the classes share the `Pred` layout and trigger). They
+/// skip themselves without data.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::creature::{Creature, Mode};
+    use galapagos_formats::creature::{overlay_for_age, Brain, CreatureBody};
+    use galapagos_formats::worlds::Archive;
+
+    fn data() -> Option<Vec<u8>> {
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../originals/mounted/install/data/worlds")).ok()
+    }
+
+    /// Section 2's fork #130 (list index 129).
+    const FORK: usize = 130 - 1;
+
+    /// Section 2 with Mendel spawned by its `Strt`, the fork re-classed.
+    fn section2(d: &[u8], class: Class) -> (Sim, WorldMesh, usize) {
+        let a = Archive::parse(d).unwrap();
+        let section = a.world(2).unwrap();
+        let mut mesh = WorldMesh::build(&section);
+        let mut sim = Sim::new(&section, &mut mesh);
+        let body = CreatureBody::parse(d, a.header.creature as usize).unwrap();
+        let brain = Brain::parse(d, a.header.creature_overlays[overlay_for_age(128).unwrap()] as usize).unwrap();
+        sim.creature = Some(Creature::new(&section, &mesh, body, brain));
+        for _ in 0..20 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            if sim.creature.as_ref().unwrap().mode == Mode::Alive {
+                break;
+            }
+        }
+        assert_eq!(sim.creature.as_ref().unwrap().mode, Mode::Alive, "Mendel spawned");
+        let k = sim.predators.iter().position(|p| p.obj == FORK).expect("#130 is a predator");
+        assert_eq!(sim.predators[k].class, Class::Fork, "#130 is the fork");
+        sim.predators[k] = Predator::new(FORK, class);
+        (sim, mesh, k)
+    }
+
+    fn prey(sim: &Sim, affliction: u8) -> Prey {
+        Prey { affliction, ..sim.creature.as_ref().unwrap().prey().unwrap() }
+    }
+
+    const fn shorts(s: [i16; 4]) -> [i16; 10] {
+        [s[0], s[1], s[2], s[3], 0, 0, 0, 0, 0, 0]
+    }
+
+    /// Every section's objects, by class: one `PBal`, `PPol`, `PFrk`
+    /// (section 2), four `Pred` (section 7), and no `PMan` anywhere.
+    #[test]
+    fn no_pman_on_the_cd() {
+        let Some(d) = data() else { return };
+        let a = Archive::parse(&d).unwrap();
+        let mut found: Vec<(usize, usize, Class)> = Vec::new();
+        for s in 0..a.sections.len() {
+            for (i, o) in a.world(s).unwrap().objects.iter().enumerate() {
+                if let Some(c) = Class::of(&o.kind()) {
+                    found.push((s, i + 1, c));
+                }
+            }
+        }
+        let count = |c: Class| found.iter().filter(|f| f.2 == c).count();
+        println!("predators on the CD: {found:?}");
+        assert_eq!(count(Class::Man), 0, "no PMan in any section");
+        assert_eq!((count(Class::Ball), count(Class::Pole), count(Class::Fork), count(Class::Pred)), (1, 1, 1, 4));
+        assert!(found.contains(&(2, 130, Class::Fork)));
+    }
+
+    /// The constructor (0x415a40): every probe tip lies inside the broad
+    /// phase box `± (0x640 + 400)`, and the body is longest along +y.
+    #[test]
+    fn pman_tuning() {
+        let t = tuning(Class::Man);
+        assert_eq!((t.accel, t.max, t.overshoot, t.d, t.shift), (15, 150, 4000, 0xd999, 5));
+        assert_eq!((t.flags, t.park, t.growl_quiet), (0x4000_0100, 150_000, 15));
+        assert_eq!(t.flags & 0xf000, 0, "no lethal kind: PMan never kills");
+        assert_eq!(t.flags & 0x100_0000, 0, "no pain");
+        for p in t.probes {
+            assert!(p.iter().all(|c| c.abs() <= t.broad as i32 + 400));
+        }
+        assert_eq!(t.probes.iter().map(|p| p[1]).max(), Some(1554), "the nose");
+        assert_eq!(t.probes.iter().map(|p| p[1]).min(), Some(-1406), "the tail");
+    }
+
+    /// The targeting of 0x415c40 and the re-aim of 0x416360, tick by tick
+    /// against the exe's formulas: the target is Mendel (home when he is
+    /// camouflaged, unlike PFrk), the mover aims `4000·d/approx_len(d)`
+    /// past it, the heading input `+0x32c` is `d` and holds until the next
+    /// re-aim, and `+0x74` rolls by 10 a tick.
+    #[test]
+    fn pman_aims_past_mendel_and_spares_camouflage() {
+        let Some(d) = data() else { return };
+        for (class, affliction, homes) in [(Class::Man, 0, false), (Class::Man, 4, true), (Class::Fork, 4, false)] {
+            let (mut sim, mut mesh, k) = section2(&d, class);
+            let mendel = prey(&sim, affliction);
+            let start = [mendel.pos[0] + 6000, mendel.pos[1] - 3000, mendel.pos[2] + 500];
+            let (_, rot0) = sim.pose(FORK);
+            let mut p = sim.predators[k].clone();
+            p.mode = 3;
+            sim.set_pose(FORK, start, rot0, &mut mesh);
+            p.setup_chase(&mut sim, &mut mesh);
+            p.tick(&mut sim, &mut mesh, Some(mendel));
+            let target = if homes { sim.rest_of(FORK) } else { mendel.pos };
+            let dd = [0, 1, 2].map(|i| target[i] - start[i]);
+            let len = approx_len(dd);
+            let aim = [0, 1, 2].map(|i| target[i] + 4000 * dd[i] / len);
+            assert_eq!(p.toward, dd, "{class:?} aff {affliction}: +0x32c = target − position");
+            assert_eq!(p.mover.delta, [0, 1, 2].map(|i| aim[i] - start[i]), "{class:?}: the lunge overshoots by 4000");
+            assert!(p.mover.moving);
+            let (_, rot1) = sim.pose(FORK);
+            assert_eq!(rot1[2], (rot0[2] + 10) & 0x3ff, "the roll");
+            // While the lunge runs the heading input does not change.
+            let held = p.toward;
+            for _ in 0..5 {
+                p.tick(&mut sim, &mut mesh, Some(Prey { pos: [0; 3], ..mendel }));
+                assert_eq!(p.toward, held, "held until the next re-aim");
+            }
+        }
+    }
+
+    /// The chase in the running game: `PMan` lunges at Mendel, touches
+    /// him (its flags land on `MEnc`), plays its bite, faces where it
+    /// lunges with its nose (+y), and he lives: its flags are only a
+    /// scare. The same scene with the class left `PFrk` kills him. (Its
+    /// nose strikes him from ~1,300 away, outside the growl distance.)
+    #[test]
+    fn pman_chases_bites_and_only_scares() {
+        let Some(d) = data() else { return };
+        for class in [Class::Man, Class::Fork] {
+            let (mut sim, mut mesh, k) = section2(&d, class);
+            sim.wake_all = true;
+            let deaths = sim.creature.as_ref().unwrap().stats.deaths;
+            // Appear without an effect (`[2, 0, 0, 0]`), then start the
+            // lunge 3,000 over him (on his side of the upside-down floor
+            // he stands on) and 1,500 aside.
+            let mut p = sim.predators[k].clone();
+            p.trigger(shorts([2, 0, 0, 0]), [0; 10], &mut sim, &mut mesh);
+            assert_eq!(p.mode, 2, "appearing");
+            p.tick(&mut sim, &mut mesh, None);
+            assert_eq!(p.mode, 3, "no effect: active at once");
+            let at = prey(&sim, 0).pos;
+            let up = sim.creature.as_ref().unwrap().up;
+            let start = [0, 1, 2].map(|i| at[i] + [1500, 0, 0][i] + (up[i] * 3000.0) as i32);
+            let (_, rot) = sim.pose(FORK);
+            sim.set_pose(FORK, start, rot, &mut mesh);
+            p.setup_chase(&mut sim, &mut mesh);
+            sim.predators[k] = p;
+            sim.events.clear();
+            let (mut closest, mut touched, mut facing) = (f32::MAX, None, f32::MIN);
+            let (mut died, mut felt) = (false, None);
+            let menc = prey(&sim, 0).menc.expect("section 2 has its MEnc");
+            for t in 0..120 {
+                sim.step(&mut mesh);
+                let p = &sim.predators[k];
+                if p.mode != 3 {
+                    break; // its own machine sent it away
+                }
+                let c = sim.creature.as_ref().unwrap();
+                died |= c.stats.deaths > deaths;
+                let (pos, rot) = sim.pose(FORK);
+                let off = [0, 1, 2].map(|i| c.pos[i] - pos[i] as f32);
+                closest = closest.min((off[0] * off[0] + off[1] * off[1] + off[2] * off[2]).sqrt());
+                if p.contact && touched.is_none() {
+                    touched = Some(t);
+                }
+                // `WorldObject_PostEvent` left the predator's flags on MEnc.
+                let flags = tuning(class).flags;
+                if felt.is_none() && sim.capture().objs[menc].events & flags == flags {
+                    felt = Some(t);
+                }
+                if t == 30 {
+                    // Its nose (+y) turned along the lunge.
+                    let m = sim::transform([0; 3], rot);
+                    let nose = sim::apply(&m, [0.0, 1.0, 0.0]);
+                    let w = p.toward.map(|c| c as f32);
+                    let n = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt().max(1.0);
+                    facing = (nose[0] * w[0] + nose[1] * w[1] + nose[2] * w[2]) / n;
+                    // A saved game carries its state (GLPS v4).
+                    sim.take_snapshot();
+                    let bytes = sim.save_game();
+                    let (mut other, mut other_mesh, _) = section2(&d, class);
+                    other.load_game(&bytes, &mut other_mesh).unwrap();
+                    assert!(other.predators == sim.predators, "predators restored");
+                    assert!(other.save_game() == bytes, "load then save is the identity");
+                }
+            }
+            let sounds: Vec<(i32, i32)> =
+                sim.events.iter().filter(|e| e.kind == sim::EV_PREDATOR_SOUND && e.b == FORK as i32 + 1).map(|e| (e.a, e.c)).collect();
+            println!("{class:?}: closest {closest:.0}, touched at {touched:?}, MEnc felt it at {felt:?}, facing {facing:.2}, died {died}, sounds {sounds:?}");
+            assert!(closest < 1600.0, "{class:?} reaches him");
+            assert!(touched.is_some(), "{class:?}: a probe touches");
+            assert!(felt.is_some(), "{class:?}: its flags reach Mendel's click hull");
+            assert!(sounds.contains(&(1, 0x8000)), "{class:?}: the bite, half pitch");
+            assert!(facing > 0.9, "{class:?}: faces its lunge ({facing:.2})");
+            match class {
+                Class::Man => assert!(!died && sim.creature.as_ref().unwrap().mode == Mode::Alive, "PMan only scares"),
+                _ => assert!(died, "PFrk kills"),
+            }
+        }
+    }
+
+    /// The growl timer (0x415ce8..0x415d91): a growl whenever Mendel is
+    /// nearer than 1,000 and the timer is out, then 15 silent ticks;
+    /// nothing farther. The distance is `Math_ApproxLength` (max − max/16
+    /// along an axis), so 1,000 straight ahead still growls; 1,100 does
+    /// not. (Far above the section, where no probe touches anything.)
+    #[test]
+    fn pman_growls_every_16_ticks() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh, k) = section2(&d, Class::Man);
+        let mut p = sim.predators[k].clone();
+        p.mode = 3;
+        let far = [0, 0, 5_000_000];
+        let (_, rot) = sim.pose(FORK);
+        sim.set_pose(FORK, far, rot, &mut mesh);
+        p.setup_chase(&mut sim, &mut mesh);
+        let mendel = prey(&sim, 0);
+        let mut growls = Vec::new();
+        for t in 0..40 {
+            // Mendel stays 900 ahead of where it will be (1,100 from tick 30).
+            let gap = if t < 30 { 900 } else { 1100 };
+            let (mut mover, mut f) = (p.mover, p.filter);
+            mover.step();
+            let next = filter3(&mut f, mover.pos);
+            sim.events.clear();
+            p.tick(&mut sim, &mut mesh, Some(Prey { pos: [next[0] + gap, next[1], next[2]], ..mendel }));
+            assert_eq!(sim.pose(FORK).0, next, "it went where its mover and tracker said");
+            assert!(!p.contact, "nothing to touch up here");
+            for e in sim.events.iter().filter(|e| e.kind == sim::EV_PREDATOR_SOUND) {
+                assert_eq!((e.a, e.b, e.c), (0, FORK as i32 + 1, 0x10000), "the growl: sound 1, full pitch");
+                growls.push(t);
+            }
+        }
+        assert_eq!(growls, [0, 16], "growl, 15 quiet ticks, growl; none at 1,100");
+    }
+
+    /// Vanish and appear with an effect (`Pred`'s 0x42a3e0 / 0x42a4b0,
+    /// shared): the fork's own triggers `[2, 1, 2, 0]` (burst in reverse,
+    /// 60 ticks) then `[1, 1, 2, 0]` (burst, 100 ticks), after which
+    /// `PMan` is parked at its own 150,000.
+    #[test]
+    fn pman_appears_and_vanishes() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh, k) = section2(&d, Class::Man);
+        let mut p = sim.predators[k].clone();
+        let mendel = prey(&sim, 0);
+        p.trigger(shorts([2, 1, 2, 0]), [0; 10], &mut sim, &mut mesh);
+        let mut appear = 0;
+        while p.mode == 2 && appear < 500 {
+            p.tick(&mut sim, &mut mesh, Some(mendel));
+            appear += 1;
+        }
+        assert_eq!(p.mode, 3, "active after the effect");
+        assert_eq!(sim.pose(FORK).0, sim.rest_of(FORK), "appeared at home");
+        p.tick(&mut sim, &mut mesh, Some(mendel));
+        p.trigger(shorts([1, 1, 2, 0]), [0; 10], &mut sim, &mut mesh);
+        let mut vanish = 0;
+        while p.mode == 1 && vanish < 500 {
+            p.tick(&mut sim, &mut mesh, Some(mendel));
+            if vanish == 3 {
+                // A trigger is ignored while an effect runs.
+                p.trigger(shorts([2, 1, 2, 0]), [0; 10], &mut sim, &mut mesh);
+                assert_eq!(p.mode, 1, "ignored while vanishing");
+            }
+            vanish += 1;
+        }
+        println!("PMan: appeared in {appear} ticks, vanished in {vanish}");
+        assert_eq!(p.mode, 0);
+        assert!((55..=65).contains(&appear), "{appear} ticks appearing");
+        assert!((95..=105).contains(&vanish), "{vanish} ticks vanishing");
+        assert_eq!(sim.pose(FORK).0, [150_000; 3], "parked at PMan's own +0x224");
+    }
 }

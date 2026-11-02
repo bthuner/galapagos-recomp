@@ -18,6 +18,9 @@ machine, drawn by the world renderer) with a tiny class behaviour bolted on:
 * `PBal`, `PFrk`, `PMan` add a **lunge**: a straight-line mover with a
   trapezoidal speed profile (the camera's) aims *past* Mendel, a tracker
   smooths it, six probes touch what is around;
+* `PMan` is `PFrk`'s twin with `PBal`'s manners (it spares a camouflaged
+  Mendel), a long body of probes (a nose, two arms, two fins, a tail) and
+  **harmless** flags: its bite only scares him (§3.1);
 * touching Mendel means touching his invisible click hull `MEnc`, which
   hands him the predator's **surface flags**: a lethal surface. He dies
   exactly as on a lethal floor.
@@ -25,7 +28,9 @@ machine, drawn by the world renderer) with a tiny class behaviour bolted on:
   appears where it is.
 
 On the CD: one `PBal` (section 2, #54), one `PPol` (#55), one `PFrk`
-(#130) and four `Pred` (section 7, #115..#118). No `PMan`.
+(#130) and four `Pred` (section 7, #115..#118). No `PMan` in any section
+(the test `no_pman_on_the_cd` scans every object's FourCC); its class is
+ported from the exe alone and tested on the fork re-classed.
 
 ## 1. Classes — observed
 
@@ -35,8 +40,15 @@ On the CD: one `PBal` (section 2, #54), one `PPol` (#55), one `PFrk`
 | hunter base | `0x415e20` | `0x45f990` | (Pred's) | (Pred's) | mover `+0x2b8`, probes; init `0x415f50` |
 | `PBal` | `0x415020` | `0x45f6c0` | (Pred's) | (Pred's) | init `0x4150d0`, chase `0x415220`, setup `0x4153a0` |
 | `PFrk` | `0x415480` | `0x45f7b0` | (Pred's) | (Pred's) | init `0x415590`, chase `0x4156a0`, setup `0x416300` |
-| `PMan` | `0x415930` | `0x45f8a0` | (Pred's) | `0x415c20` | chase `0x415c40` (not read) |
+| `PMan` | `0x415930` | `0x45f8a0` | (Pred's) | (Pred's) | init `0x415a40`, chase `0x415c40`, setup `0x416300`, probe step `0x415c20` (slot 0xb0) |
 | `PPol` | `0x4292b0` | `0x460de8` | `0x429430` | `0x429600` | not a `Pred`; stored in `Game+0x17efc0` by the factory (0x41c29e) |
+
+Hunter slots past `Pred`'s: `0x9c` setup, `0xa0` chase (mode 3), `0xa4`
+mode 4 (`PBal`/`PMan` `0x415df0` jumps to `0xa0`; `PFrk` `0x415830`
+only turns to face Mendel; nothing sets mode 4), `0xb0` the probe step
+that `0x416360` calls (`0x4160d0`; `PMan`'s `0x415c20` first rebuilds
+its matrix, `0x4096a0`). `PFrk` and `PMan` share save/load `0x4158d0` /
+`0x4158f0`.
 
 `Pred` fields: `+0x208` mode, `+0x20c` contact flags, `+0x210` its own
 transition effect (class `0x424520`, the same as Mendel's
@@ -62,7 +74,12 @@ Update `0x42a350` dispatches on the mode through the vtable:
 | 3 | `0xa0` | nothing for `Pred`; the chase for hunters | active |
 | 4, 5 | `0xa4`, `0xa8` | never set by any code | — |
 
-Without `shorts[1]` the change is instant. Visibility itself is the
+Without `shorts[1]` the change is instant, and appearing then skips
+slot `0x9c` (`0x42a55b`): the hunter is put home but its mover is not
+reset, so it resumes from where the mover was. No CD trigger appears
+without the effect; the port runs the setup either way (inferred, a
+harmless simplification: our mover starts uninitialised, the exe's from
+the ctor). Visibility itself is the
 appearance's business: the load (`0x42a740`) clears the object's draw flag
 (`+0x34+0x28`, `0x4022e0(0)`), and every appearance change re-sets it
 (`-5` frames clear it: `0x4237e3`), so the state machine decides.
@@ -103,17 +120,77 @@ probes (0x4160d0): for (±r,0,0), (0,±r,0), (0,0,±r) rotated by the object,
     segment centre → centre+offset, World_Cast mask 0x103 (MEnc bit 0, floors, walls)
     hit: contact = 1; PostEvent(hit object, flags +0x20c);
          push = 0x408c50 response + hit normal(×1024) >> shift; move body, mover, tracker
-position = out;  rotation: PBal spins (−20, +20, +20)/tick; PFrk faces (target − pos)
-    smoothed by its own tracker (d 0xf333, 0x430c50) and rolls +10/tick
-sounds: growl (cue 1) if approx_len(Mendel − pos) < 1000, then silent N ticks;
+position = out;  rotation: PBal spins (+0x70, +0x72, +0x74) += (−20, +20, +20)/tick;
+    PFrk/PMan face +0x32c = (target − pos) *as of the last re-aim*, smoothed by
+    their own tracker (+0x354, d 0xf333, built by the ctor and never reset),
+    0x430c50 → yaw +0x72, pitch +0x70; then +0x74 rolls +10/tick
+sounds: growl (cue 1) if approx_len(Mendel − new pos) < 1000, then silent N ticks;
         bite (cue 2) on contact, then silent 30 ticks
 ```
 
-| | accel | max | overshoot | tracker d | bounce shift | probe | flags | park | growl every |
-|---|---|---|---|---|---|---|---|---|---|
-| base (`0x415f50`) | 10 | 100 | 5000 | 0xcccc | 5 | 300 | 0 | 100000 | — |
-| `PBal` (`0x4150d0`) | 30 | 300 | 500 | 0xe666 | 7 | 700 | `0x405b2100` | 100000 | 200 |
-| `PFrk` (`0x415590`) | 15 | 150 | 4000 | 0xc000 | 5 | 300 | `0x40582100` | 1500000 | 15 |
+Before the probes, `0x4084e0` gathers candidates: every object whose tag
+(`0x4232c0`) is `'Coll'` and whose box meets `pos ± (+0x346 + 400)`
+(`0x41648f`), the predator itself excluded. Every probe tip lies inside
+that box, so the port's own gather (sized by each probe) finds the same
+polygons. Each probe starts from the *current* centre: a push moves it
+for the probes after it.
+
+| | accel | max | overshoot | tracker d | bounce shift | probes | box `+0x346` | flags | park | growl every |
+|---|---|---|---|---|---|---|---|---|---|---|
+| base (`0x415f50`) | 10 | 100 | 5000 | 0xcccc | 5 | ±300 on each axis | 300 | 0 | 100000 | — |
+| `PBal` (`0x4150d0`) | 30 | 300 | 500 | 0xe666 | 7 | ±700 on each axis | 1000 | `0x405b2100` | 100000 | 200 |
+| `PFrk` (`0x415590`) | 15 | 150 | 4000 | 0xc000 | 5 | (base) | (base) | `0x40582100` | 1500000 | 15 |
+| `PMan` (`0x415a40`) | 15 | 150 | 4000 | 0xd999 | 5 | the body below | 1600 | `0x40000100` | 150000 | 15 |
+
+**Angles.** The object matrix is `Math_RotationMatrix(yaw = +0x72,
+pitch = +0x70, roll = +0x74)`: `0x4096a0` builds it with
+`0x430ce0(+0xf2, +0xf0, +0xf4)` from the copy of the angles, and
+`0x409880` applies it transposed (`0x431ad0`), so local +y is the
+direction `Math_VectorAngles` (`0x430c50`, yaw → `+0x72`, pitch →
+`+0x70`) turned it to. Our `sim::transform` reads `rot` as (yaw, pitch,
+roll), so predator.rs keeps `rot` = (`+0x72`, `+0x70`, `+0x74`) for every
+predator and `PPol`. Observed.
+
+### 3.1 `PMan` — observed
+
+The chase `0x415c40` is `PFrk`'s `0x4156a0` instruction for instruction
+(the same `0x416360` step, the same heading tracker and +10 roll, the
+same growl/bite timers 15 and 30) except for the target, which is
+`PBal`'s (`0x415c47..0x415ca2`): Mendel (`0x4183a0` on the creature at
+`+0x358`) while the mode is 3 and his affliction (`0x4198e0`) is not 4,
+else home (`+0xd0`). Its constructor `0x415a40` is `PFrk`'s with:
+
+* tracker d **0xd999** (`PFrk` 0xc000): a stiffer follow of the mover;
+* park **150,000** (`PFrk` 1,500,000);
+* flags **`0x40000100`**: bit 30 (a hazard his eyes see, the "saw a
+  hazard" cue) and bit 8, the creature's contact class; no lethal kind,
+  no respawn reason, no pain. Its bite reaches him (`MEnc` → `0x41cb80`)
+  and does nothing deadly: **`PMan` only scares**;
+* its own probe table (`+0x318`, local, +y = the nose):
+
+```text
+(0, 1554, 0)      nose            (0, 925, ±296)   fins, up and down
+(±999, 1295, 0)   two arms        (0, −1406, 0)    tail
+```
+
+  and a box `+0x346` = 1600 that holds them all;
+* its probe step (slot 0xb0, `0x415c20`) rebuilds the matrix from
+  `+0xf0` before probing: last tick's copy of the angles, taken before
+  that tick's turn, so the asymmetric body probes one tick behind the
+  pose it is drawn with.
+
+The `0x40000100` mask is exactly the creature's "what do my eyes see"
+pick mask (objects.md §3). inferred: a fright, a creature that dives at
+Mendel to teach his brain to flee, cut before release.
+
+Tested on section 2's fork re-classed (predator.rs tests): the first
+re-aim is `target + 4000·d / approx_len(d)` and `+0x32c` = `d` holds
+until the next one; a camouflaged Mendel sends `PMan` home but not
+`PFrk`; it growls at tick 0 and 16 with Mendel 900 away (none at 1,100);
+in the running game its nose strikes `MEnc` (its flags land there), it
+bites, faces its lunge, and Mendel lives, where `PFrk` in the same scene
+kills him; the fork's own effects take 61 ticks to appear and 101 to
+vanish, then it waits at (150,000)³; a saved game carries it.
 
 Appearing (slot `0x9c`): `PBal` (`0x4153a0`) starts at the `PPol`'s
 current position (`0x41cbd0` reads `Game+0x17efc0`); `PFrk`/`PMan`
@@ -199,8 +276,10 @@ cue 2 = sound 2, pitch 0.5, 5000/500/5000. Host event 9
 
 ## Open questions
 
-* `0x4084e0` (called before the probes).
-* The object rotation order (`0x402370` only stores the three angles);
-  we write `(+0x70, +0x72, +0x74)` into our `rot[0..3]` as the motion
-  paths do.
-* `PMan`'s chase (`0x415c40`), absent from the CD.
+* The rotation order outside the predators: `0x402370` stores a pose's
+  three angles at `+0x70, +0x72, +0x74`, and the motion paths put them
+  into our `rot[0..3]` in that order, while `sim::transform` reads
+  `rot[0]` as the yaw, which the exe takes from `+0x72` (§3, Angles).
+  Either the paths' angles are swapped in our objects or their data
+  never exercises it; the predators are now consistent with the exe.
+* Appearing without an effect (no slot `0x9c`, §2) is not ported.
