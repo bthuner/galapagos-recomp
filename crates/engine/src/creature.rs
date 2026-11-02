@@ -440,6 +440,7 @@ impl Creature {
     // ——— the tick ———
 
     pub fn tick(&mut self, sim: &mut Sim, mesh: &mut WorldMesh) {
+        self.reshape(sim);
         for r in std::mem::take(&mut sim.requests) {
             self.request(r, sim);
         }
@@ -473,6 +474,22 @@ impl Creature {
         self.sync(sim);
         self.attach_menc(sim, mesh);
         self.build_vertices();
+    }
+
+    /// Follows the objects' vertex morphs: the casts read each object's
+    /// current shape frame (`0x423130`), so his polygons of an object
+    /// whose frame changed are rebuilt from it. The scrolling basis stays
+    /// the one built at load (`0x41d9e0`).
+    pub(crate) fn reshape(&mut self, sim: &mut Sim) {
+        for i in sim.take_reshaped() {
+            let (Some(verts), Some(polys)) = (sim.vertices_of(i), self.polys.get_mut(i)) else { continue };
+            let Some(m) = sim.mesh_of(i) else { continue };
+            for (lp, poly) in polys.iter_mut().zip(&m.polygons) {
+                let texel = lp.texel;
+                *lp = walker::local_poly(walker::polygon_points(poly, verts), crate::world::DEFAULT_TEXELS);
+                lp.texel = texel;
+            }
+        }
     }
 
     /// Spawn, teleport and save requests queued by the portals this tick.
@@ -2412,14 +2429,17 @@ mod walker_tests {
     }
 
     /// Section 2's belt #197 (polygon 2, flags 0x6, facing −z next to the
-    /// start #194) carries Mendel at the exe's speed, and that speed is
-    /// what sweeps him off it: its flip-book slides the texture 8 texels a
-    /// frame along t (`v`: 0, −8, −16 …), one frame a tick; its texel
-    /// basis is ∂v/∂t = 2220/127 = 17.48 units, stored × −256 as −4474
-    /// (0x41d6d0 with 0x460288 = 1.0, 0x46028c = −256.0); `0x41dc30` adds
-    /// `(−4474 · −8 >> 8) >> 0 = 139` to `v` every tick. The belt is 2220
-    /// wide across that flow, so standing still he leaves its far edge in
-    /// about 16 ticks, whatever he does.
+    /// start #194) carries Mendel at the exe's speed: its flip-book slides
+    /// the texture 8 texels a frame along t (`v`: 0, −8, −16 …), one frame
+    /// a tick. Its texels (shape state 0, frame 0, the frame `0x41d9e0`
+    /// puts on the mesh before `0x41d6d0` builds the basis) are (111.4, 0)
+    /// (0, 0) (0, −602.8) at vertices 0, 1, 2: `t` runs along v1→v2, the
+    /// belt's length, about 19.9 units a texel, stored × −256 as 5100;
+    /// `0x41dc30` moves him `(4400 · −8 >> 8) >> 0 = −138` along the
+    /// polygon's `u` every tick, along the belt to the wall at its end,
+    /// which holds him. inferred: no footage of section 2. (With the
+    /// initialiser's texels (0,127) (0,0) (127,0), which the port used
+    /// before shape frames were ported, the flow ran *across* the belt.)
     #[test]
     fn section2_belt_carries_him_at_the_exes_speed() {
         let Some(d) = data() else { return };
@@ -2441,25 +2461,25 @@ mod walker_tests {
         assert_eq!(sim.uv_step(belt, 2), (0, -8), "8 texels a frame along t");
         let c = sim.creature.take().unwrap();
         let m = c.polys[belt][2].texel.map(|x| (-256.0 * x) as i32);
-        assert_eq!(m, [-20883, 0, 0, -4474], "the exe's short basis");
+        assert_eq!(m, [0, 4400, -5100, 0], "the exe's short basis");
         let mut w = Mover::default();
         w.place(&c.polys, &mut sim, Some((belt, 2)), [5000.0, -1800.0, 124.0], 0, 124);
         assert!(w.grounded && w.on == Some((belt, 2)), "standing on the belt: {:?}", w.on);
         let drive = Drive { forward: 0, turn: 0, stance: 124, gravity: -7, injected: 0 };
         let mut posted = Vec::new();
-        let mut off = None;
-        for t in 0..40 {
+        let mut steps = Vec::new();
+        for _ in 0..60 {
             let (u, v) = (w.u, w.v);
             let near = Near::gather(&c.polys, &sim, w.pos, 3200.0, SOLID | FLOOR | HAZARD);
             w.step(&c.polys, &mut sim, &near, &drive, &mut posted);
-            if w.on != Some((belt, 2)) || !w.grounded {
-                off = Some((t, v));
-                break;
-            }
-            assert_eq!((w.u - u, w.v - v), (0.0, 139.0), "tick {t}: one conveyor step");
+            assert!(w.on == Some((belt, 2)) && w.grounded, "still on the belt");
+            assert_eq!(w.v, v, "nothing moves him across it");
+            steps.push(w.u - u);
         }
-        let (t, v) = off.expect("the belt carries him off");
-        assert!(t <= 16 && v > -140.0, "off its v = 0 edge (world y = −37000) after {t} ticks, last v {v}");
+        assert!(steps[..32].iter().all(|&d| d == -138.0), "one conveyor step a tick: {:?}", &steps[..32]);
+        // The hull meets the wall at the belt's end (u ≈ 450 from it) and
+        // holds him there against the flow.
+        assert!((420.0..460.0).contains(&w.u) && steps[50..].iter().all(|&d| d == 0.0), "held at the end, u {}", w.u);
     }
 
     /// Section 1's sideways pads are drawn on every tick. Their flip-books
@@ -2852,5 +2872,61 @@ mod render_angle_tests {
         println!("section 2 start: {w:?}");
         assert!(under > 20, "upside down under #194 ({under} ticks)");
         assert!(w.tilted.0 < 0.5, "upside down: {:?}", w.tilted);
+    }
+}
+
+/// Vertex morphs (`ShapeAnim`, slot 0x08 `0x423320`, step `0x4235d0`) in
+/// the birth room: the red flame curtains #70 around the start disc #57.
+#[cfg(test)]
+mod shape_tests {
+    use super::tests::{data, world};
+    use super::*;
+
+    /// Height of drawn object `id`'s vertices (object-local z range) and
+    /// whether it is drawn.
+    fn drawn(mesh: &WorldMesh, id: usize) -> (f32, bool) {
+        let d = mesh.draw_of_object[id - 1].unwrap();
+        let r = mesh.draws[d];
+        let z = (r.first..r.first + r.count).map(|i| mesh.vertices[i as usize * crate::world::FLOATS_PER_VERTEX + 2]);
+        let (lo, hi) = z.fold((f32::MAX, f32::MIN), |(a, b), z| (a.min(z), b.max(z)));
+        (hi - lo, mesh.visible[d] == 1)
+    }
+
+    /// #70 starts flat (shape 1, ±93) and hidden (appearance 3, a -5
+    /// frame). When #57 goes to state 2 (Mendel is born) it waits; 60
+    /// ticks later shape 2 (32 frames) starts raising the curtains, one
+    /// frame a tick, and appearance 1 shows them red (texture 37); at 90
+    /// ticks shape 3 holds them at full height (−93..2960), which is what
+    /// the footage shows around him at 0:20. Before shape morphs were
+    /// ported the curtains stayed flat: the low red wedges on the pad's
+    /// sides.
+    #[test]
+    fn flame_curtains_rise_around_the_start_disc() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 0);
+        assert_eq!(drawn(&mesh, 70), (185.0, false), "flat and hidden at load");
+        let mut rising = Vec::new();
+        let mut born = None;
+        for t in 0..40 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            if born.is_none() && sim.state_of(57) == 2 {
+                born = Some(t);
+            }
+            if sim.state_of(70) == 1 {
+                rising.push(drawn(&mesh, 70));
+            }
+        }
+        assert!(born.is_some(), "the start disc fires");
+        assert_eq!(sim.state_of(70), 2, "curtains up");
+        let (h, shown) = drawn(&mesh, 70);
+        assert!(shown && h == 2960.0 + 93.0, "full height and drawn: {h}");
+        // Rising: the 32-frame state plays one frame a tick from tick 60.
+        let heights: Vec<f32> = rising.iter().filter(|r| r.1).map(|r| r.0).collect();
+        assert!(heights.len() >= 25, "drawn while rising for most of 30 ticks: {}", heights.len());
+        assert!(heights.windows(2).all(|w| w[1] >= w[0]) && heights.last() > heights.first(), "rising: {heights:?}");
+        // Mendel's casts see the morphed polygons too.
+        let c = sim.creature.as_ref().unwrap();
+        let top = c.polys[70 - 1].iter().flat_map(|p| p.points.iter()).map(|p| p[2]).fold(f32::MIN, f32::max);
+        assert_eq!(top, 2960.0, "his polygons of #70 follow its shape frame");
     }
 }

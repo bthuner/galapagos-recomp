@@ -10,11 +10,15 @@
 //! ```
 //!
 //! * Polygons on disk are convex n-gons; we fan them into triangles.
-//! * There are no texture coordinates on disk. The engine's polygon
+//! * There are no texture coordinates in the mesh. The engine's polygon
 //!   initialiser (0x42320d) gives the first three vertices the texel
 //!   coordinates (0,127), (0,0), (127,0): v1 is the origin, u runs along
 //!   v1→v2 and v runs along v1→v0. That defines an affine map over the
-//!   polygon's plane; a quad's fourth vertex lands on (127,127).
+//!   polygon's plane; a quad's fourth vertex lands on (127,127). But
+//!   every object's initial state selects a *shape* (vertex morph,
+//!   [`WorldMesh::set_shape`]), whose frame carries the real texels of
+//!   vertices 0, 1, 2 (`0x423530` copies them to polygon `+0x44`), so
+//!   the defaults only last until the level-load pass.
 //! * `layer` indexes a TEXTURE_2D_ARRAY; -1 means "untextured" (no
 //!   appearance data) and -2 "not drawn in the current appearance state"
 //!   (a polygon whose frames never gave it a texture: invisible collision
@@ -38,6 +42,26 @@ use galapagos_formats::worlds::{Object, PolyFrame, Section, WorldObject};
 
 pub const FLOATS_PER_VERTEX: usize = 10;
 const TEX: f32 = 128.0;
+
+/// The polygon initialiser's texels (`0x42320d`): `(u, v)` of vertices
+/// 0, 1, 2 = (0,127), (0,0), (127,0).
+pub const DEFAULT_TEXELS: [f32; 6] = [0.0, 127.0, 0.0, 0.0, 127.0, 0.0];
+
+/// Texture coordinates (in textures, texels / 128) of every vertex of a
+/// polygon whose vertices 0, 1, 2 carry the texels `t` = `(u0, v0, u1,
+/// v1, u2, v2)`: the affine map on the polygon's plane that sends them
+/// there, evaluated at each vertex, as the Direct3D renderer does
+/// (`0x40b2f0`, `0x40b62e..0x40b6b1`).
+pub fn polygon_uvs(pts: &[V3], t: [f32; 6]) -> Vec<(f32, f32)> {
+    let eu = sub(pts[2], pts[1]);
+    let ev = sub(pts[0], pts[1]);
+    pts.iter()
+        .map(|&p| {
+            let (s, q) = affine_st(sub(p, pts[1]), eu, ev);
+            ((t[2] + s * (t[4] - t[2]) + q * (t[0] - t[2])) / TEX, (t[3] + s * (t[5] - t[3]) + q * (t[1] - t[3])) / TEX)
+        })
+        .collect()
+}
 
 /// The slice of the vertex array belonging to one object.
 #[derive(Clone, Copy)]
@@ -234,6 +258,10 @@ pub struct WorldMesh {
     pub light: Light,
     /// Texture coordinates before any per-frame offset, 2 per vertex.
     pub base_uv: Vec<f32>,
+    /// The appearance frame's texel offset of each vertex's polygon, in
+    /// textures, 2 per vertex: drawn UV = `base_uv + uv_offset`, kept apart
+    /// so a shape frame can replace `base_uv` exactly.
+    uv_offset: Vec<f32>,
     /// One column-major 4×4 matrix per drawn object (16 f32 each).
     pub transforms: Vec<f32>,
     /// `textures.len() / (128*128*4)` RGBA layers.
@@ -358,6 +386,7 @@ impl WorldMesh {
         // emit_object wrote un-offset UVs; keep a copy so frame offsets can
         // be re-applied whenever a polygon's appearance frame changes.
         let base_uv = vertices.chunks_exact(FLOATS_PER_VERTEX).flat_map(|v| [v[3], v[4]]).collect();
+        let uv_offset = vec![0.0; base_uv_len(&vertices)];
         let hides_object = poly_ranges.iter().map(|p| vec![false; p.len()]).collect();
         let visible = vec![1; draws.len()];
         let cull = vec![1; draws.len()];
@@ -374,7 +403,7 @@ impl WorldMesh {
             .collect();
         let mut mesh = WorldMesh {
             vertices, draws, draw_of_object, poly_ranges, hides_object, blinking, visible, cull, material, materials, light,
-            base_uv, transforms, textures, texture_count, bounds, objects_drawn, far_clip, fog,
+            base_uv, uv_offset, transforms, textures, texture_count, bounds, objects_drawn, far_clip, fog,
         };
         // Apply each polygon's initial appearance frame (layer, UV offset).
         for object in &section.objects {
@@ -459,6 +488,8 @@ impl WorldMesh {
         for v in r.first..r.first + r.count {
             let i = v as usize;
             let o = i * FLOATS_PER_VERTEX;
+            self.uv_offset[i * 2] = du;
+            self.uv_offset[i * 2 + 1] = dv;
             self.vertices[o + 3] = self.base_uv[i * 2] + du;
             self.vertices[o + 4] = self.base_uv[i * 2 + 1] + dv;
             self.vertices[o + 5] = layer;
@@ -466,6 +497,54 @@ impl WorldMesh {
         }
         Some(r)
     }
+}
+
+impl WorldMesh {
+    /// Puts a shape frame on drawn object `draw` (slot 0x70 `0x423530`
+    /// on a shape action, slot 0x74 `0x4235d0` per morph tick): the
+    /// frame's vertices become the mesh's (`0x402280`) and its six floats
+    /// per polygon the texels of vertices 0, 1, 2 (`+0x44..+0x5b`), from
+    /// which the Direct3D renderer re-derives every vertex's `(u, v)`
+    /// when the mesh is marked changed. Positions, normals and base UVs
+    /// are rewritten in place; each polygon keeps its appearance frame's
+    /// texel offset, layer and material. Returns the vertex range touched.
+    pub fn set_shape(&mut self, draw: usize, polygons: &[Vec<u16>], vertices: &[[i16; 3]], texels: &[[f32; 6]]) -> Option<DrawRange> {
+        let ranges = self.poly_ranges.get(draw)?;
+        let (mut lo, mut hi) = (u32::MAX, 0);
+        for (p, poly) in polygons.iter().enumerate() {
+            let Some(&r) = ranges.get(p) else { break };
+            let pts: Vec<V3> = poly.iter().filter_map(|&i| vertices.get(i as usize)).map(|v| v.map(|c| c as f32)).collect();
+            if pts.len() < 3 || r.count == 0 {
+                continue;
+            }
+            let n = normalize(cross(sub(pts[2], pts[1]), sub(pts[0], pts[1])));
+            let uv = polygon_uvs(&pts, texels.get(p).copied().unwrap_or(DEFAULT_TEXELS));
+            let mut v = r.first as usize;
+            for k in 1..pts.len() - 1 {
+                for i in [0, k, k + 1] {
+                    if v >= (r.first + r.count) as usize {
+                        break;
+                    }
+                    let o = v * FLOATS_PER_VERTEX;
+                    // The appearance frame's offset rides on the new UVs.
+                    self.base_uv[v * 2] = uv[i].0;
+                    self.base_uv[v * 2 + 1] = uv[i].1;
+                    self.vertices[o..o + 3].copy_from_slice(&pts[i]);
+                    self.vertices[o + 3] = uv[i].0 + self.uv_offset[v * 2];
+                    self.vertices[o + 4] = uv[i].1 + self.uv_offset[v * 2 + 1];
+                    self.vertices[o + 7..o + 10].copy_from_slice(&n);
+                    v += 1;
+                }
+            }
+            lo = lo.min(r.first);
+            hi = hi.max(r.first + r.count);
+        }
+        (lo < hi).then_some(DrawRange { first: lo, count: hi - lo })
+    }
+}
+
+fn base_uv_len(vertices: &[f32]) -> usize {
+    vertices.len() / FLOATS_PER_VERTEX * 2
 }
 
 fn obj_index(section: &Section, obj: &WorldObject) -> usize {
@@ -490,22 +569,12 @@ fn emit_object(obj: &WorldObject, out: &mut Vec<f32>, bounds: &mut [f32; 6]) -> 
             continue;
         }
         // Layer and texel offset come from the appearance frame and are
-        // written afterwards by `WorldMesh::apply_frame`.
-        // Texel axes from the first three vertices, as the original does.
-        let eu = sub(pts[2], pts[1]);
-        let ev = sub(pts[0], pts[1]);
+        // written afterwards by `WorldMesh::apply_frame`; the texels are
+        // the initialiser's until a shape frame replaces them.
         // (v2 − v1) × (v0 − v1), normalised: the exe's polygon normal
         // (0x4019a0). The material (`light`) is written by `apply_frame`.
-        let [nx, ny, nz] = normalize(cross(eu, ev));
-
-        const EDGE: f32 = 127.0 / TEX; // (0,127) is the last texel, not 128
-        let uv: Vec<(f32, f32)> = pts
-            .iter()
-            .map(|&p| {
-                let (s, t) = affine_st(sub(p, pts[1]), eu, ev);
-                (s * EDGE, t * EDGE)
-            })
-            .collect();
+        let [nx, ny, nz] = normalize(cross(sub(pts[2], pts[1]), sub(pts[0], pts[1])));
+        let uv = polygon_uvs(&pts, DEFAULT_TEXELS);
         for k in 1..pts.len() - 1 {
             for &i in &[0, k, k + 1] {
                 let p = pts[i];
@@ -607,22 +676,38 @@ mod tests {
     }
 
     /// The white light panels around the birth tube (section 0, objects
-    /// #60, #61, #63, #65): one 17,841 × 12,817 quad each, texture 9 (a
-    /// white tile cut in four by a dark cross), material 41, texel offset
-    /// (−66, −1224). Material 41 reaches the middle row whatever the light
-    /// (level 15: the plain texture, no specular wash, `0x40c330`), and the
-    /// exe's rule (texels (0,127), (0,0), (127,0) at the first three
-    /// vertices, `0x42320d`, solved over the polygon by `0x40b2f0`) puts
-    /// *one* copy of the texture on the whole wall: the offset, 446/128 and
-    /// 312/128 textures, slides the dark cross to the edges, which is the
-    /// one big rounded panel the port draws. The 1997 footage shows a grid
-    /// of squares instead (see docs/re/worlds.md, "Texture coordinates").
+    /// #60, #61, #63, #65): texture 9 (a white tile cut in four by a dark
+    /// cross), material 41, texel offset (−66, −1224). Material 41 reaches
+    /// the middle row whatever the light (level 15: the plain texture, no
+    /// specular wash, `0x40c330`). The polygon initialiser's texels
+    /// ((0,127), (0,0), (127,0) at the first three vertices, `0x42320d`)
+    /// would put *one* copy on the whole wall; but each panel's initial
+    /// state selects shape 1, whose frame gives the polygon its real
+    /// texels (`0x423530` → polygon `+0x44`), and the wall then carries a
+    /// grid of about 4 × 3 copies, some 25 units a texel: the grid of white
+    /// squares the 1997 footage shows (0:10, 0:20).
     #[test]
-    fn birth_room_light_panels_are_one_copy_of_texture_9_when_data_present() {
+    fn birth_room_light_panels_are_a_grid_of_texture_9_when_data_present() {
         let Some(d) = data() else { return };
         let s = Archive::parse(&d).unwrap().world(0).unwrap();
-        let m = WorldMesh::build(&s);
-        for (id, poly) in [(60, 4), (61, 4), (63, 3), (65, 3)] {
+        let mut m = WorldMesh::build(&s);
+        let span = |m: &WorldMesh, id: usize, poly: usize| -> ([f32; 2], f32) {
+            let r = m.poly_ranges[m.draw_of_object[id - 1].unwrap()][poly];
+            let v: Vec<[f32; 5]> = (r.first..r.first + r.count)
+                .map(|i| {
+                    let o = i as usize * FLOATS_PER_VERTEX;
+                    [m.vertices[o], m.vertices[o + 1], m.vertices[o + 2], m.vertices[o + 3], m.vertices[o + 4]]
+                })
+                .collect();
+            let range = |k: usize| v.iter().map(|t| t[k]).fold(f32::MIN, f32::max) - v.iter().map(|t| t[k]).fold(f32::MAX, f32::min);
+            // World units per texel along the longest edge direction.
+            let size = (0..3).map(range).fold(0.0, f32::max);
+            let tex = range(3).max(range(4)) * 128.0;
+            ([range(3), range(4)], size / tex)
+        };
+        let before: Vec<_> = [(60, 4), (61, 4), (63, 3), (65, 3)].iter().map(|&(id, p)| span(&m, id, p).0).collect();
+        let _sim = crate::sim::Sim::new(&s, &mut m);
+        for (k, (id, poly)) in [(60, 4), (61, 4), (63, 3), (65, 3)].into_iter().enumerate() {
             let Object::World(w) = &s.objects[id - 1] else { panic!("#{id} is a world object") };
             let f = w.appearance.as_ref().unwrap()[0].polygons[poly][0];
             assert_eq!((f.texture, f.shade, f.u, f.v), (9, 41, -66, -1224), "#{id}");
@@ -631,21 +716,66 @@ mod tests {
                 assert_eq!(light_level(mat, &m.light, n), 15, "material 41 is the plain texture");
             }
             assert_eq!(d3d_colour(15, false), (255, 0), "full diffuse, no specular");
-            let r = m.poly_ranges[m.draw_of_object[id - 1].unwrap()][poly];
-            let uv: Vec<[f32; 2]> = (r.first..r.first + r.count)
-                .map(|i| {
-                    let o = i as usize * FLOATS_PER_VERTEX;
-                    [m.vertices[o + 3], m.vertices[o + 4]]
-                })
-                .collect();
-            for k in 0..2 {
-                let lo = uv.iter().map(|t| t[k]).fold(f32::MAX, f32::min);
-                let hi = uv.iter().map(|t| t[k]).fold(f32::MIN, f32::max);
-                assert!((hi - lo - 127.0 / 128.0).abs() < 1e-3, "#{id}: one copy across the wall ({lo}..{hi})");
+            for c in before[k] {
+                assert!((c - 127.0 / 128.0).abs() < 1e-3, "#{id}: the initialiser's single copy before the load pass ({c})");
             }
-            let base = [(-66 & 0x1ff) as f32 / 128.0, (-1224 & 0x1ff) as f32 / 128.0];
-            assert_eq!(base, [446.0 / 128.0, 312.0 / 128.0]);
+            let (copies, units_per_texel) = span(&m, id, poly);
+            println!("#{id}: {copies:?} textures across, {units_per_texel:.1} units a texel");
+            assert!(copies.iter().all(|&c| c > 2.5), "#{id}: a grid of copies, not one: {copies:?}");
+            assert!((20.0..30.0).contains(&units_per_texel), "#{id}: about 25 units a texel, not {units_per_texel}");
         }
+    }
+
+    /// The shape texels give the world one texel density. For every
+    /// textured polygon of the CD, world units per texel =
+    /// `sqrt(world area / texel area)` of the triangle of its first three
+    /// vertices: with the initialiser's fixed 127-texel triangle (the
+    /// port before shape frames) it is whatever size the polygon has: 966
+    /// of 8,512 polygons above 64 units a texel, the 90th percentile at 73;
+    /// with each object's shape frame, 98 that coarse, 35 % at 16..23 units
+    /// and 90 % below 35: the scale the 1997 footage shows (about 16 units
+    /// a texel, measured on its frames).
+    #[test]
+    fn shape_texels_give_one_texel_density_when_data_present() {
+        let Some(d) = data() else { return };
+        let a = Archive::parse(&d).unwrap();
+        let (mut fixed, mut shaped) = (Vec::new(), Vec::new());
+        for i in 0..a.sections.len() {
+            let s = a.world(i).unwrap();
+            for o in &s.objects {
+                let Object::World(w) = o else { continue };
+                let (Some(m), Some(sh)) = (&w.mesh, &w.logic.shape) else { continue };
+                let f = &sh.states[0].frames[0];
+                for (p, poly) in m.polygons.iter().enumerate() {
+                    if poly.len() < 3 || w.polygon_texture(p).is_none_or(|t| t < 0) {
+                        continue;
+                    }
+                    let v = |k: usize| f.vertices[poly[k] as usize].map(|c| c as f32);
+                    let area = |a: V3, b: V3| { let c = cross(a, b); dot(c, c).sqrt() };
+                    let world = area(sub(v(2), v(1)), sub(v(0), v(1)));
+                    let t = f.polygon_mapping[p];
+                    let tex = ((t[4] - t[2]) * (t[1] - t[3]) - (t[5] - t[3]) * (t[0] - t[2])).abs();
+                    if world > 0.0 && tex > 0.0 {
+                        fixed.push((world / (127.0 * 127.0)).sqrt());
+                        shaped.push((world / tex).sqrt());
+                    }
+                }
+            }
+        }
+        let spread = |v: &mut Vec<f32>| {
+            v.sort_by(f32::total_cmp);
+            let q = |x: f32| v[((v.len() - 1) as f32 * x) as usize];
+            (q(0.1), q(0.5), q(0.9))
+        };
+        let (f, s) = (spread(&mut fixed), spread(&mut shaped));
+        println!("{} polygons; units per texel (10%, median, 90%): initialiser {f:?}, shape frames {s:?}", fixed.len());
+        let coarse = |v: &[f32]| v.iter().filter(|&&x| x > 64.0).count();
+        let peak = |v: &[f32]| v.iter().filter(|&&x| (16.0..23.0).contains(&x)).count() as f32 / v.len() as f32;
+        println!("over 64 units a texel: {} vs {}; 16..23 units: {:.0} % vs {:.0} %", coarse(&fixed), coarse(&shaped), 100.0 * peak(&fixed), 100.0 * peak(&shaped));
+        assert!(coarse(&fixed) > 500 && coarse(&shaped) * 5 < coarse(&fixed), "big polygons are no longer one stretched copy");
+        assert!(f.2 / f.0 > 10.0 && s.2 / s.0 < 7.0, "the fixed texels follow the polygon's size: {f:?} vs {s:?}");
+        assert!(s.2 < 40.0 && peak(&shaped) > 0.3, "the shape texels peak at 16..23 units: {s:?}");
+        assert!((10.0..40.0).contains(&s.1), "about 16 to 25 units a texel: {s:?}");
     }
 
     /// The backface flag of the glass (`culls_glass`): the intro capsule

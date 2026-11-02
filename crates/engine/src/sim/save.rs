@@ -40,7 +40,10 @@ pub const MAGIC: [u8; 4] = *b"GLPS";
 /// (fresh predators for 1; the old world-space mover is converted).
 /// Version 4 adds each hunter's heading input (`+0x32c`) and probe
 /// angles (`+0xf0`) to its predator record (predator.rs).
-pub const VERSION: u32 = 4;
+/// Version 5 adds each object's vertex morph (shape state, frame, playing),
+/// which the exe saves too (`0x42b0f0`: `+0xc`, `+0x10`; reapplied by
+/// slot 0x70 on load, `0x423f29`).
+pub const VERSION: u32 = 5;
 
 /// The dynamic part of one object: everything the simulation changes.
 /// The original writes the same facts (`WorldObject` slot 0x4c @ 0x424010:
@@ -61,6 +64,10 @@ pub struct ObjState {
     pub poly_frame: Vec<u16>,
     pub animating: bool,
     pub skip: u32,
+    /// Vertex morph: (state, frame, playing). `None` from saves older than
+    /// version 5: the shape the freshly loaded section shows is kept
+    /// (inferred: its initial state's, the best guess without the data).
+    pub shape: Option<(u16, u16, bool)>,
 }
 
 /// One world snapshot: all objects, the `Save` variables, the random
@@ -98,6 +105,7 @@ impl Sim {
                     poly_frame: o.poly_frame.iter().map(|&f| f as u16).collect(),
                     animating: o.animating,
                     skip: o.skip,
+                    shape: Some((o.shape, o.shape_frame, o.morphing)),
                 })
                 .collect(),
             vars: self.vars,
@@ -140,6 +148,9 @@ impl Sim {
             o.poly_frame = s.poly_frame.iter().map(|&f| f as usize).collect();
             o.animating = s.animating;
             o.skip = s.skip;
+            if let Some((shape, frame, playing)) = s.shape {
+                (o.shape, o.shape_frame, o.morphing) = (shape, frame, playing);
+            }
             let (Some(obj), Some(d)) = (o.obj.as_ref(), o.draw) else { continue };
             write_transform(&mut mesh.transforms[d * 16..d * 16 + 16], o.pos, o.rot);
             let Some(state) = obj.appearance.as_ref().and_then(|a| a.get(o.appearance)) else { continue };
@@ -167,6 +178,10 @@ impl Sim {
             if let Some(d) = mesh.draw_of_object.get(p.obj).copied().flatten() {
                 mesh.set_blinking(d, false);
             }
+        }
+        // Slot 0x70 after reading the shape (0x423f29).
+        for i in 0..self.objs.len() {
+            self.put_shape(i, mesh);
         }
         self.vars = w.vars;
         self.rng.set(w.rng);
@@ -206,10 +221,10 @@ impl Sim {
         ]
     }
 
-    /// Serialises the whole game. Format `GLPS` version 4, little-endian:
+    /// Serialises the whole game. Format `GLPS` version 5, little-endian:
     ///
     /// ```text
-    /// u8[4] "GLPS"   u32 version (4; 1 to 3 are still read)
+    /// u8[4] "GLPS"   u32 version (5; 1 to 4 are still read)
     /// u32 section    u32 total_ticks   u32 level_start_ticks   u64 sim_tick
     /// WorldState     the live world
     /// u8 has_snapshot,  WorldState     the respawn snapshot
@@ -225,7 +240,8 @@ impl Sim {
     ///              i32 pos[3]; i32 rot[3];
     ///              u8 has_motion; u16 path; u32 frame;
     ///              u32 appearance; u8 animating; u32 skip;
-    ///              u32 n; u16 poly_frame[n]
+    ///              u32 n; u16 poly_frame[n];
+    ///              (v5) u16 shape; u16 shape_frame; u8 morphing
     /// pending_mask: bit 0 present, 1 trigger, 2 shape, 3 appearance,
     ///              4 sound, 5 motion, 6 goto, 7 reset_timer
     ///              (the i16 values follow in that order).
@@ -347,6 +363,10 @@ fn write_world(w: &mut Writer, s: &WorldState) {
         for &f in &o.poly_frame {
             w.u16(f);
         }
+        let (shape, frame, playing) = o.shape.unwrap_or((0, 0, false));
+        w.u16(shape);
+        w.u16(frame);
+        w.u8(playing as u8);
     }
     w.u32(s.predators.len() as u32);
     for p in &s.predators {
@@ -404,6 +424,7 @@ fn read_world(r: &mut Reader, version: u32) -> Result<WorldState, &'static str> 
         for _ in 0..k {
             poly_frame.push(r.u16()?);
         }
+        let shape = if version >= 5 { Some((r.u16()?, r.u16()?, r.u8()? != 0)) } else { None };
         objs.push(ObjState {
             state,
             ticks,
@@ -417,6 +438,7 @@ fn read_world(r: &mut Reader, version: u32) -> Result<WorldState, &'static str> 
             poly_frame,
             animating,
             skip,
+            shape,
         });
     }
     let mut predators = Vec::new();
@@ -609,6 +631,11 @@ mod tests {
             sim.wake_all = true; // every machine runs: the hardest case
             run(&mut sim, &mut mesh, 10 * TICKS_PER_SECOND);
             let a = sim.capture();
+            // A restore puts every object's shape frame back on (slot 0x70
+            // after the read, 0x423f29), also on objects that never chose
+            // one and still showed the initialiser's texels (#113 of
+            // section 0): the render to compare with is a restored one.
+            assert!(sim.restore(&a, &mut mesh));
             let (transforms, vertices) = (mesh.transforms.clone(), mesh.vertices.clone());
             run(&mut sim, &mut mesh, 100);
             let b = sim.capture();

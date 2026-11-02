@@ -28,6 +28,7 @@
 
 use crate::camera::{self, mat_mul, vec_mat};
 use crate::sim::{self, Sim};
+use crate::world;
 use galapagos_formats::worlds::{Object, Section};
 
 pub(crate) type V3 = [f32; 3];
@@ -159,17 +160,26 @@ pub(crate) struct LocalPoly {
     pub angles: (i32, i32),
 }
 
-/// Every object's polygons, by object index (cameras have none).
+/// Every object's polygons, by object index (cameras have none), as the
+/// exe's casts read them: the vertices of the object's current shape
+/// frame (`0x423130`), which before the level-load pass is its state 0,
+/// frame 0. The scrolling basis (`texel`) is built once, from that frame's
+/// texels: `0x41d9e0` puts it on the mesh (slot 0x70) right before
+/// `0x41d6d0` reads polygon `+0x44`, and nothing recomputes it.
 pub(crate) fn local_polys(section: &Section) -> Vec<Vec<LocalPoly>> {
     section
         .objects
         .iter()
         .map(|o| match o {
             Object::World(w) => w.mesh.as_ref().map_or_else(Vec::new, |m| {
+                let f0 = w.logic.shape.as_ref().and_then(|s| s.states.first()).and_then(|s| s.frames.first());
+                let verts = f0.map_or(&m.vertices, |f| &f.vertices);
                 m.polygons
                     .iter()
-                    .map(|p| {
-                        local_poly(p.iter().filter_map(|&k| m.vertices.get(k as usize)).map(|v| v.map(|c| c as f32)).collect())
+                    .enumerate()
+                    .map(|(k, p)| {
+                        let texels = f0.and_then(|f| f.polygon_mapping.get(k).copied()).unwrap_or(world::DEFAULT_TEXELS);
+                        local_poly(polygon_points(p, verts), texels)
                     })
                     .collect()
             }),
@@ -178,8 +188,14 @@ pub(crate) fn local_polys(section: &Section) -> Vec<Vec<LocalPoly>> {
         .collect()
 }
 
-/// One polygon's mover data from its object-local points.
-pub(crate) fn local_poly(points: Vec<V3>) -> LocalPoly {
+/// A polygon's object-local points from a vertex list.
+pub(crate) fn polygon_points(poly: &[u16], verts: &[[i16; 3]]) -> Vec<V3> {
+    poly.iter().filter_map(|&k| verts.get(k as usize)).map(|v| v.map(|c| c as f32)).collect()
+}
+
+/// One polygon's mover data from its object-local points and the texels
+/// `(u, v)` of its vertices 0, 1, 2 (`+0x44`).
+pub(crate) fn local_poly(points: Vec<V3>, texels: [f32; 6]) -> LocalPoly {
     let n = points.len().max(1) as f32;
     let centre = scale(points.iter().fold([0.0; 3], |a, &p| add(a, p)), 1.0 / n);
     let radius = points.iter().map(|&p| length(sub(p, centre))).fold(0.0, f32::max);
@@ -190,16 +206,29 @@ pub(crate) fn local_poly(points: Vec<V3>) -> LocalPoly {
     let (normal, frame, texel) = if points.len() >= 3 {
         let normal = normalize(cross(sub(points[1], points[0]), sub(points[2], points[0])));
         let frame = sim::frame_from_normal(normal);
-        // Default texture coordinates (0x42320d): vertex 0 = (s 0, t 127),
-        // vertex 1 = (0, 0), vertex 2 = (127, 0); so s runs along v1→v2,
-        // t along v1→v0.
-        let ds = mul_t(&frame, scale(sub(points[2], points[1]), 1.0 / 127.0));
-        let dt = mul_t(&frame, scale(sub(points[0], points[1]), 1.0 / 127.0));
-        (normal, frame, [ds[0], dt[0], ds[1], dt[1]])
+        (normal, frame, texel_basis(&points, &frame, texels))
     } else {
         (UP, IDENTITY, [0.0; 4])
     };
     LocalPoly { points, centre, radius, normal, frame, texel, normal_i, frame_i, angles }
+}
+
+/// `∂(u, v)/∂(s, t)` in the polygon's frame (`0x41d6d0`): the edges v1→v2
+/// and v1→v0 carry the texel differences `T2 − T1` and `T0 − T1`, so the
+/// basis is `E · T⁻¹`. With the initialiser's texels (`0x42320d`: (0,127)
+/// (0,0) (127,0)) it is `(v2 − v1) / 127` along s and `(v0 − v1) / 127`
+/// along t. inferred: the x87 tail of 0x41d6d0 is read as this inverse
+/// (it is the only map consistent with both texel sets).
+fn texel_basis(points: &[V3], frame: &M3, t: [f32; 6]) -> [f32; 4] {
+    let es = mul_t(frame, sub(points[2], points[1]));
+    let et = mul_t(frame, sub(points[0], points[1]));
+    let (a, b, c, d) = (t[4] - t[2], t[0] - t[2], t[5] - t[3], t[1] - t[3]); // T = [[a, b], [c, d]]
+    let det = a * d - b * c;
+    if det.abs() < 1e-6 {
+        return [0.0; 4];
+    }
+    let inv = [d / det, -b / det, -c / det, a / det];
+    [es[0] * inv[0] + et[0] * inv[2], es[0] * inv[1] + et[0] * inv[3], es[1] * inv[0] + et[1] * inv[2], es[1] * inv[1] + et[1] * inv[3]]
 }
 
 /// `0x431cf0`: the angle between two vectors, `acos` in 1024ths of a turn,
@@ -900,7 +929,7 @@ pub(crate) mod angle_tests {
         let n = normalize(n);
         let a = normalize(if n[2].abs() < 0.9 { cross([0.0, 0.0, 1.0], n) } else { cross([1.0, 0.0, 0.0], n) });
         let b = cross(n, a);
-        local_poly(vec![[0.0; 3], scale(a, 3000.0).map(f32::round), scale(b, 3000.0).map(f32::round)])
+        local_poly(vec![[0.0; 3], scale(a, 3000.0).map(f32::round), scale(b, 3000.0).map(f32::round)], crate::world::DEFAULT_TEXELS)
     }
 
     /// (forward, up, left) the old way: the heading in the polygon's frame,
