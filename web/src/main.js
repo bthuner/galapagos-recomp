@@ -74,9 +74,14 @@ async function boot(files) {
         if (ev.kind === 5) sfx.creature(ev.a); // one of Mendel's cues
         if (ev.kind === 4) view.snap(); // a teleporter asked for a camera cut
         if (ev.kind === 2) {
-          status(`A dimensional gate opened: section ${current} → ${ev.a} (time screen of level ${ev.b}).`);
+          const t = engine.game.times(); // read before the next section restarts the level clock
+          status(`A dimensional gate opened: section ${current} → ${ev.a} (time screen of level ${ev.b}: level ${t.levelSeconds} s, total ${t.totalSeconds} s).`);
           setTimeout(() => show(ev.a), 0);
         }
+        // Temporary wiring until the menu UI exists: the original would
+        // open its Save dialog here (try galapagos.game.save() / .load()).
+        if (ev.kind === 6) status(`Save pad #${ev.a}: the Save dialog would open here.`);
+        if (ev.kind === 7) status("GALAPAGOS COMPLETED (time screen picture 9).");
       }
       mendelWatch();
     },
@@ -123,10 +128,10 @@ async function boot(files) {
   $("wake-all").onchange = (e) => engine.sim.wakeAll(e.target.checked);
   let summary = "";
   const status = (msg) => ($("log").textContent = summary + "\n" + msg);
-  const show = (i) => {
+  const show = (i, built) => {
     current = i;
     sfx.reset();
-    const w = worlds.build(i);
+    const w = built ?? worlds.build(i);
     view.load({ ...w, takeDirty: engine.sim.takeDirty, creatureVertices: engine.creature.vertices });
     mendelSeen = false;
     engine.sim.wakeAll($("wake-all").checked);
@@ -145,7 +150,13 @@ async function boot(files) {
   }
   show(0);
   // Poke the running game from DevTools: galapagos.engine.sim.object(85)…
-  globalThis.galapagos = { engine, worlds, view, show, sfx };
+  // galapagos.game.save() keeps the bytes; galapagos.game.load() reopens them.
+  let lastSave = null;
+  const game = {
+    save: () => (lastSave = engine.game.save()),
+    load: (bytes = lastSave) => show(engine.game.load(bytes), worlds.current()),
+  };
+  globalThis.galapagos = { engine, worlds, view, show, sfx, game };
   jukebox(engine, files, audio);
 }
 

@@ -301,7 +301,7 @@ classes:
 | `Fldr` | `0x4285a0` | `0x460d10` | `0x4286f0` | `shorts[0]` 1 = enable, 0 = disable subtree; `shorts[1]` = descendant count → registry skip (410/410 equal the real subtree size). Slots 1..4 are no-ops (`0x413e60`). |
 | `Tele`, `Strt` | **same class** `0x41b0a0` | `0x45fee8` | `0x41b180` | portal, see below |
 | `STel` | `0x41aeb0` (subclass of the portal) | `0x45fd88` | portal | Update `0x41af10`: while **Space** (DirectInput scancode `0x39`) is held, the object counts as clicked: a "skip" key (section 0 only) |
-| `Save` | `0x41af80` | `0x45fe38` | `0x41afe0` | if `shorts[0]`: `0x41ce90(state, shorts[1])`: save-pad bookkeeping (inferred) |
+| `Save` | `0x41af80` | `0x45fe38` | `0x41afe0` | **not the save pads**: a persistent variable. `shorts[0] = 1`: store this object's state in slot `shorts[1]` of the archive object's `i32[10]` (`0x41ce90` → `0x41d530`); `0`: read the slot back as the next state (`0x41ceb0` → `0x41d560`, `0x42ce50`). Observed; see `saves.md` |
 | `Voic` | `0x41b510` | `0x45ff98` | `0x41b570` | `shorts[0] = n`: play Smacker file `data/<n>` (`sprintf("%d")`, `Music_PlaySmacker` @ `0x439d90` → `SmackOpen`); 0 = stop. Values 1..10 match files `1`..`10`: music/voice tracks. Observed. |
 | `Rend` | `0x419ee0` | `0x45fcd0` | `0x419f40` | 9-way switch on `shorts[0]` (0..8): renderer effects (unknown) |
 | `Over` | `0x419e30` | `0x45fc20` | `0x419e90` | `0x419c50(shorts[0])`: overlay (unknown) |
@@ -321,7 +321,7 @@ classes:
 | 2 | same + camera snap (`Camera_Snap` @ `0x4129a0`) | same |
 | 3 | **dimensional gate** (`Game_RequestSectionChange` @ `0x41c6e0`) | `ints[0]` destination section, `ints[1]` level number |
 | 4 | **spawn Mendel** (`Game_SpawnCreature` @ `0x41c590`) — every `Strt` | mode, offset, heading, 3 extra ints |
-| 5, 6 | Mendel reaction only | — |
+| 5, 6 | Mendel reaction only; the reaction ends in respawn reason 5 (kind 5: **game completed**) or 3 (kind 6: respawn from the snapshot), see `saves.md` | — |
 | 7 | teleport + reaction | as 1 |
 
 Kinds 1, 2, 3, 5, 6, 7 also call `Game_CreatureReact` @ `0x41cb80` with a
