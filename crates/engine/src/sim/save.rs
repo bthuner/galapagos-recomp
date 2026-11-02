@@ -34,8 +34,11 @@ pub const VARS: usize = 10;
 /// Magic and version of our saved-game format.
 pub const MAGIC: [u8; 4] = *b"GLPS";
 /// Version 2 added the predators (in every `WorldState`) and Mendel's
-/// hazard counters; version 1 games still open (fresh predators).
-pub const VERSION: u32 = 2;
+/// hazard counters; version 3 stores Mendel's mover as the polygon walker
+/// keeps it (object, polygon, `(u, v, h)`, heading) and the respawn point
+/// and pending teleport as polygon places. Versions 1 and 2 still open
+/// (fresh predators for 1; the old world-space mover is converted).
+pub const VERSION: u32 = 3;
 
 /// The dynamic part of one object: everything the simulation changes.
 /// The original writes the same facts (`WorldObject` slot 0x4c @ 0x424010:
@@ -121,7 +124,7 @@ impl Sim {
             o.rot = s.rot;
             o.motion = s.motion.and_then(|(n, at)| {
                 let path = o.obj.as_ref()?.logic.motions.get(n as usize)?;
-                Some((path.frames(), at as usize, path.looping != 0, path.relative != 0))
+                Some((path.frames(), at as usize, path.looping != 0, path.relative))
             });
             o.motion_path = s.motion.map_or(0, |m| m.0);
             o.appearance = s.appearance as usize;
@@ -131,8 +134,15 @@ impl Sim {
             let (Some(obj), Some(d)) = (o.obj.as_ref(), o.draw) else { continue };
             write_transform(&mut mesh.transforms[d * 16..d * 16 + 16], o.pos, o.rot);
             let Some(state) = obj.appearance.as_ref().and_then(|a| a.get(o.appearance)) else { continue };
+            // The flag array is not saved; it is what the frames shown
+            // left (inferred: a polygon whose state has no enabled frame
+            // keeps the flags it has now).
+            o.flags.resize(state.polygons.len(), 0);
             for (p, frames) in state.polygons.iter().enumerate() {
                 let f = o.poly_frame.get(p).copied().unwrap_or(0);
+                if let Some(fl) = super::last_enabled_flags(frames, f, state.looping != 0) {
+                    o.flags[p] = fl;
+                }
                 if let Some(r) = mesh.apply_frame(d, p, frames, f) {
                     mark(&mut self.dirty, r.first, r.first + r.count);
                 }
@@ -187,15 +197,15 @@ impl Sim {
         ]
     }
 
-    /// Serialises the whole game. Format `GLPS` version 2, little-endian:
+    /// Serialises the whole game. Format `GLPS` version 3, little-endian:
     ///
     /// ```text
-    /// u8[4] "GLPS"   u32 version (2; 1 is still read)
+    /// u8[4] "GLPS"   u32 version (3; 1 and 2 are still read)
     /// u32 section    u32 total_ticks   u32 level_start_ticks   u64 sim_tick
     /// WorldState     the live world
     /// u8 has_snapshot,  WorldState     the respawn snapshot
     /// u8 has_creature,  u32 brain_len, u8[brain_len]  Brain::to_bytes (.mnd)
-    ///                   SavedCreature  (creature.rs, fixed 434 bytes; 414 in v1)
+    ///                   SavedCreature  (creature.rs, fixed 432 bytes; 434 in v2, 414 in v1)
     ///
     /// WorldState = u32 rng; u16 picked; u16 next_pick (0 = none);
     ///              i32 vars[10]; u32 object_count; object_count x ObjState;
@@ -270,9 +280,10 @@ impl Sim {
         self.total_ticks = total;
         self.level_start_ticks = start;
         self.tick = tick;
-        if let (Some((brain, state)), Some(c)) = (creature, self.creature.as_mut()) {
+        if let (Some((brain, state)), Some(mut c)) = (creature, self.creature.take()) {
             c.brain = brain;
-            c.apply_saved(state);
+            c.apply_saved(state, self);
+            self.creature = Some(c);
         }
         if self.snapshot.is_none() {
             self.take_snapshot();
@@ -617,7 +628,7 @@ mod tests {
         println!("saved game: {} bytes", bytes.len());
         let mut w = Writer::default();
         sim.creature.as_ref().unwrap().saved().write(&mut w);
-        assert_eq!(w.0.len(), 434, "SavedCreature size documented in save_game");
+        assert_eq!(w.0.len(), 432, "SavedCreature size documented in save_game");
         assert_eq!(saved_section(&bytes), Ok(0));
 
         let (mut other, mut other_mesh) = world(&d, 0, true);
@@ -647,7 +658,10 @@ mod tests {
         sim.take_snapshot(); // what game_save does
         let saved = sim.capture();
         let saved_brain = sim.creature.as_ref().unwrap().brain.clone();
-        let anchor = sim.creature.as_ref().unwrap().pos;
+        let (anchor, anchor_on, anchor_up) = {
+            let c = sim.creature.as_ref().unwrap();
+            (c.pos, c.surface(), c.up)
+        };
 
         run(&mut sim, &mut mesh, 60 * TICKS_PER_SECOND);
         let c = sim.creature.as_ref().unwrap();
@@ -675,9 +689,16 @@ mod tests {
         }
         let c = sim.creature.as_ref().unwrap();
         assert_eq!(Some(&c.brain), learnt.as_ref(), "the brain is not restored");
-        let dist = (0..3).map(|k| (c.pos[k] - anchor[k]).powi(2)).sum::<f32>().sqrt();
-        println!("respawned {dist:.0} units from where he stood when saving");
-        assert!(dist < 1.0, "back on the spot where he saved");
+        // The respawn point is the mover's (object, polygon, u, v) with
+        // h = 0 (`Game_TakeSnapshot` @ 0x41d170): he comes back on the same
+        // spot of the same polygon, at his stance height above it (when
+        // saving, his body may have been bobbing a little higher).
+        let d: Vec<f32> = (0..3).map(|k| c.pos[k] - anchor[k]).collect();
+        let along = d[0] * anchor_up[0] + d[1] * anchor_up[1] + d[2] * anchor_up[2];
+        let across = (d.iter().map(|x| x * x).sum::<f32>() - along * along).max(0.0).sqrt();
+        println!("respawned {across:.1} units across, {along:.1} along his up from where he stood when saving");
+        assert_eq!(c.surface(), anchor_on, "on the polygon where he saved");
+        assert!(across < 1.0 && along.abs() < 100.0, "back on the spot where he saved");
     }
 
     /// The persistent variables of the `Save` class: section 2's objects

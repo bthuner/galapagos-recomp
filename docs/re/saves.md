@@ -182,10 +182,15 @@ random seed and the pending click. Restoring rewrites every object's
 transform and appearance frame into the render buffers and drops queued
 portal requests. Taken in `world_build` (level start), `game_save` and
 `game_load`; restored by `Creature::finish_vanishing` on reason 3 (before
-placing Mendel), followed by `EV_CAMERA_SNAP`. The respawn point is
-Mendel's world position at snapshot time — equivalent to the original's
-surface-relative one, since the world is restored to that very instant.
-Shape morphs and sound voices are not in our snapshot (not simulated).
+placing Mendel), followed by `EV_CAMERA_SNAP`. The respawn point is the
+original's, a **polygon place** (object, polygon, `(u, v)` with `h = 0`,
+heading) read off the polygon walker (`Creature::anchor_respawn`), so a
+respawn on a tilted or moving floor puts him back on it, in its frame:
+`Mover_Place` then stands him at his stance height above `(u, v)`
+(observed; when saving, his body may have bobbed a few units higher).
+Spawns overwrite it the same way (`Game_SpawnCreature`). A pending
+teleport is a polygon place too. Shape morphs and sound voices are not in
+our snapshot (not simulated).
 
 ## 4. The `.gal` file — observed layout
 
@@ -211,16 +216,16 @@ Saving also refreshes the respawn point to Mendel's current spot (the
 (*.mnd)"`) is the brain alone, see `mendel.md` §4.5.
 
 We are **not** binary compatible (the in-memory object layouts would have
-to be mirrored byte for byte). Our own format, `GLPS` version 2 (version 1 still opens), carries
-the same facts:
+to be mirrored byte for byte). Our own format, `GLPS` version 3 (versions 1 and 2 still open),
+carries the same facts:
 
 ```text
-u8[4] "GLPS"   u32 version = 2
+u8[4] "GLPS"   u32 version = 3
 u32 section    u32 total_ticks   u32 level_start_ticks   u64 sim_tick
 WorldState                          the live world
 u8 has_snapshot, WorldState         the respawn snapshot
 u8 has_creature, u32 brain_len, u8[brain_len] brain (the .mnd bytes),
-                 SavedCreature (434 bytes; 414 in v1: v2 adds the injected flags, fall counter and limit, last ground flags, affliction 6 noise — afflictions themselves are not saved, `Creature_Read` ends them)
+                 SavedCreature (432 bytes in v3; 434 in v2, 414 in v1: v2 added the injected flags, fall counter and limit, last ground flags, affliction 6 noise — afflictions themselves are not saved, `Creature_Read` ends them)
 
 WorldState = u32 rng; u16 picked; u16 next_pick (0 = none);
              i32 vars[10]; u32 object_count; object_count x ObjState;
@@ -233,15 +238,31 @@ ObjState   = u16 state; u16 ticks; u32 events; u32 prev_events;
              u32 n; u16 poly_frame[n]
 pending_mask: bit 0 present, 1 trigger, 2 shape, 3 appearance, 4 sound,
              5 motion, 6 goto, 7 reset_timer
-SavedCreature: mode (u8 kind, u16 ticks, u8 teleport?, f32[3], i32),
-             pos/fwd/up f32[9], forward/turn/height/hvel/stance_height i32[5],
-             air f32[3], u32 air_ticks, ground contact (u8, u32 obj, u32 poly,
-             f32[9]), u32 surface, u16 delay, i32 left, i32 right,
+SavedCreature (v3):
+             mode (u8 kind, u16 ticks, u8 teleport?, Place),
+             mover: u8 has_polygon, u32 obj, u32 poly, u8 grounded,
+               f32 u, f32 v, i32 h, i32 hvel, i32 heading,
+               f32[3] up, f32[3] pos, f32[3] prev, f32[3] air, i32 spin,
+               u8 object_turned, f32[9] object_rotation, u32 floor_flags,
+             forward/turn/stance_height i32[3],
+             u32 surface, u16 delay, i32 left, i32 right,
              touch (u8 u8 u8), i32 outputs[3], actuators i32[3][7],
              i64 cost[3], i64 count[3], i64 fwd_acc, i64 turn_acc, u16 phase,
              i32 stance, i32 turn, u8 side,
-             3 x (u8, f32[3], i32) spawn / respawn / safe points,
-             stats (u32, f32, u32 x4), u32 brain rng, u16 cue_quiet[5]
+             u8 has_respawn, Place,
+             stats (u32, f32, u32 x4), u32 brain rng, u16 cue_quiet[5],
+             u32 injected, u16 fall_count, u16 fall_limit, i32 noise[2]
+Place      = u8 has_polygon, u32 obj, u32 poly, f32[3] at, i32 heading
+             (at = (u, v, h) on the polygon, or a world position)
+SavedCreature (v1, v2): mode (u8, u16, u8, f32[3], i32), pos/fwd/up
+             f32[9], forward/turn/height/hvel/stance_height i32[5], air
+             f32[3], u32 air_ticks, contact (u8, u32 obj, u32 poly,
+             f32[9]), the same agent block, 3 x (u8, f32[3], i32) spawn /
+             respawn / safe points (world positions), stats, rng, cues,
+             (v2) u32 injected, u16, u16, u32 last ground flags, i32[2].
+             On load the world frame and the contact are re-expressed in
+             the walker's polygon coordinates; the respawn point becomes
+             a world-position place (`Creature::legacy_mover`).
 ```
 
 `game_load` parses everything (brain and creature included) before
@@ -359,7 +380,7 @@ the width of every glyph.) That is just under the LEVEL / TOTAL labels.
 |---|---|
 | `EV_SAVE_PAD = 6` (event, `a` = object id) | from `sim_click` when a `0x20` polygon is clicked while Mendel is on a pad: open the Save dialog |
 | `EV_GAME_COMPLETE = 7` (`a` = 8, `b` = 9) | portal kind 5: show picture 9 with the times |
-| `game_save() -> u32` / `game_save_ptr()` | take a snapshot (new respawn point) and serialise `GLPS` v2 |
+| `game_save() -> u32` / `game_save_ptr()` | take a snapshot (new respawn point) and serialise `GLPS` v3 |
 | `game_load(ptr, len) -> i32` | adopt an `alloc`ed buffer, rebuild its section, restore; 0 ok, -1 not a save, -2 bad section, -3 does not fit |
 | `game_section() -> i32`, `world_vertex_count() -> u32` | re-read the buffers after a load |
 | `game_times() -> *const u32` | level ticks, total ticks, level s, total s |

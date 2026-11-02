@@ -307,7 +307,7 @@ pos = first_stream_with_valid_crc(overlay)
         <ul class="strings">
           <li><b>He's born on a floor</b><span>the start disc is the floor of a birth tube. (Our first port had him born on its <em>ceiling</em>: with the wrong "up", see <a href="#up-is-z">Up is Z</a>.)</span></li>
           <li><b>The intro is a ride</b><span>the disc hands its floor down a stack of four polygons, a capsule docks around the tube, takes over the floor and carries him for 133 s along a 1,992-frame motion path to the arrival pad; holding Space (the <code>STel</code> object) skips it</span></li>
-          <li><b>Riding platforms</b><span>he keeps his position <em>and</em> orientation in the platform's frame, so a rolling capsule rolls him too</span></li>
+          <li><b>Riding platforms</b><span>he lives in his polygon's own coordinates, so a rolling capsule rolls him too, with no special case (see <a href="#walker">Walking on polygons</a>)</span></li>
           <li><b>Footsteps wake the world</b><span>dropped on a platform, his touch event climbs the folder chain and a sleeping upper level wakes within 20 ticks</span></li>
         </ul>
         <p>
@@ -317,7 +317,7 @@ pos = first_stream_with_valid_crc(overlay)
         </p>
         <p>
           Some parts are honest stand-ins, each marked <code>// inferred:</code> or <code>// not in the original:</code>
-          in the code. The original walks from polygon to polygon; ours is a ray-cast character controller.
+          in the code. Our first controller was one too: a ray-cast stand-in, until we ported the original walker.
         </p>
         <h3>Afflictions: what the floor does to him</h3>
         <p>
@@ -345,6 +345,39 @@ pos = first_stream_with_valid_crc(overlay)
           sets a lethal "surface" for his next tick. He dies the way he dies on a bad floor. Section 2 has a ball that
           hunts for a hundred ticks and then vanishes, a fork that always chases, and a polygon thing that circles his
           side; section 7's predators are lethal walls that explode away when a machine reaches the right state.
+        </p>
+        <h3 id="walker">Walking on polygons, any way up</h3>
+        <p>
+          A modern character controller asks "where is the ground under me?" every frame. The 1997 walker asks a
+          different question: "which polygon am I on, and where on it?" Mendel's grounded position is not an
+          <code>(x, y, z)</code> at all. It's an object, a polygon, and three numbers in that polygon's own frame: how
+          far along it (<code>u</code>, <code>v</code>), and how high above it (<code>h</code>), plus a heading that
+          turns in its plane. His world position is re-derived from those every tick.
+        </p>
+        <ul class="strings">
+          <li><b>Walking</b><span><code>u</code> and <code>v</code> grow by the cosine and sine of his heading; gravity pulls <code>h</code> down to his stance height (<code>0x418060</code>)</span></li>
+          <li><b>Crossing an edge</b><span>there is no adjacency table and no edge test. Five short probes shoot down along <em>his own</em> up, looking for any floor-flagged polygon. Same polygon: stay. Another one, on any object: attach, and carry the heading over the shared hinge (<code>0x411ec0</code>, <code>0x411f55</code>)</span></li>
+          <li><b>Falling</b><span>no hit means he lets go: his last step becomes his flight velocity. Nothing stops him at an edge; only his brain's ledge ray keeps him back</span></li>
+          <li><b>Walls</b><span>ten hull segments, turned with his heading, push him out by half the overlap (<code>0x418450</code>)</span></li>
+        </ul>
+        <p>
+          Two things fall out of that design for free. "Up" is whichever way his polygon faces, so a floor-flagged wall
+          or ceiling is just another floor: section 1 has twenty sideways pads he stands on, and section 2 starts him
+          upside down. And since his position lives in the polygon's coordinates, a moving platform carries him
+          without a single line of platform code. The ray-cast stand-in needed a slope limit, a "new floors must face
+          up" rule, sliding, a fall-out-of-the-world safety net and more; all of it is gone.
+        </p>
+        <p>
+          The walker would not work until two old world bugs were fixed. First, the object rotation order: a motion
+          key's <code>rx</code> is actually a yaw, <code>ry</code> a pitch, <code>rz</code> a roll. With the old order
+          the intro capsule finished its ride upside down and dropped Mendel into the sky. Second, motion paths have
+          three modes (add each frame to the pose, rest pose plus frame, absolute), and we had treated them all as
+          absolute, so section 1's bouncing pads jumped to the world origin. Both fixes change what you see, not only
+          where Mendel stands.
+        </p>
+        <p>
+          Saves follow the same idea. A respawn point or a pending teleport is now a place on a polygon, not a point in
+          space, so the save format moves to GLPS v3; v1 and v2 files still load and are converted.
         </p>
 
       </section>
@@ -633,6 +666,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> Correction: the world is Z-up, not Y-down. Mendel now stands on floors (flag bit 1), is born on the start disc, rides the capsule and lands on the arrival pad as in the footage. Polygons with negative texture numbers (collision geometry such as the birth tube) are no longer drawn.</li>
           <li><time>2026‑11‑02</time> The red start disc: −5 frames hide whole objects (the start pad is an invisible elevator). Audio measured for clipping, balance and DC; limiter and Sound test panel added.</li>
           <li><time>2026‑11‑02</time> All twelve afflictions (floor-driven, with palette-script screen effects) and all five predator classes, ported. Saves move to GLPS v2.</li>
+          <li><time>2026‑11‑02</time> The original polygon walker replaces our ray-cast controller: Mendel stands on sideways and upside-down pads, rides platforms in their own coordinates, and saves remember places on polygons (GLPS v3). Fixed the object rotation order and the three motion-path modes on the way.</li>
         </ol>
       </section>
 

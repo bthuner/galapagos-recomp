@@ -15,6 +15,7 @@ mod flash;
 mod predator;
 mod sim;
 mod sound;
+mod walker;
 mod world;
 
 use galapagos_formats::creature::{overlay_for_age, Brain, CreatureBody};
@@ -698,7 +699,7 @@ thread_local! {
     static TIME_SCREEN: std::cell::Cell<[i32; 30]> = const { std::cell::Cell::new([0; 30]) };
 }
 
-/// Serialise the whole game (format `GLPS` v1, see `Sim::save_game`).
+/// Serialise the whole game (format `GLPS`, see `Sim::save_game`).
 /// Like the original after a successful save, this first takes a new world
 /// snapshot: Mendel's current spot becomes his respawn point. Returns the
 /// byte length (0 if no section is loaded); read the bytes at

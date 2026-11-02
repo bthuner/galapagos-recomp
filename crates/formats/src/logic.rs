@@ -463,8 +463,11 @@ pub struct MotionKey {
 pub struct MotionPath {
     /// 1 = wrap to frame 0 at the end; 0 = stop on the last frame.
     pub looping: u16,
-    /// 1 = poses are relative to the object's rest pose, 0 = absolute
-    /// (`0x423a30` calls slot 0x68 when 0). Inferred from the code path.
+    /// How a frame becomes the object's pose (`0x423a30` → the pose
+    /// setters): 0 = added to the current pose every tick (slot 0x68 =
+    /// 0x422e80), 1 = the rest position plus the frame, the frame's
+    /// rotation as is (slot 0x64 = 0x422cb0), 2 = the frame as is
+    /// (slot 0x60 = 0x422af0). Observed in the listing.
     pub relative: u16,
     /// Number of expanded frames: `sum(steps + 1) + 1` (verified, 1,516 paths).
     pub frame_count: u32,

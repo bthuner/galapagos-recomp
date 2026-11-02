@@ -70,23 +70,21 @@ pub enum Request {
     Respawn,
 }
 
-/// Where a portal puts Mendel, worked out in the frame of its polygon
-/// `ints[0]`: the portal's offset `(u, v, h)` is measured from that
-/// polygon's **first vertex** along the polygon's own axes (h along its
-/// normal), and the heading turns in its plane. Checked on every pad of
-/// the CD: `v0 + offset` lands on the polygon's centre (section 0's Strt
-/// #57: `(383, 922) + (-387, -922)`; arrival pad #83: exactly). The axes
-/// are `Math_FrameFromNormal`'s (0x4312b0), as the mover's surface-local
-/// coordinates (`CreatureMover_Integrate` @ 0x418060).
-#[derive(Clone, Copy, Debug)]
+/// Where a portal puts Mendel: a polygon of the portal (`ints[0]`) and
+/// a point `(u, v, h)` in that polygon's frame, measured from its **first
+/// vertex** along the polygon's own axes (`Math_FrameFromNormal` @
+/// 0x4312b0; `h` along its normal), exactly the mover's surface-local
+/// coordinates (`Mover_Place` @ 0x411bf0 takes `obj, poly, u, v, h,
+/// heading`; `Game_SpawnCreature` @ 0x41c590 / `Game_RequestTeleport` @
+/// 0x41c690 store the same six values). Checked on every pad of the CD:
+/// `v0 + offset` lands on the polygon's centre (section 0's Strt #57:
+/// `(383, 922) + (-387, -922)`; arrival pad #83: exactly). The heading
+/// turns in the polygon's plane.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PortalPlace {
     pub obj: usize,
     pub poly: usize,
-    /// World unit vectors: the polygon's normal and his forward.
-    pub up: [f32; 3],
-    pub fwd: [f32; 3],
-    /// The offset's `h`: how far above the polygon he appears.
-    pub lift: f32,
+    pub local: [f32; 3],
 }
 
 struct Runtime {
@@ -101,13 +99,17 @@ struct Runtime {
     pos: [i32; 3],
     rot: [i32; 3],
     /// Expanded frames of the running motion path, and where we are in it.
-    motion: Option<(Vec<([i32; 3], [i32; 3])>, usize, bool, bool)>,
+    /// (frames, next frame, looping, mode): see `update_animations`.
+    motion: Option<(Vec<([i32; 3], [i32; 3])>, usize, bool, u16)>,
     /// Which motion path `motion` expanded (needed to rebuild it from a
     /// snapshot or a saved game).
     motion_path: u16,
     /// Current appearance state and per-polygon flip-book frame.
     appearance: usize,
     poly_frame: Vec<usize>,
+    /// Per polygon, the collision flags the exe's flag array holds
+    /// (`appearance+0x14`, read by `0x409680`): see [`Sim::frame_flags`].
+    flags: Vec<u32>,
     animating: bool,
     /// Registry skip count: when this folder is disabled, the update loop
     /// jumps over its `skip` descendants.
@@ -133,11 +135,6 @@ pub struct Sim {
     /// The Space bar is held: every `STel` object counts as clicked, the
     /// original's "skip the introduction" key (`STel` Update @ 0x41af10).
     pub skip_held: bool,
-    /// The last portal request's contact: (object index, polygon, spawn?).
-    /// The original hands Mendel this floor polygon with the request
-    /// (`ints[0]`, see logic.rs `PortalAction`); the camera starts from
-    /// its key (camera.rs).
-    pub portal_contact: Option<(usize, usize, bool)>,
 
     // ——— Saves and times (sim/save.rs, docs/re/saves.md) ———
     /// The ten persistent level variables of the `Save` class (the archive
@@ -184,6 +181,7 @@ impl Sim {
                         pending = Some(Actions { goto_state: Some(o.initial_state() as i16), ..Default::default() });
                     }
                 }
+                let flags = initial_flags(obj.as_ref());
                 Runtime {
                     draw: mesh.draw_of_object[i],
                     obj,
@@ -199,6 +197,7 @@ impl Sim {
                     motion_path: 0,
                     appearance: 0,
                     poly_frame: Vec::new(),
+                    flags,
                     animating: false,
                     skip: 0,
                 }
@@ -224,7 +223,6 @@ impl Sim {
             creature: None,
             requests: Vec::new(),
             skip_held: false,
-            portal_contact: None,
             vars: [0; save::VARS],
             snapshot: None,
             total_ticks: 0,
@@ -356,26 +354,43 @@ impl Sim {
         }
     }
 
-    /// Flags of polygon `p` of object `i` in its current appearance frame
-    /// (0 if it has none): the collision classes of docs/re/objects.md §3.
+    /// Flags of polygon `p` of object `i` as every collision test of the
+    /// exe reads them (`0x409680` → `0x42e0f0`: the appearance's
+    /// per-polygon flag array, `+0x14`). Applying a frame (`0x42df50` on a
+    /// state change, `0x42e050` on a flip-book step) copies its flags into
+    /// that array **only when its `enabled` byte is positive** (signed
+    /// char); a disabled frame leaves the polygon what it was. On the CD
+    /// every disabled frame carries flags 0: the arrival pad #83 shows
+    /// `[e1 0x2, e0 0x0, e0 0x0]` and stays a floor; section 1's #163 has
+    /// states whose frames are all disabled, and keeps its floor there too.
     pub(crate) fn frame_flags(&self, i: usize, p: usize) -> u32 {
-        let Some(o) = self.objs.get(i) else { return 0 };
-        let Some(state) = o.obj.as_ref().and_then(|w| w.appearance.as_ref()).and_then(|s| s.get(o.appearance)) else {
-            return 0;
-        };
-        let frame = *o.poly_frame.get(p).unwrap_or(&0);
-        state.polygons.get(p).and_then(|f| f.get(frame).or(f.first())).map_or(0, |f| f.flags)
+        self.objs.get(i).and_then(|o| o.flags.get(p).copied()).unwrap_or(0)
     }
 
-    /// The flags of every flip-book frame of polygon `p` in the object's
-    /// current appearance state, ORed: what the polygon *is* in this state,
-    /// whatever frame it shows this tick.
-    pub(crate) fn state_flags(&self, i: usize, p: usize) -> u32 {
-        let Some(o) = self.objs.get(i) else { return 0 };
+    /// The texture offset step of polygon `p` this tick, in texels
+    /// `(du, dv)`: what `0x41dc30` reads from the polygon's scroll record
+    /// (`+0x1d0`, 16 bytes: current and previous offset, filled by
+    /// `0x41dbc0` each time a frame is applied), each wrapped like the
+    /// exe: `(cur & 0x7f) − (prev & 0x7f)` folded into `−64..64`.
+    /// inferred: "previous" is the flip-book's previous frame (cyclic when
+    /// the state loops), since flip-books advance one frame a tick.
+    pub(crate) fn uv_step(&self, i: usize, p: usize) -> (i32, i32) {
+        let Some(o) = self.objs.get(i) else { return (0, 0) };
         let Some(state) = o.obj.as_ref().and_then(|w| w.appearance.as_ref()).and_then(|s| s.get(o.appearance)) else {
-            return 0;
+            return (0, 0);
         };
-        state.polygons.get(p).map_or(0, |f| f.iter().fold(0, |a, f| a | f.flags))
+        let Some(frames) = state.polygons.get(p).filter(|f| f.len() > 1) else { return (0, 0) };
+        let at = (*o.poly_frame.get(p).unwrap_or(&0)).min(frames.len() - 1);
+        let prev = match at {
+            0 if state.looping != 0 => frames.len() - 1,
+            0 => return (0, 0),
+            k => k - 1,
+        };
+        let fold = |a: i16, b: i16| {
+            let d = (a as i32 & 0x7f) - (b as i32 & 0x7f);
+            if d > 0x40 { d - 0x80 } else if d < -0x40 { d + 0x80 } else { d }
+        };
+        (fold(frames[at].u, frames[prev].u), fold(frames[at].v, frames[prev].v))
     }
 
     /// `WorldObject_PostEvent` @ 0x4232f0: OR `bits` into the object's
@@ -435,9 +450,9 @@ impl Sim {
     }
 
     /// The world point (on the polygon plane plus `h` along its normal) a
-    /// portal offset designates, and the frame he stands in there. Falls
-    /// back to `position + offset` if the polygon is missing.
-    fn portal_place(&self, i: usize, poly: usize, off: [i32; 3], heading: i32) -> ([f32; 3], Option<PortalPlace>) {
+    /// portal offset designates, and the polygon place itself. Falls back
+    /// to `position + offset` (no polygon) if the polygon is missing.
+    fn portal_place(&self, i: usize, poly: usize, off: [i32; 3]) -> ([f32; 3], Option<PortalPlace>) {
         let o = self.objs[i].pos;
         let fallback = ([(o[0] + off[0]) as f32, (o[1] + off[1]) as f32, (o[2] + off[2]) as f32], None);
         let Some(mesh) = self.objs[i].obj.as_ref().and_then(|w| w.mesh.as_ref()) else { return fallback };
@@ -452,23 +467,15 @@ impl Sim {
             return fallback;
         }
         let f = frame_from_normal(n.map(|x| x / l));
-        let local = |w: [f32; 3]| [
-            f[0] * w[0] + f[1] * w[1] + f[2] * w[2],
-            f[3] * w[0] + f[4] * w[1] + f[5] * w[2],
-            f[6] * w[0] + f[7] * w[1] + f[8] * w[2],
+        let local = off.map(|x| x as f32);
+        let d = [
+            f[0] * local[0] + f[1] * local[1] + f[2] * local[2],
+            f[3] * local[0] + f[4] * local[1] + f[5] * local[2],
+            f[6] * local[0] + f[7] * local[1] + f[8] * local[2],
         ];
-        let d = local(off.map(|x| x as f32));
-        let h = heading as f32 * core::f32::consts::TAU / 1024.0;
         let m = transform(o, self.objs[i].rot);
-        let rot = |w: [f32; 3]| [
-            m[0] * w[0] + m[1] * w[1] + m[2] * w[2],
-            m[3] * w[0] + m[4] * w[1] + m[5] * w[2],
-            m[6] * w[0] + m[7] * w[1] + m[8] * w[2],
-        ];
         let at = apply(&m, [a[0] + d[0], a[1] + d[1], a[2] + d[2]]);
-        let up = rot(local([0.0, 0.0, 1.0]));
-        let fwd = rot(local([h.cos(), h.sin(), 0.0]));
-        (at, Some(PortalPlace { obj: i, poly, up, fwd, lift: off[2] as f32 }))
+        (at, Some(PortalPlace { obj: i, poly, local }))
     }
 
     /// The class behaviour (vtable slot 0x18), for the classes we know.
@@ -488,7 +495,7 @@ impl Sim {
             }
             b"Voic" => self.events.push(HostEvent { kind: EV_MUSIC, a: p.shorts[0] as i32, b: 0, c: 0 }),
             b"Tele" | b"Strt" | b"STel" => {
-                let place = |off: [i32; 3], heading: i32, mode: i32| self.portal_place(i, mode.max(0) as usize, off, heading);
+                let place = |off: [i32; 3], mode: i32| self.portal_place(i, mode.max(0) as usize, off);
                 match p.portal() {
                     PortalAction::ChangeSection { section, level } => {
                         self.events.push(HostEvent { kind: EV_SECTION, a: section as i32, b: level as i32, c: 0 })
@@ -496,13 +503,11 @@ impl Sim {
                     // `mode` (ints[0]) is the polygon he lands on; the
                     // offset is measured on it (see `PortalPlace`).
                     PortalAction::Spawn { offset, heading, mode, .. } => {
-                        let (at, on) = place(offset, heading, mode);
-                        self.portal_contact = Some((i, mode.max(0) as usize, true));
+                        let (at, on) = place(offset, mode);
                         self.requests.push(Request::Spawn { at, heading, on })
                     }
                     PortalAction::Teleport { offset, heading, snap_camera, mode } => {
-                        let (at, on) = place(offset, heading, mode);
-                        self.portal_contact = Some((i, mode.max(0) as usize, false));
+                        let (at, on) = place(offset, mode);
                         self.requests.push(Request::Teleport { at, heading, snap: snap_camera, on })
                     }
                     // Kinds 5 and 6 only differ by the reaction they hand
@@ -555,7 +560,7 @@ impl Sim {
     fn start_motion(&mut self, i: usize, n: usize) {
         let o = &mut self.objs[i];
         let Some(path) = o.obj.as_ref().and_then(|w| w.logic.motions.get(n)) else { return };
-        o.motion = Some((path.frames(), 0, path.looping != 0, path.relative != 0));
+        o.motion = Some((path.frames(), 0, path.looping != 0, path.relative));
         o.motion_path = n as u16;
     }
 
@@ -566,7 +571,11 @@ impl Sim {
         o.appearance = n;
         o.poly_frame = vec![0; state.polygons.len()];
         o.animating = state.polygons.iter().any(|f| f.len() > 1);
+        o.flags.resize(state.polygons.len(), 0);
         for (p, frames) in state.polygons.iter().enumerate() {
+            if let Some(f) = frames.first().filter(|f| (f.enabled as i8) > 0) {
+                o.flags[p] = f.flags;
+            }
             if let Some(r) = mesh.apply_frame(draw, p, frames, 0) {
                 mark(&mut self.dirty, r.first, r.first + r.count);
             }
@@ -577,10 +586,19 @@ impl Sim {
         let o = &mut self.objs[i];
 
         // Motion path: one expanded frame per tick.
-        if let Some((frames, at, looping, relative)) = &mut o.motion {
+        // `WorldObject_StepMotion` @ 0x423a30 hands each frame to one of
+        // three pose setters by the path's mode (`path+2`): 0 → 0x422e80
+        // *adds* the frame to the current pose (a nudge: section 1's pads
+        // bounce ±100 this way), 1 → 0x422cb0 rest position + frame, the
+        // frame's rotation as is, 2 → 0x422af0 the frame as is.
+        if let Some((frames, at, looping, mode)) = &mut o.motion {
             if let Some(&(p, r)) = frames.get(*at) {
-                o.pos = if *relative { [o.rest[0] + p[0], o.rest[1] + p[1], o.rest[2] + p[2]] } else { p };
-                o.rot = r;
+                let add = |a: [i32; 3], b: [i32; 3]| [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+                (o.pos, o.rot) = match *mode {
+                    0 => (add(o.pos, p), add(o.rot, r)),
+                    1 => (add(o.rest, p), r),
+                    _ => (p, r),
+                };
                 if let Some(d) = o.draw {
                     write_transform(&mut mesh.transforms[d * 16..d * 16 + 16], o.pos, o.rot);
                 }
@@ -610,6 +628,9 @@ impl Sim {
                     still = true;
                 } else {
                     continue;
+                }
+                if let (Some(fl), Some(fr)) = (o.flags.get_mut(p), frames.get(*f).filter(|fr| (fr.enabled as i8) > 0)) {
+                    *fl = fr.flags;
                 }
                 if let Some(r) = mesh.apply_frame(draw, p, frames, *f) {
                     mark(&mut self.dirty, r.first, r.first + r.count);
@@ -719,23 +740,68 @@ impl LogicView for View<'_> {
 }
 
 // ——— transforms ————————————————————————————————————————————————————————
-// Rotations are in 1024ths of a turn. The axis order is not yet confirmed
-// from the exe (0x402370); we use Z·Y·X, the usual choice of the period.
+// Rotations are in 1024ths of a turn, kept in the order of the motion-path
+// keys `(rx, ry, rz)`. The exe stores them crosswise: key `rx` goes to the
+// object's `+0xf2`, `ry` to `+0xf0`, `rz` to `+0xf4` (the pose setters,
+// e.g. 0x422e80 at 0x422f36..0x422f68), and the object matrix is
+// `Math_RotationMatrix` @ 0x430ce0 of (`+0xf2`, `+0xf0`, `+0xf4`)
+// (`Object_UpdateMatrices` @ 0x4096a0), applied as `v · M` (0x409880).
+// So `rx` is a yaw about z, `ry` a pitch about x and `rz` a roll about y.
 
 pub(crate) type M = [f32; 12]; // 3×3 rotation (row-major) + translation
 
+/// The object transform: `world = R · local + pos`, with `R = Mᵀ` and
+/// `M = Math_RotationMatrix(yaw = rot[0], pitch = rot[1], roll = rot[2])`
+/// (same formula as `camera::Trig::rot`, in floating point).
 pub(crate) fn transform(pos: [i32; 3], rot: [i32; 3]) -> M {
-    let a = rot.map(|r| r as f32 * core::f32::consts::TAU / 1024.0);
-    let (sx, cx) = a[0].sin_cos();
-    let (sy, cy) = a[1].sin_cos();
-    let (sz, cz) = a[2].sin_cos();
-    // R = Rz * Ry * Rx
-    [
-        cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx,
-        sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx,
-        -sy, cy * sx, cy * cx,
-        pos[0] as f32, pos[1] as f32, pos[2] as f32,
-    ]
+    let sc = |r: i32| {
+        let a = -(r as f32) * core::f32::consts::TAU / 1024.0;
+        a.sin_cos()
+    };
+    let (sa, ca) = sc(rot[0]);
+    let (sb, cb) = sc(rot[1]);
+    let (scc, cc) = sc(rot[2]);
+    let m = [
+        cc * ca - sb * sa * scc,
+        -(sb * ca * scc + cc * sa),
+        -scc * cb,
+        cb * sa,
+        cb * ca,
+        -sb,
+        cc * sa * sb + scc * ca,
+        cc * ca * sb - scc * sa,
+        cc * cb,
+    ];
+    [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8], pos[0] as f32, pos[1] as f32, pos[2] as f32]
+}
+
+/// The inverse of [`transform`]'s rotation: the angles `[rx, ry, rz]`
+/// whose matrix has columns `x, y, z` (an orthonormal frame).
+pub(crate) fn angles_of(x: [f32; 3], y: [f32; 3], z: [f32; 3]) -> [i32; 3] {
+    // R (row-major) = [x0 y0 z0; x1 y1 z1; x2 y2 z2].
+    let r = [x[0], y[0], z[0], x[1], y[1], z[1], x[2], y[2], z[2]];
+    let b = r[7].clamp(-1.0, 1.0).asin();
+    let (a, c) = ((-r[1]).atan2(r[4]), r[6].atan2(r[8]));
+    let k = 1024.0 / core::f32::consts::TAU;
+    [a, b, c].map(|t| (t * k).round() as i32 & 0x3ff)
+}
+
+/// The flag array of a freshly loaded object: its first appearance
+/// state's first frames (disabled ones leave 0).
+fn initial_flags(o: Option<&WorldObject>) -> Vec<u32> {
+    let Some(state) = o.and_then(|w| w.appearance.as_ref()).and_then(|s| s.first()) else { return Vec::new() };
+    state.polygons.iter().map(|f| f.first().filter(|f| (f.enabled as i8) > 0).map_or(0, |f| f.flags)).collect()
+}
+
+/// The flags the last enabled frame up to `at` left (cyclically, if the
+/// state loops); `None` if no frame of the list is enabled.
+pub(crate) fn last_enabled_flags(frames: &[galapagos_formats::worlds::PolyFrame], at: usize, looping: bool) -> Option<u32> {
+    if frames.is_empty() {
+        return None;
+    }
+    let at = at.min(frames.len() - 1);
+    let wrap = (at + 1..frames.len()).rev().filter(|_| looping);
+    (0..=at).rev().chain(wrap).find(|&k| (frames[k].enabled as i8) > 0).map(|k| frames[k].flags)
 }
 
 /// `Math_FrameFromNormal` @ 0x4312b0 in floating point: the rotation
@@ -758,17 +824,6 @@ pub(crate) fn apply(m: &M, v: [f32; 3]) -> [f32; 3] {
         m[0] * v[0] + m[1] * v[1] + m[2] * v[2] + m[9],
         m[3] * v[0] + m[4] * v[1] + m[5] * v[2] + m[10],
         m[6] * v[0] + m[7] * v[1] + m[8] * v[2] + m[11],
-    ]
-}
-
-/// The inverse of [`apply`]: world point → object-local (the rotation is
-/// orthonormal, so its inverse is its transpose).
-pub(crate) fn unapply(m: &M, v: [f32; 3]) -> [f32; 3] {
-    let d = [v[0] - m[9], v[1] - m[10], v[2] - m[11]];
-    [
-        m[0] * d[0] + m[3] * d[1] + m[6] * d[2],
-        m[1] * d[0] + m[4] * d[1] + m[7] * d[2],
-        m[2] * d[0] + m[5] * d[1] + m[8] * d[2],
     ]
 }
 
@@ -915,3 +970,28 @@ mod pick_tests {
     }
 }
 
+
+#[cfg(test)]
+mod transform_tests {
+    use super::*;
+
+    /// The exe's convention (0x430ce0 applied as `v · M`): key `rx` turns
+    /// about z, `ry` about x, `rz` about y (by −rz); `angles_of` inverts it.
+    #[test]
+    fn object_rotation_follows_the_exe() {
+        let r = |rot: [i32; 3], v: [f32; 3]| {
+            let m = transform([0; 3], rot);
+            [m[0] * v[0] + m[1] * v[1] + m[2] * v[2], m[3] * v[0] + m[4] * v[1] + m[5] * v[2], m[6] * v[0] + m[7] * v[1] + m[8] * v[2]]
+        };
+        let near = |a: [f32; 3], b: [f32; 3]| a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-5);
+        assert!(near(r([256, 0, 0], [1.0, 0.0, 0.0]), [0.0, 1.0, 0.0]), "rx: yaw");
+        assert!(near(r([0, 256, 0], [0.0, 1.0, 0.0]), [0.0, 0.0, 1.0]), "ry: pitch about x");
+        assert!(near(r([0, 0, 256], [0.0, 0.0, 1.0]), [-1.0, 0.0, 0.0]), "rz: roll about y");
+        for rot in [[100, 200, 300], [512, 0, 0], [7, 1000, 513], [0, 128, 0]] {
+            let m = transform([0; 3], rot);
+            let back = angles_of([m[0], m[3], m[6]], [m[1], m[4], m[7]], [m[2], m[5], m[8]]);
+            let m2 = transform([0; 3], back);
+            assert!(m.iter().zip(&m2).take(9).all(|(a, b)| (a - b).abs() < 1e-2), "{rot:?} -> {back:?}");
+        }
+    }
+}

@@ -144,7 +144,7 @@ committed: they are game data). Rest pose = phase 0, stance 128 (the
 engine's load-time call is `SetPose(128, 1, 128, 0, 0)`). Mendel is a flat,
 crab-like shell on four long two-segment legs, 105 vertices / 78 polygons.
 
-## 2. Locomotion — observed (constants), inferred (some geometry)
+## 2. Locomotion — observed
 
 ### 2.1 From brain to motion
 
@@ -173,48 +173,174 @@ height    = 41 + stance * 166 / 256                      # creature+0x7d4, body 
 At full speed straight ahead: about 39 units/tick; spinning: up to about
 23/1024 of a turn (8 degrees) per tick.
 
-### 2.2 Mover, gravity, collisions
+### 2.2 The polygon walker — observed
 
-`CreatureMover_Integrate` @ `0x418060` (mover vtable slot 4):
+Port: `crates/engine/src/walker.rs` (no stand-ins left; the few inferred
+details are listed at the end). The mover lives at `creature+0x50`; its
+base class (vtable `0x45f530`, `Mover_Init` @ `0x411b60`) is specialised
+by the creature (vtable `0x45fbb0`):
 
-* grounded (`creature+0x52 != 0`): the position is kept in the
-  coordinates of the polygon he stands on (`+0x44`, `+0x48` in its plane,
-  `+0x4c` = height along its normal). `u += cos[heading] * forward >> 14`,
-  `v += sin[heading] * forward >> 14` (tables `0x472858` = cos and
-  `0x473058` = sin, both × 16384, filled by `Math_InitTables` @
-  `0x4308c0` with `FSIN`/`FCOS`), `heading += turn_d` (10-bit angle),
-  the height's velocity `+= g`, height clamped to the stance height;
-  then the world's move-with-collision (`0x41dc30`). On a floor facing
-  +z the polygon frame (`Math_FrameFromNormal` @ `0x4312b0`) is the
-  world's, so in world terms the heading direction is `(cos h, sin h, 0)`.
-* airborne: ballistic, `vel += up * g >> 10` (`up` = `+0x24..+0x2c`,
-  his up vector), `pos += vel >> 8`, spin. Leaving a surface resets the
-  contact normal to `(0, 0, 0x400)` (`0x411bdd`): **the world is Z-up**,
-  gravity pulls along −z.
-* gravity `g` per tick: `-7` normally, `+7` under affliction 12, `-2`
-  under 10, `0` under 11 (inferred: anti/low/zero gravity zones).
-  Airborne the constants are `0x700`/`0x200` added as `up * g >> 10` to a
-  velocity kept in 1/256 units: the same **7 units/tick²** in both modes
-  (verified in the listing at `0x4180d9` and `0x41814e`).
+| Slot | Address | What |
+|---:|---|---|
+| 1 | `0x418310` → `0x411bf0` | `Mover_Place(obj, poly, u, v, h, heading)` |
+| 3 | `0x417f40` → `0x411e10` | the tick: slots 4, 8, 9, 5, then "let go" |
+| 4 | `0x418060` | `CreatureMover_Integrate` |
+| 5 | `0x411ec0` | `Mover_FindSurface` (attach `0x411f55`, let go `0x41213e`) |
+| 6 | `0x412180` | surface → world: position and the three render angles |
+| 7 | `0x418230` | surface probe `k` (segment from `pos + up/4` to `pos + frame·(px, py, −32 − stance)`) |
+| 8 | `0x4183d0` | gather the `'Coll'` objects whose box meets the hull's (`0x4084e0`) |
+| 9 | `0x418450` | `CreatureMover_CollideAndTouch` |
 
-`CreatureMover_CollideAndTouch` @ `0x418450` (slot 9), every tick:
+**State** (offsets in the mover): `+0x8` object and `+0x30` polygon he
+lives on, `+0x52` grounded, `+0x44/+0x48` `(u, v)` in that polygon's
+plane, `+0x4c` `h` = his origin's height along its normal, `+0x50`
+heading (1024ths, in the plane), `+0x24` his up = the polygon's normal
+in world space (× 0x400), `+0xa8` world position, `+0x94` flight velocity
+(1/256 units), `+0xa0` spin, `+0xa4` vertical speed of `h`, `+0xe4` the
+polygon's flags. A polygon's frame is the record's `+0x28` matrix
+(`Math_FrameFromNormal` @ `0x4312b0`, polygon → object) with its origin
+on the polygon's **first vertex**; world = object position + object
+rotation · (v0 + frame · (u, v, h)) (`0x412180`).
 
-1. clears both sensor inputs (`creature+4`, `+8`) to 0;
-2. tests 10 hull points (`creature+0xa60`, plain `x,y,z` triples set in
-   `Creature_ReadMaster` @ `0x417570`, in his frame: forward, left, up):
-   `(400,450,225)`, `(-450,-450,225)`, `(400,-450,225)`,
-   `(-450,450,225)`, `(+-450,0,0)`, `(0,+-450,0)`, `(0,0,+-450)` (the
-   last one = feet, extended by velocity/4), rotated by the heading,
-   each as a segment cast from the body centre, against polygons with
-   flag `0x100` (walls);
-3. on a hit: grounded → slide; airborne → land, and the polygon's
-   `flags & 0xe00` gives the impact tolerance (`0, 0x1000, 0x6400, 0xfa00,
-   0x15e00, 0x1c200` — soft to hard surfaces, inferred);
-4. **touch**: hull point 0 hit → `input L = 256`; point 2 hit →
-   `input R = 256`;
-5. the touched polygon's flags become the creature's "surface flags"
-   (`creature+0x138`), plus any flags injected by the game
-   (`creature+0xae8`, e.g. `0x21000` by `0x419940`).
+**One tick** (`Mover_Step` @ `0x411e10`):
+
+1. *Integrate* (`0x418060`). Grounded: `u += cos[h]·fwd >> 14`,
+   `v += sin[h]·fwd >> 14` with the heading *before* this tick's turn,
+   then `heading += turn`; `hvel += g`, `h += hvel`, `h` clamped to the
+   stance height (`+0x784`); the **conveyor** (`0x41dc30`, below); the
+   world position from `(u, v, h)` (slot 6). Nothing checks the
+   polygon's edges here: `(u, v)` may leave it. Airborne: `vel += up ·
+   g` (`up × 0x700 >> 10`), `pos += vel >> 8`, `heading += spin`.
+2. *Collide* (`0x418450`), see below.
+3. *Find the surface* (`0x411ec0`). Up to five probes (`k = 0..4`, in-
+   plane offsets `(0,0) (7,7) (7,−7) (−7,−7) (−7,7)`, `+0x6c..+0x90`):
+   each a segment along **his own down** from 256 above his origin to
+   32 below his feet, cast with mask 2 (floors) through `World_Cast` @
+   `0x4089e0` (nearest of up to ten hits). A hit counts only if
+   `0x408c50` accepts it: the probe's end lies **behind** the polygon's
+   plane, at most 0x400 deep (a 0x400-long segment along the normal from
+   the end must cross the plane). That is the whole one-sidedness:
+   `World_Cast` itself (`0x407740`) accepts crossings both ways.
+   * same object and polygon, grounded: stay; refresh `up` (`0x409880`).
+   * another polygon (or landing): **attach** (`0x411f55`): `+0x52 = 1`,
+     `up` = the new normal; if the two polygons' normal angles
+     (`+0x4c/+0x4e`) differ or either object is turned, the heading is
+     carried across the **hinge**: axis = `old up × new up`
+     (`0x431ef0`; parallel normals: `(0, −n.z, n.y)` or `(0, −n.z, n.x)`),
+     expressed in the old polygon's frame (through the old object's
+     stored rotation `+0x10`) and in the new one's; `heading +=
+     atan(new) − atan(old)` (`0x430c10`). Then `(u, v)` = the probe's hit
+     point in the new frame (`0x431ad0` with `+0x3a`), `h` = the stance
+     height (slot 7's return value), `hvel = 0`, and slot 6.
+   * nothing: **let go** (`+0x52 = 0`). `Mover_Step` then turns the last
+     step into the flight velocity (`(pos − prev) × 256`) and the last
+     yaw change into the spin (`0x411e5c`).
+   Then `+0xe4` = the polygon's flags, ORed into the surface flags unless
+   a wall brought lethal or affliction bits (`& 0x1e00f000`, `0x41215d`).
+
+**So:** there is no adjacency search and no edge test. He crosses from
+polygon to polygon because the probe under him hits the next one
+(across objects too: the probe sees every gathered object); at an edge
+with nothing under him he simply **falls**, with his walking momentum
+(the brain's ledge ray, §3, is what keeps him away from edges). Steps
+and slopes are whatever the probe reaches: up to 256 above his origin,
+down to 32 below his feet. **Any floor-flagged polygon qualifies,
+whatever way it faces**, and his up becomes its normal: section 1's
+teleport pads face +y and he stands on them sideways; section 2 starts
+him on a polygon facing −z, upside down; the section-0 capsule carries
+him through its rolls glued to its floor. **Gravity is his own**: in
+flight he keeps the last floor's normal (nothing but `Mover_Init` resets
+`+0x24` to `(0, 0, 0x400)`, at `0x411bdd`) and falls along −up.
+
+**The hull** (`0x418450`): the ten points (`creature+0xa60`, set in
+`Creature_ReadMaster` @ `0x417570`, listed below) turned by the heading in the polygon's plane (`(x c − y s, x s +
+y c, z)`), through the polygon frame and object rotation; segment `k`
+runs from the current, progressively pushed origin `P` (from `P + up/4`
+for the feet, `k = 9`) to `P + offset`, cast with mask `0x100` (walls,
+any orientation). For a hit accepted by `0x408c50`: the wall's object
+feels him (vtable `+0x24`, event 1), `P += penetration / 2`;
+grounded, only the in-plane part of the push moves `(u, v)` (`h` stays)
+and the world position is recomputed; airborne, `pos = P` and the
+velocity, in the wall's frame, gets its into-the-wall component
+replaced by the wall's **bounce** speed from `flags & 0xe00`: `0, 0x1000,
+0x6400, 0xfa00, 0x15e00, 0x1c200` (1/256 units: 0 = stop, up to 450
+units/tick). Every hit, accepted or not, adds its flags to the surface
+flags (an affliction-1 polygon *replaces* them, `0x418848`) and hull
+points 0 and 2 set the touch inputs. After the loop the game's injected
+flags (`creature+0xae8`) replace the surface flags, the click hull is
+read, and **the polygon's object he lives on feels him every tick**
+(`0x41894a`), in flight too.
+
+```text
+hull (forward, left, up): (400,450,225) (-450,-450,225) (400,-450,225) (-450,450,225)
+                          (±450,0,0) (0,±450,0) (0,0,450) (0,0,-450)
+```
+
+**Platforms**: grounded he is `(u, v, h)` on a polygon of an object, so a
+moving, turning or rolling object carries him (slot 6 re-derives his
+world position from its current transform every tick). The capsule
+ride needs nothing else.
+
+**Conveyors** (`0x41dc30`): a polygon whose flags have bits 2..3
+(`0x4`, `0x8`, `0xc`) has a scroll record (`GameObject_BuildTextureScroll`
+@ `0x41d9e0`): its texel basis (`0x41d6d0`: the Jacobian of the polygon
+frame's `(u, v)` with respect to the default texture coordinates
+`(0,127) (0,0) (127,0)` of vertices 0, 1, 2, stored × −256 as shorts) and
+the last two texture offsets (`0x41dbc0`, refreshed each time a frame is
+applied). Grounded on it, `(u, v) += basis · (cur − prev) >> 8 >> shift`,
+offsets `& 0x7f` folded to ±64, `shift = (flags >> 2 & 3) − 1`. The
+sign makes him **ride the visible flow** of the texture. Section 1 has
+137 such frames (its sideways pads are `0x6`), section 2 a belt (#197,
+`0x6`, flowing across at ~140 units/tick) that carries Mendel off its
+side unless the player stops it (its state 1 is a plain `0x2` floor).
+
+**Gravity** `g` per tick: `-7` normally, `+7` under affliction 12, `-2`
+under 10, `0` under 11 (anti/low/zero gravity, inferred names). In
+flight the constants are `0x700`/`0x200` on a 1/256 velocity: the same
+7 units/tick² (`0x4180d9`, `0x41814e`).
+
+**Placement** (`Mover_Place` @ `0x411bf0`): object id, polygon, `(u, v,
+h)`, heading; `+0x52 = 0`, `up` = the polygon's normal, velocity 0, the
+world position from the frame, then slots 8 and 5 at once: within the
+probe's reach (`h ≤ stance + 32`) he stands on the polygon (or on what
+the probe meets first), otherwise he falls along its −normal. Spawns
+(`Game_SpawnCreature` @ `0x41c590`), teleports (`Game_RequestTeleport` @
+`0x41c690`, executed by `Game_OnCreatureRespawn` @ `0x41c700` reasons
+1/2) and respawns (reason 3) all go through it with six stored values:
+the respawn point `Game+0x17efc4..+0x17efd4` and the pending teleport
+`+0x17efd6..+0x17efe8` are both `(u16 obj, u16 poly, i32 u, v, h, u16
+heading)`.
+
+**Modes 0 and 1** (dying, rematerialising): `Creature_Update` @
+`0x417da0` still runs the mover at the end (`0x417eb8`): he keeps riding,
+settles on his new floor, or falls.
+
+**Polygon flags** for every cast (`0x409680` → `0x42e0f0`): the
+appearance's per-polygon flag array `+0x14`, which applying a frame
+(`0x42df50` state change, `0x42e050` flip-book step) overwrites **only
+when the frame's `enabled` byte is positive**. Disabled frames (all of
+them flagged 0 on the CD) leave the polygon what it was: pad #83's
+`[e1 0x2, e0 0x0, e0 0x0]` stays a floor.
+
+**Object rotations** (needed to know which way a moving polygon faces):
+a motion key's `rx` goes to the object's `+0xf2`, `ry` to `+0xf0`, `rz`
+to `+0xf4` (the pose setters `0x422af0/0x422cb0/0x422e80`), and the
+matrix is `Math_RotationMatrix` @ `0x430ce0(+0xf2, +0xf0, +0xf4)`
+applied as `v · M` (`Object_UpdateMatrices` @ `0x4096a0`, `0x409880`):
+`rx` is a yaw about z, `ry` a pitch about x, `rz` a roll about y. The
+capsule ends its ride at `[512, 0, 0]`, a half *yaw*: upright over the
+pad, where its floor goes away and Mendel drops onto #83. (Our first
+port read `rx` as a pitch; with polygon gravity he then fell into the
+sky.) The motion path's mode (`path+2`): 0 adds the frame to the pose
+every tick (0x422e80; section 1's pads bounce ±100 that way), 1 = rest
+position + frame (0x422cb0), 2 = the frame as is (0x422af0).
+
+Inferred in the port: floating point instead of the exe's integer
+frames; flip-book scroll deltas taken between consecutive frames of the
+list (the exe keeps the last two applied offsets, one frame behind);
+when a polygon's state has no enabled frame after a reload, it keeps
+the flags it had; the click hull `MEnc` is posed from his frame by
+`sim::angles_of` rather than the mover's angle formulas (slot 6).
 
 ### 2.3 Death, shatter, regeneration
 
@@ -240,10 +366,11 @@ Two more rules at the top of `0x419550` (observed):
 * under affliction 1, a surface with bit 22 (`0x400000`) loses its lethal
   bits, and one with bit 29 (`0x20000000`) loses its affliction bits;
 * **falling too long kills**: airborne, `+0x8f6` is set to 65 ticks (130
-  if `+0x134 & 0x10`; inferred: the flags of the last ground polygon),
-  `+0x8f4` counts; past the limit the surface becomes `0x181000` (lethal
-  kind 1, then death). Touching a `0x10` surface resets the count. On
-  landing, more than 5 airborne ticks is event 4 (the landing cue).
+  if `+0x134 & 0x10`: the flags of the polygon he lives on, the mover's
+  `+0xe4`, written by `0x412157` every tick), `+0x8f4` counts; past the
+  limit the surface becomes `0x181000` (lethal kind 1, then death).
+  Touching a `0x10` surface resets the count. On landing, more than 5
+  airborne ticks is event 4 (the landing cue).
 
 Flags handed over by the game (`creature+0xae8`, `0x4198b0`, e.g. a
 predator's bite through `MEnc`, see predators.md) join the surface flags
@@ -277,7 +404,7 @@ game (`Creature_Read` → `0x405f10` at `0x419967`) end it.
 
 | # | ticks | effect class | what changes (where it is read) | start sound / flash |
 |---|---|---|---|---|
-| 1 | 1440 | `0x42b150` | **shield**: lethal surfaces with bit 22 and affliction surfaces with bit 29 are ignored (0x41955b); his IR rays see polygons with bit 22 (`flags |= 0xc0`, 0x419290); skin: last texture slot, `+0x5c += 8`, brightness from four triangle-wave oscillators plus noise (`0x42b200`) | 37 / `0x17` (blue flash) |
+| 1 | 1440 | `0x42b150` | **shield**: lethal surfaces with bit 22 and affliction surfaces with bit 29 are ignored (0x41955b); his ledge ray sees polygons with bit 22 (`flags |= 0xc0`, 0x419290); skin: last texture slot, `+0x5c += 8`, brightness from four triangle-wave oscillators plus noise (`0x42b200`) | 37 / `0x17` (blue flash) |
 | 2 | 1440 | `0x42db50` | actuator steps (4, 7) (`0x418970`); no visual | — |
 | 3 | 1440 | `0x42cb90` | **speed**: gait 53 (`0x4189c0`), actuator steps (1, 6); visual `0x42cc00` restores ramps every 20..23 ticks (no visible change) | 39 / `0x18` (strobe) |
 | 4 | 4320 | `0x4072b0` | **camouflage**: every polygon takes the texture and ramp of the floor polygon he stands on (`0x407350` via the mover's `0x4124a0`); `PBal` stops chasing (`0x415237`) | 40 / `0x19` |
@@ -308,26 +435,35 @@ inferred (port): the start sound and flash are played when the affliction
 starts, not on every Apply (the exe replays them each tick of contact);
 a ramp brightness above 0x7fff is drawn as a brighter light.
 
-## 3. Senses — observed (logic), inferred (exact ray geometry)
+## 3. Senses — observed
 
 `Creature_SenseInfrared` @ `0x418b00`, every tick after the mover:
 
 * Two eyes, **left** (input `creature+4`) and **right** (`creature+8`).
   An eye only fires if its input is still 0 (i.e. no touch this tick) —
   touch wins over sight.
-* Each eye casts **three rays** in the same direction, from three origins
-  stacked along the body's up axis (high, middle, low). Direction: heading
-  ± `a`, with `a = 100 - posture*50/256` (in 1/1024 turns: about 35 to 18
-  degrees); length `R = 1500 + posture*500/256`. The posture output thus
-  also controls how far and how wide he looks.
-* High and middle rays: `Creature_CastIrRay` @ `0x4190f0`, first hit with
-  mask `0x40000100` on a polygon whose flags have `0xc0` (IR-visible) or
-  `0x40000000`. The low ray: `Creature_CastIrLedgeRay` @ `0x4191f0` walks
-  *all* hits and reports a drop (two hits more than 250 apart): it sees
-  ledges.
+* Each eye casts **three parallel rays**, direction heading ± `a` in his
+  polygon's plane (through its frame and the object's rotation), `a =
+  100 - posture*50/256` (in 1/1024 turns: about 35 to 18 degrees),
+  length `R = 1500 + posture*500/256`: the posture output also controls
+  how far and how wide he looks. The origins stand on his **feet**
+  (`pos − up · stance_height`): `+up/4` (256, high), `+up/64` (16,
+  middle) and `−up/32` (32 *below* the floor's surface: the ledge ray).
+* High and middle rays: `Creature_CastIrRay` @ `0x4190f0`, the **nearest**
+  polygon of mask `0x40000100`; it counts if its flags have `0xc0`
+  (IR-visible) or `0x40000000`, otherwise it hides what is behind.
+* The low ray: `Creature_CastIrLedgeRay` @ `0x4191f0` takes all its hits
+  (`World_CastAll` @ `0x408b20`, nearest first, ten at most), so it meets
+  the sides of the slab he walks on from inside. IR class `0x40` (floor
+  sides, walls `0x340`): an edge; if the next hit is less than 251
+  further it was a seam between slabs (keep going), otherwise the edge
+  is a drop and is seen; a last lone edge is seen too. Class `0x80` or a
+  hazard: seen at once. Class `0xc0` or 0: the ray stops unseen. Under
+  the shield (affliction 1) bit-22 polygons count as `0xc0` (`0x419290`).
 * Value of a hit: `clamp(256 - (dist - 656) * 256 / (R - 450), 0, 256)`:
-  256 = touching, 0 = nothing in range. The eye reports the nearest of
-  its three rays.
+  256 = touching, 0 = nothing in range. The eye reports the ray with the
+  smallest distance (`0x419070`; 10,000 = nothing).
+* Falling (`+0x8f4 != 0`, limit not 130): both eyes read 256 (`0x41906a`).
 * Side effects for sounds: ray hit flags `0x40000000` → event 2,
   `(flags & 0x380000) == 0x180000` → event 8; `|L - R| > 230` → event 16.
 
@@ -533,52 +669,63 @@ afflictions.tick()
 Creature_HandleSurfaceEvents()   pain, death, sounds
 ```
 
+Dying (mode 0) and rematerialising (mode 1), it runs the effect and the
+respawn logic, then `mover.step()` all the same (`0x417eb8`).
+
 `frac` (stored at `creature+0xae0`) interpolates rendering between two
 simulation states (`CreatureMover_Step` blends previous/current transforms
 with it). **The simulation rate itself was not found**: the only fixed
 delay seen is a 17 ms busy-wait in a palette fade. Open question.
 
-## 8. What the runtime port verified (crates/engine/src/creature.rs)
+## 8. What the runtime port verified (crates/engine/src/creature.rs, walker.rs)
 
-Running Mendel in the live section-0 simulation confirmed or corrected:
+Running Mendel in the live simulation confirmed or corrected:
 
-* **Z is up** (corrected; the first port assumed Y-down and Mendel
-  walked on the sides of pads). World up is +z; in his own frame the
-  hull points are (forward, left, up).
+* **Up is his floor's normal.** The world's +z is only the default
+  (`Mover_Init`); the first port assumed Y-down (he walked on the sides
+  of pads), the second a world-up ray-cast controller with a 60° slope
+  limit, "no new floor unless it faces up", an edge rule and a fall-back
+  to world up in flight. All of that is gone: the polygon walker (§2.2)
+  stands him on whatever floor the probe under him finds.
 * **Model origin**: the posed feet end exactly at `y = 41 + stance*166/256`
   (41 / 124 / 221 measured at stances 0 / 128 / 255): the origin floats
-  `height` above the ground. Model axes after the load transform are
-  forward `+x`, down `+y` (towards the feet), left `+z` (hull point 0,
-  left `= +450`, drives the *left* input). In a Z-up world the model's
-  `−y` maps to his up vector. Verified.
-* **Floors are flag bit 1** (`0x2`), walls bit 8 (`0x100`): the mover's
-  floor finder (`0x411ec3`) casts with mask 2 (`0x4089e0`, nearest of up
-  to ten hits); in section 0 every pad top facing +z is `0x2` and every
-  wall `0x340`. Save pads (`0x22`) are floors too. A flip-book frame may
-  drop the bit (pad #83 shows it on one frame of three), so we treat a
-  polygon as a floor if any frame of its current appearance state is one.
+  `h` above the floor. Model axes after the load transform are forward
+  `+x`, down `+y` (towards the feet), left `+z` (hull point 0, left `=
+  +450`, drives the *left* input); the model's `−y` maps to his up.
+* **Floors are flag bit 1** (`0x2`), walls bit 8 (`0x100`); save pads
+  (`0x22`) are floors too, so standing on one puts `0x20` in his surface
+  flags (no extra test needed). Disabled flip-book frames do not change a
+  polygon's flags (§2.2), which is why pad #83 stays a floor.
 * **Portal offsets are polygon-local**: a portal's `(u, v, h)` is measured
   from the first vertex of its polygon `ints[0]`, along that polygon's
-  frame (`Math_FrameFromNormal`), `h` along its normal. On every pad on
-  the CD this lands on the polygon's centre (Strt #57: `(383, 922) +
-  (-387, -922)`; arrival pad #83: exact). Mendel appears standing on that
-  polygon, in its frame.
-* **One-sided polygons** (inferred, consistent with every floor checked):
-  `(v1-v0) x (v2-v0)` points to the solid side's front.
+  frame, `h` along its normal (Strt #57: `(383, 922) + (-387, -922)`;
+  pad #83: exact). It is handed to `Mover_Place` as is.
+* **Tilted pads**: section 1's 20 teleporters onto pads facing +y (#49..
+  #64, #66, #73, #117, #163) land him on the pad's polygon, his up = +y,
+  at his stance height, and he walks on (test
+  `teleports_onto_tilted_pads_in_section1`). Section 2's `Strt` #194
+  stands him upside down (up −z) on its polygon 6, which the probe meets
+  74 units before the portal's polygon 1 (test
+  `section2_starts_on_its_downward_start_polygon`).
+* **One-sided polygons** (observed): the mover's hit test `0x408c50`
+  accepts a polygon only from the side `(v1-v0) x (v2-v0)` points to.
 * **The intro is a ride**: Mendel is born standing on the `Strt` disc #57,
-  the floor of the birth tube #54. The disc is a stack of four polygons
-  whose appearance states hand the floor bit down the stack, then to the
-  docked capsule #3 (its floors 25, 27, 29 in turn as it rolls); its
-  1,992-frame motion path carries him to the main area and drops him on
-  the arrival pad #83. A surface-attached mover is required (he keeps his
-  position *and* orientation in the platform's frame). Verified at
-  runtime: he lands on #83 after ~134 s.
+  the floor of the birth tube #54. The disc hands the floor bit down its
+  stack of four polygons, then to the docked capsule #3 (floors 25, 27,
+  29 in turn); its 1,992-frame path rolls him through the sky glued to
+  its floor (sideways, at times), arrives upright (`[512, 0, 0]` is a half
+  yaw, §2.2) and its last state removes the floor: he drops ~1,000 onto
+  the arrival pad #83, after ~133 s.
 * **Touch wakes folders**: dropped on platform #77 (folder #75), his event
   1 switches the sleeping upper-level folder #145 back on within 20 ticks.
   Verified (test `mendel_wakes_the_world_in_section0`).
 * **Pads repeat**: portal #83 in state 3 requests a teleport *every tick*
   until it feels Mendel; the port ignores requests whose destination is
-  within 1,500 units (inferred), otherwise he could never land.
+  within 1,500 units (inferred: in the exe a request only becomes a
+  teleport through a lethal-surface reaction with reason 1/2).
+* **Conveyors push hard**: section 2's belt #197 sweeps him off its side
+  at ~140 units/tick within half a second of stepping on it, and he
+  falls to his death; stopping it (its state 1) is the player's job.
 
 ## Open questions
 
@@ -591,6 +738,11 @@ Running Mendel in the live section-0 simulation confirmed or corrected:
 * Camera profile fields `a, b, c, d`; the `u32 1520`.
 * The transition effect (`+0x8ec`, `0x424520`: kinds 1..7, variants) and
   what `+0x5c += 8` does to a polygon (affliction 1).
-* `creature+0x134` (the fall limit's bit 4) is written by the mover
-  (`0x411bcb`, `0x412157`); "last ground flags" is inferred.
+* `0x41dbc0` reads the polygon's texture offset *before* applying the new
+  frame, so the exe's scroll delta lags one frame; the port uses the
+  current and previous frames of the list (same speed, no lag).
+* The `+0x11c..+0x134` filter of the additive pose setter `0x422e80`
+  (key components equal to stored values are zeroed): who sets it.
+* `World_Cast`'s camera and predator users: do they reject back faces?
+  (The port's camera and predator probes keep front faces only.)
 * Overlay 0 is unreachable from the age slider: used elsewhere?
