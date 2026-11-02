@@ -154,7 +154,7 @@ body::before {
 }
 .jukebox button.is-on { background: var(--lime); color: var(--abyss); border-color: var(--lime); }
 .stage__bar { display: flex; gap: 2rem; font-size: 0.85rem; }
-.world { width: min(94vw, calc(78vh * 16 / 9)); aspect-ratio: 16 / 9; display: block; cursor: grab; touch-action: none; }
+.world { width: calc(var(--view-size, 1) * min(94vw, calc(78vh * 16 / 9))); aspect-ratio: 16 / 9; display: block; cursor: grab; touch-action: none; }
 .world:active { cursor: grabbing; }
 .sections { display: flex; gap: 0.4rem; flex-wrap: wrap; justify-content: center; }
 .sections button, .jukebox button { transition: background 0.2s, color 0.2s; }
@@ -171,3 +171,72 @@ body::before {
 .wake { font-size: 0.8rem; color: var(--bone); display: flex; gap: 0.5rem; align-items: center; }
 .wake small { color: var(--mute); }
 .wake input { accent-color: var(--lime); }
+
+/* ——— Pause menu ——— */
+.menu {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: #050b0dcc;
+  backdrop-filter: blur(6px);
+  z-index: 10;
+}
+.menu__card {
+  width: min(30rem, 92vw);
+  max-height: 92vh;
+  overflow: auto;
+  padding: 1.6rem;
+  border: 1px solid #ffffff22;
+  border-radius: 14px;
+  background: var(--deep);
+  display: grid;
+  gap: 1.2rem;
+}
+.menu__title { width: 100%; height: auto; image-rendering: auto; }
+.menu__panel h2 { margin: 0 0 1rem; font-weight: 300; letter-spacing: -0.02em; }
+.menu__list { display: grid; }
+.menu__list button, .menu__saves button {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 0.55rem 0.4rem;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--bone);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.menu__list button:hover, .menu__saves button:hover { background: #ffffff10; color: var(--lime); }
+.menu__list hr { border: 0; border-top: 1px solid #ffffff14; margin: 0.4rem 0; width: 100%; }
+kbd { font: 0.7rem ui-monospace, monospace; color: var(--mute); border: 1px solid #ffffff22; border-radius: 4px; padding: 0.1rem 0.35rem; }
+.menu__note { font-size: 0.8rem; color: var(--mute); margin: 0; }
+.menu__saves { list-style: none; padding: 0; margin: 0 0 1rem; display: grid; gap: 0.2rem; }
+.menu__saves button { width: 100%; }
+.menu__saves small { color: var(--mute); font-size: 0.75rem; }
+.menu__prefs { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem 1rem; margin-bottom: 1rem; }
+.menu__prefs label, .menu__age, .menu__save-form label { display: grid; gap: 0.3rem; font-size: 0.8rem; color: var(--mute); }
+.menu select, .menu input:not([type="range"]) {
+  font: inherit;
+  color: var(--bone);
+  background: var(--abyss);
+  border: 1px solid #ffffff22;
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+}
+.menu input[type="range"] { accent-color: var(--lime); }
+.menu__age output { color: var(--lime); font-size: 0.9rem; }
+.menu__age { margin-bottom: 1rem; }
+.menu__row { display: flex; gap: 1rem; align-items: center; margin-top: 1rem; }
+.menu__row button[type="submit"] {
+  padding: 0.5rem 1.4rem;
+  border-radius: 999px;
+  border: 0;
+  background: var(--lime);
+  color: var(--abyss);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}

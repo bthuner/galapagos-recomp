@@ -2,9 +2,10 @@
 //!
 //! The archive stores every sample four times, one copy per "Fidelity"
 //! preference (8-bit 11 kHz up to 16-bit 44 kHz; docs/re/worlds.md §4). A
-//! 1997 PC had to choose; a browser doesn't, so we always take the best copy
-//! (quality 4, falling back like the engine does when it's absent) and
-//! convert it to signed 16-bit for WebAudio.
+//! 1997 PC had to choose; a browser doesn't, so by default we take the best
+//! copy (quality 4, falling back like the engine does when it's absent) and
+//! convert it to signed 16-bit for WebAudio. The Preferences "Fidelity"
+//! setting can still pick a lower copy, for the authentic 8-bit crunch.
 
 use galapagos_formats::worlds::SoundSet;
 
@@ -20,13 +21,14 @@ pub struct Bank {
     pub sounds: Vec<Option<Pcm>>,
 }
 
-/// The best quality copy, like a player with "Fidelity" at maximum.
-const QUALITY: usize = 4;
+/// The best quality copy, like a player with "Fidelity" at "CD Quality".
+pub const BEST_QUALITY: u8 = 4;
 
 impl Bank {
-    pub fn decode(data: &[u8], set: &SoundSet) -> Bank {
+    /// Decodes copy `quality` (1 = 8-bit 11 kHz … 4 = 16-bit 44 kHz).
+    pub fn decode(data: &[u8], set: &SoundSet, quality: u8) -> Bank {
         let sounds = set
-            .samples(data, QUALITY)
+            .samples(data, quality as usize)
             .unwrap_or_default()
             .into_iter()
             .map(|s| {
