@@ -32,9 +32,9 @@ use crate::sim::{self, Sim};
 use galapagos_formats::logic::CameraStyle;
 use galapagos_formats::worlds::{CameraKey, Object, Section};
 
-type I3 = [i32; 3];
+pub(crate) type I3 = [i32; 3];
 /// A 3×3 matrix, row-major, 4096 = 1.0 (the engine's `short[9]`).
-type M3 = [i32; 9];
+pub(crate) type M3 = [i32; 9];
 
 // ——— the fixed-point math library (0x430ab0 .. 0x431b50) ———————————————
 
@@ -50,6 +50,12 @@ pub(crate) struct Trig {
 fn round_half_up(x: f64) -> i32 {
     let f = x.floor();
     (if x - f < 0.5 { f } else { f + 1.0 }) as i32
+}
+
+/// The tables, built once (they never change at run time).
+pub(crate) fn trig() -> &'static Trig {
+    static T: std::sync::OnceLock<Trig> = std::sync::OnceLock::new();
+    T.get_or_init(Trig::new)
 }
 
 impl Trig {
@@ -102,7 +108,7 @@ impl Trig {
     /// `Math_RotationMatrix` @ 0x430ce0: the view rotation for (yaw, pitch,
     /// roll). Rows are the camera's right, forward and up axes in world
     /// coordinates (world → camera when applied as `M · v`).
-    fn rot(&self, yaw: i32, pitch: i32, roll: i32) -> M3 {
+    pub(crate) fn rot(&self, yaw: i32, pitch: i32, roll: i32) -> M3 {
         let (s5, c7) = self.sc(yaw);
         let (s4, c2) = self.sc(pitch);
         let (s3, c6) = self.sc(roll);
@@ -122,7 +128,7 @@ impl Trig {
     }
 
     /// `Math_RotationMatrixT` @ 0x430e40: the transpose of [`Trig::rot`].
-    fn rot_t(&self, yaw: i32, pitch: i32, roll: i32) -> M3 {
+    pub(crate) fn rot_t(&self, yaw: i32, pitch: i32, roll: i32) -> M3 {
         let (s2, c5) = self.sc(yaw);
         let (s7, c3) = self.sc(pitch);
         let (s4, c6) = self.sc(roll);
@@ -143,7 +149,7 @@ impl Trig {
 }
 
 /// `Math_MatMul` @ 0x431b50: A · B, results truncated to 16 bits.
-fn mat_mul(a: &M3, b: &M3) -> M3 {
+pub(crate) fn mat_mul(a: &M3, b: &M3) -> M3 {
     let mut o = [0; 9];
     for i in 0..3 {
         for j in 0..3 {
@@ -154,12 +160,12 @@ fn mat_mul(a: &M3, b: &M3) -> M3 {
 }
 
 /// `Math_VecMat` @ 0x431ad0: the row vector v · M (= Mᵀ · v).
-fn vec_mat(v: I3, m: &M3) -> I3 {
+pub(crate) fn vec_mat(v: I3, m: &M3) -> I3 {
     let c = |j: usize| ((v[0] as i64 * m[j] as i64 + v[1] as i64 * m[3 + j] as i64 + v[2] as i64 * m[6 + j] as i64) >> 12) as i32;
     [c(0), c(1), c(2)]
 }
 
-fn transpose(m: &M3) -> M3 {
+pub(crate) fn transpose(m: &M3) -> M3 {
     [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]
 }
 
@@ -176,7 +182,7 @@ pub(crate) fn approx_len(d: I3) -> i32 {
 /// `Math_FrameFromNormal` @ 0x4312b0: the rotation taking +z to the unit
 /// normal `n` (Rodrigues, about z × n), rounded to 4.12. Applied with
 /// [`vec_mat`] it turns a world vector into the surface's frame.
-fn frame_from_normal(n: I3) -> M3 {
+pub(crate) fn frame_from_normal(n: I3) -> M3 {
     let [x, y, z] = n.map(|v| v as f64);
     let len = (x * x + y * y + z * z).sqrt();
     let (c, s) = if len != 0.0 { (z / len, (x * x + y * y).sqrt() / len) } else { (1.0, 0.0) };
@@ -878,7 +884,7 @@ fn orient_in_frame(t: &Trig, frame: &M3, frame_mode: u8, o: Option<&M3>, eye: I3
 
 /// `Polygon_Normal` (0x431f90 as called by 0x409430): (v2 − v1) × (v0 − v1),
 /// scaled to length 1024 and truncated.
-fn polygon_normal(v0: I3, v1: I3, v2: I3) -> I3 {
+pub(crate) fn polygon_normal(v0: I3, v1: I3, v2: I3) -> I3 {
     let a = sub(v2, v1).map(|c| c as f64);
     let b = sub(v0, v1).map(|c| c as f64);
     let n = [a[1] * b[2] - b[1] * a[2], b[0] * a[2] - a[0] * b[2], a[0] * b[1] - b[0] * a[1]];
