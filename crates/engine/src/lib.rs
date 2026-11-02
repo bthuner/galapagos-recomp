@@ -217,28 +217,40 @@ pub extern "C" fn worlds_open(ptr: *mut u8, len: usize) -> i32 {
 /// (7 floats each, see world.rs), or -1 on a parse error.
 #[no_mangle]
 pub extern "C" fn world_build(i: usize) -> i32 {
-    WORLDS.with(|w| {
-        let mut guard = w.borrow_mut();
-        let Some(worlds) = guard.as_mut() else { return -1 };
-        let Ok(archive) = Archive::parse(&worlds.data) else { return -1 };
-        let Ok(section) = archive.world(i) else { return -1 };
-        let mesh = world::WorldMesh::build(&section);
-        let n = (mesh.vertices.len() / world::FLOATS_PER_VERTEX) as i32;
-        worlds.banks[sound::BANK_WORLD as usize] = sound::Bank::decode(&worlds.data, &section.sounds, worlds.quality);
-        worlds.section = i;
-        let mut sim = sim::Sim::new(&section, &mesh);
-        // Mendel carries his brain from section to section; the first time,
-        // it comes from the CD for the age preference (see `brain_for_age`).
-        let carried = worlds.sim.take().and_then(|s| s.creature).map(|c| c.brain);
-        let brain = worlds.pending_brain.take().or(carried).or_else(|| brain_for_age(&archive, worlds.age));
-        let body = CreatureBody::parse(&worlds.data, archive.header.creature as usize).ok();
-        if let (Some(body), Some(brain)) = (body, brain) {
-            sim.creature = Some(creature::Creature::new(&section, &mesh, body, brain));
-        }
-        worlds.sim = Some(sim);
-        worlds.mesh = Some(mesh);
-        n
-    })
+    WORLDS.with(|w| w.borrow_mut().as_mut().map_or(-1, |worlds| build_section(worlds, i)))
+}
+
+fn build_section(worlds: &mut Worlds, i: usize) -> i32 {
+    let Ok(archive) = Archive::parse(&worlds.data) else { return -1 };
+    let Ok(section) = archive.world(i) else { return -1 };
+    let mesh = world::WorldMesh::build(&section);
+    let n = (mesh.vertices.len() / world::FLOATS_PER_VERTEX) as i32;
+    worlds.banks[sound::BANK_WORLD as usize] = sound::Bank::decode(&worlds.data, &section.sounds, worlds.quality);
+    worlds.section = i;
+    let mut sim = sim::Sim::new(&section, &mesh);
+    sim.section = i;
+    let old = worlds.sim.take();
+    // The `Save` variables and the game clock outlive the section; the
+    // level clock restarts (`Game_LevelEnd` @ 0x41c8c0: start = total).
+    if let Some(o) = &old {
+        sim.vars = o.vars;
+        sim.total_ticks = o.total_ticks;
+        sim.level_start_ticks = o.total_ticks;
+    }
+    // Mendel carries his brain from section to section; the first time,
+    // it comes from the CD for the age preference (see `brain_for_age`).
+    let carried = old.and_then(|s| s.creature).map(|c| c.brain);
+    let brain = worlds.pending_brain.take().or(carried).or_else(|| brain_for_age(&archive, worlds.age));
+    let body = CreatureBody::parse(&worlds.data, archive.header.creature as usize).ok();
+    if let (Some(body), Some(brain)) = (body, brain) {
+        sim.creature = Some(creature::Creature::new(&section, &mesh, body, brain));
+    }
+    // A level starts with a world snapshot: dying before any save brings
+    // the level back to this instant (`0x41caf3` → `Game_TakeSnapshot`).
+    sim.take_snapshot();
+    worlds.sim = Some(sim);
+    worlds.mesh = Some(mesh);
+    n
 }
 
 /// The Preferences "New Mendel Age" slider (0..=255) decides which brain a
@@ -368,15 +380,20 @@ pub extern "C" fn sim_dirty_ptr() -> *const u32 {
 }
 
 /// Pick along a world-space ray; a hit counts as a click on the next tick.
-/// Returns the object id hit, or 0.
+/// Returns the object id hit, or 0. A click on a save-pad polygon (frame
+/// flag 0x20) while Mendel stands on one also queues `EV_SAVE_PAD`, as the
+/// original's click handler opens its Save dialog (0x41baa3..0x41bb07).
 #[no_mangle]
 pub extern "C" fn sim_click(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32, dz: f32) -> u32 {
     WORLDS.with(|w| {
         let mut guard = w.borrow_mut();
         let Some(worlds) = guard.as_mut() else { return 0 };
         let Some(sim) = worlds.sim.as_mut() else { return 0 };
-        match sim.pick([ox, oy, oz], [dx, dy, dz]) {
-            Some(id) => {
+        match sim.pick_hit([ox, oy, oz], [dx, dy, dz]) {
+            Some((id, flags)) => {
+                if flags & 0x20 != 0 && sim.creature.as_ref().is_some_and(|c| c.on_save_pad) {
+                    sim.events.push(sim::HostEvent { kind: sim::EV_SAVE_PAD, a: id as i32, b: 0, c: 0 });
+                }
                 sim.click(id);
                 id as u32
             }
@@ -554,6 +571,176 @@ pub extern "C" fn world_emitter(id: u32, n: u32) -> *const i32 {
         EMITTER.with(|s| s.set(v));
     });
     EMITTER.with(|s| s.as_ptr() as *const i32)
+}
+
+// ——— Saves, snapshots and the time screen ————————————————————————————————
+//
+// docs/re/saves.md is the spec. The flow the original implements:
+//
+// * click a save-pad polygon while Mendel stands on a save pad → the host
+//   gets `EV_SAVE_PAD` and shows its Save dialog; on "Save" it calls
+//   [`game_save`] (which also re-anchors the respawn snapshot) and stores
+//   the bytes;
+// * Mendel dies → the engine restores the snapshot by itself;
+// * Open → [`game_load`] with those bytes;
+// * a dimensional gate (`EV_SECTION`) → the host reads [`game_times`] for
+//   the time screen *before* calling `world_build` for the next section.
+
+thread_local! {
+    static SAVE: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static TIMES: std::cell::Cell<[u32; 4]> = const { std::cell::Cell::new([0; 4]) };
+    static TIME_SCREEN: std::cell::Cell<[i32; 30]> = const { std::cell::Cell::new([0; 30]) };
+}
+
+/// Serialise the whole game (format `GLPS` v1, see `Sim::save_game`).
+/// Like the original after a successful save, this first takes a new world
+/// snapshot: Mendel's current spot becomes his respawn point. Returns the
+/// byte length (0 if no section is loaded); read the bytes at
+/// [`game_save_ptr`] before the next engine call.
+#[no_mangle]
+pub extern "C" fn game_save() -> u32 {
+    let bytes = WORLDS.with(|w| {
+        let mut guard = w.borrow_mut();
+        let sim = guard.as_mut().and_then(|w| w.sim.as_mut())?;
+        sim.take_snapshot();
+        Some(sim.save_game())
+    });
+    let bytes = bytes.unwrap_or_default();
+    let n = bytes.len() as u32;
+    SAVE.with(|s| *s.borrow_mut() = bytes);
+    n
+}
+
+#[no_mangle]
+pub extern "C" fn game_save_ptr() -> *const u8 {
+    SAVE.with(|s| s.borrow().as_ptr())
+}
+
+/// Open a saved game. `ptr` comes from [`alloc`] and is adopted (freed by
+/// the engine), like the `*_open` functions. Rebuilds the saved section,
+/// then restores the world, the snapshot, the clocks, Mendel and his brain.
+/// Returns 0 on success, -1 if the bytes are not a save of this format,
+/// -2 if its section does not exist, -3 if it does not fit that section
+/// (the freshly built section is then left running). After success the
+/// host re-reads the world buffers as after `world_build`
+/// ([`world_vertex_count`] gives the vertex count).
+#[no_mangle]
+pub extern "C" fn game_load(ptr: *mut u8, len: usize) -> i32 {
+    let data = unsafe { take(ptr, len) };
+    let Ok(section) = sim::save::saved_section(&data) else { return -1 };
+    WORLDS.with(|w| {
+        let mut guard = w.borrow_mut();
+        let Some(worlds) = guard.as_mut() else { return -2 };
+        if build_section(worlds, section as usize) < 0 {
+            return -2;
+        }
+        let (Some(sim), Some(mesh)) = (worlds.sim.as_mut(), worlds.mesh.as_mut()) else { return -2 };
+        match sim.load_game(&data, mesh) {
+            Ok(()) => 0,
+            Err(_) => -3,
+        }
+    })
+}
+
+/// Section index of the running simulation (-1 if none), e.g. after
+/// [`game_load`].
+#[no_mangle]
+pub extern "C" fn game_section() -> i32 {
+    WORLDS.with(|w| w.borrow().as_ref().and_then(|w| w.sim.as_ref()).map_or(-1, |s| s.section as i32))
+}
+
+/// Number of 7-float vertices of the current section's buffer (the value
+/// `world_build` returned).
+#[no_mangle]
+pub extern "C" fn world_vertex_count() -> u32 {
+    with_mesh(|m| (m.vertices.len() / world::FLOATS_PER_VERTEX) as u32, 0)
+}
+
+/// Four u32 for the time screen: level ticks, total ticks, level seconds
+/// and total seconds (the seconds exactly as the original computes them:
+/// `total/24 - level_start/24` and `total/24`). The level clock restarts in
+/// `world_build`, so read this when `EV_SECTION` arrives, before building.
+#[no_mangle]
+pub extern "C" fn game_times() -> *const u32 {
+    let t = WORLDS.with(|w| w.borrow().as_ref().and_then(|w| w.sim.as_ref()).map_or([0; 4], |s| s.times()));
+    TIMES.with(|c| c.set(t));
+    TIMES.with(|c| c.as_ptr() as *const u32)
+}
+
+/// 1 while Mendel stands on a save pad (`creature+0xaf0`): the condition
+/// for the Save dialog, also checked by the original's Ctrl+S key poll (0x416e50).
+#[no_mangle]
+pub extern "C" fn game_on_save_pad() -> u32 {
+    with_creature(|c| c.on_save_pad as u32, 0)
+}
+
+/// For "New game": forget the `Save` variables and zero both clocks of the
+/// running simulation, so the next `world_build` starts from scratch
+/// (`0x4172fc`: `SetTotalTicks(0)`, `SetLevelStartTicks(0)`).
+#[no_mangle]
+pub extern "C" fn game_reset_progress() {
+    with_sim_mut(|sim| {
+        sim.vars = [0; sim::save::VARS];
+        sim.total_ticks = 0;
+        sim.level_start_ticks = 0;
+    });
+}
+
+/// Layout of the time screen (`TimeScreen_Select` @ 0x41a2d0) for `level`
+/// (0..7 from the gate, 8 = game completed) in a view of `w`×`h` pixels.
+/// Thirty i32:
+///
+/// ```text
+/// 0 picture index for Archive::picture (-1: view smaller than 144x100)
+/// 1 picture width  2 picture height  3 visible height (glyph strip cut off)
+/// 4 glyph height (the glyph strip is the picture's bottom rows)
+/// 5 level time x (left edge)  6 both times' y (top)
+/// 7 total time x (right edge: the text ends here)
+/// 8..29 eleven (x, width) pairs: glyphs '0'..'9' then ':' in the strip
+/// ```
+///
+/// Times are drawn `hh:mm:ss` (`"%.2ld:%.2ld:%.2ld"`, hours mod 100) by
+/// copying glyph pixels into the picture, skipping pixels equal to the
+/// picture's top-left pixel (the transparent colour).
+#[no_mangle]
+pub extern "C" fn time_screen_layout(level: i32, w: u32, h: u32) -> *const i32 {
+    let mut out = [0i32; 30];
+    out[0] = -1;
+    if let Some(l) = time_screen(level, w, h) {
+        out[..8].copy_from_slice(&[l.0, l.1, l.2, l.2 - l.3, l.3, l.4, l.5, l.6]);
+        for (k, g) in l.7.iter().enumerate() {
+            out[8 + 2 * k] = g.0;
+            out[9 + 2 * k] = g.1;
+        }
+    }
+    TIME_SCREEN.with(|c| c.set(out));
+    TIME_SCREEN.with(|c| c.as_ptr() as *const i32)
+}
+
+/// (picture, width, height, glyph height, level x, y, total right x,
+/// glyph (x, width) table). The 8-bit picture set of the original: one
+/// picture per level (index `level + 1`), +10 for the medium size, +20 for
+/// the small one; the thresholds and coordinates are 0x41a2d0's.
+#[allow(clippy::type_complexity)]
+fn time_screen(level: i32, w: u32, h: u32) -> Option<(i32, i32, i32, i32, i32, i32, i32, [(i32, i32); 11])> {
+    let n = level.clamp(0, 8) + 1;
+    let digits = |x0: i32, step: i32, colon: (i32, i32)| {
+        let mut t = [(0, step); 11];
+        for (k, g) in t.iter_mut().take(10).enumerate() {
+            g.0 = x0 + step * k as i32;
+        }
+        t[10] = colon;
+        t
+    };
+    if w >= 560 && h >= 400 {
+        Some((n, 560, 421, 24, 6, 358, 558, digits(0, 35, (350, 18))))
+    } else if w >= 288 && h >= 200 {
+        Some((n + 10, 288, 211, 12, 6, 180, 282, digits(1, 18, (181, 9))))
+    } else if w >= 144 && h >= 100 {
+        Some((n + 20, 144, 108, 7, 1, 92, 144, digits(0, 9, (91, 5))))
+    } else {
+        None
+    }
 }
 
 // ——— Menus: new game, brains, pictures, preferences ———————————————————

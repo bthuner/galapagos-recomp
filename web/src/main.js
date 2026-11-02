@@ -4,6 +4,7 @@ import { playMovie } from "./movie.js";
 import { createWorldView } from "./world-view.js";
 import { createSfx } from "./audio.js";
 import { createMenu } from "./menu.js";
+import { showTimeScreen } from "./time-screen.js";
 
 const $ = (id) => document.getElementById(id);
 const log = (msg) => ($("log").textContent += msg + "\n");
@@ -61,7 +62,20 @@ async function boot(files) {
   };
 
   const sfx = createSfx(engine, audio, volume);
-  let paused = false; // while the pause menu is open
+  let paused = false; // while the pause menu or the time screen is up
+  let timeScreenUp = false;
+
+  // A dimensional gate: the time screen of `level` (times read *before* the
+  // next section restarts the level clock), then section `next` (null after
+  // the last level: the game is complete).
+  async function passGate(next, level) {
+    const times = engine.game.times();
+    paused = timeScreenUp = true;
+    await showTimeScreen(engine, level, times);
+    paused = timeScreenUp = false;
+    if (next !== null) show(next);
+    else status("GALAPAGOS COMPLETED. Mendel has escaped.");
+  }
 
   const view = createWorldView($("world"), {
     // Fixed timestep: run as many ticks as real time demands (max 5 per
@@ -81,10 +95,10 @@ async function boot(files) {
         if (ev.kind === 5) sfx.creature(ev.a); // one of Mendel's cues
         if (ev.kind === 4) view.snap(); // a teleporter asked for a camera cut
         if (ev.kind === 6) menu.offerSave(); // a save pad was clicked under Mendel
-        if (ev.kind === 2) {
-          status(`A dimensional gate opened: section ${current} → ${ev.a} (time screen of level ${ev.b}).`);
-          setTimeout(() => show(ev.a), 0);
-        }
+        if (ev.kind === 2) passGate(ev.a, ev.b); // a dimensional gate: time screen, then the next section
+        // Temporary wiring until the menu UI exists: the original would
+        // open its Save dialog here (try galapagos.game.save() / .load()).
+        if (ev.kind === 7) passGate(null, ev.a); // the last portal: "GALAPAGOS COMPLETED"
       }
       mendelWatch();
     },
@@ -118,7 +132,7 @@ async function boot(files) {
   // Space: the original's "skip" key (held = every STel object clicked).
   // Captured here so it doesn't also stop the music like other keys do.
   const skip = (down) => (e) => {
-    if (e.code !== "Space" || e.repeat) return;
+    if (e.code !== "Space" || e.repeat || timeScreenUp) return;
     e.preventDefault();
     e.stopImmediatePropagation();
     engine.sim.holdSkip(down);
@@ -162,10 +176,10 @@ async function boot(files) {
     engine,
     get paused() { return paused; },
     set paused(v) { paused = v; },
-    ready: () => true,
+    ready: () => !timeScreenUp,
     status,
     newGame(age) {
-      engine.newGame(age);
+      engine.newGame(age); // fresh brain, no carried progress or clocks
       show(0);
       status("A new Mendel is born.");
     },
@@ -181,7 +195,13 @@ async function boot(files) {
   });
 
   // Poke the running game from DevTools: galapagos.engine.sim.object(85)…
-  globalThis.galapagos = { engine, worlds, view, show, sfx, menu };
+  // galapagos.game.save() keeps the bytes; galapagos.game.load() reopens them.
+  let lastSave = null;
+  const game = {
+    save: () => (lastSave = engine.game.save()),
+    load: (bytes = lastSave) => show(engine.game.load(bytes), { built: true }),
+  };
+  globalThis.galapagos = { engine, worlds, view, show, sfx, menu, game };
   jukebox(engine, files, audio);
 }
 

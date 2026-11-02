@@ -56,6 +56,12 @@
     </div>
   </section>
 
+  <!-- The time screen between levels: drawn from the game's own picture. -->
+  <div id="time-screen" class="time-screen" hidden>
+    <canvas aria-label="Level and total time"></canvas>
+    <p>Esc, Space or click to continue</p>
+  </div>
+
   <!-- The Pause Game Menu (Esc). Structure and wording follow the original
        File / Edit / Help menu bar and Preferences dialog of galapagos.exe. -->
   <div id="menu" class="menu" hidden>
@@ -76,8 +82,7 @@
           <button data-action="about">About Galapagos…</button>
           <button data-action="quit">Quit</button>
         </nav>
-        <p class="menu__note">Save by clicking a <em>save pad</em> (a blue, shimmering floor panel) while Mendel walks on it.
-          <span class="menu__save-hint">Saving arrives with the save-pad update.</span></p>
+        <p class="menu__note">Save by clicking a <em>save pad</em> (a blue, shimmering floor panel) while Mendel walks on it.</p>
       </section>
 
       <section class="menu__panel" data-panel="open" hidden>

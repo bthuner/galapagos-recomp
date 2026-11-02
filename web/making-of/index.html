@@ -504,6 +504,27 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           browser can't reach them yet. Brains export as genuine <code>.mnd</code> files (28,242 bytes, like the
           originals), so a Mendel raised here can be shared.
         </p>
+        <h3>Save pads: two wrong guesses, corrected by the code</h3>
+        <p>
+          The manual says a save pad is "a blue, shimmering floor panel" you click while Mendel walks on it. We had
+          assumed the <code>Save</code> object class was the pad. The click handler says otherwise: the pad is any
+          polygon whose appearance frame carries flag bit 5, and the game checks that Mendel himself stands on such a
+          surface before opening the Save dialog. The <code>Save</code> class turned out to be a <em>persistent
+          variable</em>: ten numbers that survive section changes. The hub uses them to remember that you have already
+          done its first loop.
+        </p>
+        <p>
+          The second correction makes the manual's most intriguing promise concrete. A save takes a <em>snapshot</em>
+          of the world: every object's state, timer, motion path and appearance, plus the spot where Mendel will
+          respawn. It never includes Mendel's brain. When he dies, the world rewinds to the snapshot and he walks back
+          in carrying everything he learnt. Opening a saved file is different: it restores the brain too.
+        </p>
+        <p>
+          The time screen between levels is drawn entirely from the level's picture: the original copies glyphs from
+          a "0123456789:" strip at the bottom of the image, one by one, treating the top-left colour as transparent.
+          We do exactly that in a few dozen lines. Saved games are our own documented format ("GLPS", about 52 KB),
+          stored in the browser next to the cached CD.
+        </p>
       </section>
 
       <section id="journal" class="chapter">
@@ -521,6 +542,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> Mendel is alive: born on the birth tube's ceiling, carried by the intro capsule, walking with his real NERM brain, waking folders with his footsteps, and feeling right-clicks.</li>
           <li><time>2026‑11‑02</time> Sound: world emitters with 3-D panning, Mendel's five cues, the best of four stored qualities. Found that emitter sound numbers are 1-based by counting empty slots.</li>
           <li><time>2026‑11‑02</time> Menus from the exe's resource tables: pause menu, Preferences with the original options (all working, including 8-bit Fidelity), new game by age, .mnd import/export.</li>
+          <li><time>2026‑11‑02</time> Save pads, world snapshots that rewind the world but not Mendel's mind, saved games in the browser, and the original time screen between levels.</li>
         </ol>
       </section>
 

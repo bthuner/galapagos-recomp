@@ -32,6 +32,7 @@
 //! 7 units/tick², the stance height and the polygon flag masks. Each
 //! approximation is marked `inferred:`.
 
+use crate::sim::save::{Reader, Writer};
 use crate::sim::{self, Request, Sim};
 use crate::world::{WorldMesh, FLOATS_PER_VERTEX};
 use galapagos_formats::creature::{Brain, CreatureBody, Lcg};
@@ -136,6 +137,8 @@ const IR_VISIBLE: u32 = 0xc0;
 const LETHAL: u32 = 0xf000;
 const DELAYED: u32 = 0x80_0000;
 const HURTS: u32 = 0x100_0000;
+/// Frame flag bit 5: a save pad ("blue, shimmering floor panel").
+const SAVE_PAD: u32 = 0x20;
 
 // ——— Actuators ——————————————————————————————————————————————————————
 
@@ -399,7 +402,12 @@ pub struct Creature {
     side: bool,
 
     spawn_point: Option<(V3, i32)>,
-    save_point: Option<V3>,
+    /// The respawn point (`Game+0x17efc4..0x17efd4`): where he stood when
+    /// the last world snapshot was taken, or the latest spawn request.
+    save_point: Option<(V3, i32)>,
+    /// `creature+0xaf0`: the surface he touches this tick has frame flag
+    /// bit 5 (0x20), i.e. he stands on a save pad (`0x419730`).
+    pub on_save_pad: bool,
     /// not in the original: the last spot where he stood on still, harmless
     /// ground, a respawn fallback when the spawn point hangs over nothing
     /// (section 0's birth tube is gone once the capsule has left).
@@ -509,6 +517,7 @@ impl Creature {
             side: true,
             spawn_point: None,
             save_point: None,
+            on_save_pad: false,
             safe_point: None,
             vertices: Vec::new(),
             stats: Stats::default(),
@@ -573,6 +582,7 @@ impl Creature {
         for r in std::mem::take(&mut sim.requests) {
             self.request(r, sim);
         }
+        self.on_save_pad = false;
         match self.mode {
             Mode::Absent => return,
             Mode::Appearing(n) => self.mode = if n <= 1 { Mode::Alive } else { Mode::Appearing(n - 1) },
@@ -580,7 +590,7 @@ impl Creature {
                 if n > 1 {
                     self.mode = Mode::Vanishing(n - 1, then);
                 } else {
-                    self.finish_vanishing(then, sim);
+                    self.finish_vanishing(then, sim, mesh);
                 }
             }
             Mode::Alive => self.live(sim),
@@ -596,6 +606,9 @@ impl Creature {
                 // inferred: a spawn while he is already alive only moves the
                 // respawn point (section 0's arrival pad #83 does that).
                 self.spawn_point = Some((at, heading));
+                // `Game_SpawnCreature` @ 0x41c590 also overwrites the
+                // respawn point, in both of its branches.
+                self.save_point = Some((at, heading));
                 if self.mode == Mode::Absent {
                     self.place(at, heading);
                     self.mode = Mode::Appearing(APPEAR_TICKS);
@@ -613,7 +626,11 @@ impl Creature {
                     }
                 }
             }
-            Request::SavePoint { at } => self.save_point = Some(add(at, scale(UP, 600.0))),
+            Request::Respawn => {
+                if self.mode == Mode::Alive {
+                    self.mode = Mode::Vanishing(VANISH_TICKS, After::Respawn);
+                }
+            }
         }
     }
 
@@ -630,14 +647,17 @@ impl Creature {
     }
 
     /// `Game_OnCreatureRespawn` @ 0x41c700 after the effect has run.
-    /// Not ported: reason 3 also restores the world snapshot taken at the
-    /// last save pad. The brain is never restored: he keeps what he learnt.
-    fn finish_vanishing(&mut self, then: After, sim: &Sim) {
+    /// Reason 3 first restores the world snapshot (level start, last save
+    /// or open), then puts him back on the respawn point and cuts the
+    /// camera. The brain is never restored: he keeps what he learnt.
+    fn finish_vanishing(&mut self, then: After, sim: &mut Sim, mesh: &mut WorldMesh) {
         match then {
             After::Teleport(at, h) => self.place(at, h),
             After::Respawn => {
-                let h = self.heading();
-                let candidates = [self.save_point.map(|p| (p, h)), self.spawn_point, self.safe_point];
+                if sim.restore_snapshot(mesh) {
+                    sim.events.push(sim::HostEvent { kind: sim::EV_CAMERA_SNAP, a: 0, b: 0, c: 0 });
+                }
+                let candidates = [self.save_point, self.spawn_point, self.safe_point];
                 let mut pick = candidates.iter().flatten().find(|&&(p, _)| self.ground_below(sim, p)).copied();
                 pick = pick.or(self.spawn_point);
                 if let Some((at, h)) = pick {
@@ -657,6 +677,7 @@ impl Creature {
         self.apply_motor_outputs();
         self.accumulate_cost();
         self.surface_events();
+        self.on_save_pad = self.surface & SAVE_PAD != 0 || self.touches_save_pad(sim);
         self.sound_cues(sim);
     }
 
@@ -1210,6 +1231,307 @@ fn stance_height(stance: i32) -> i32 {
     41 + stance * 166 / 256
 }
 
+// ——— Saved games (docs/re/saves.md) ——————————————————————————————————————
+
+/// Everything about Mendel a saved game needs besides his brain: the
+/// mover, the agent (actuators, running costs), the respawn points and the
+/// counters. Parsed completely before it is applied, so a damaged file
+/// leaves the running game untouched.
+#[derive(Clone, Debug)]
+pub struct SavedCreature {
+    mode: Mode,
+    pos: V3,
+    fwd: V3,
+    up: V3,
+    ints: [i32; 5], // forward, turn_d, height, hvel, stance_height
+    air: V3,
+    air_ticks: u32,
+    ground: Option<Contact>,
+    surface: u32,
+    delay: u16,
+    left: i32,
+    right: i32,
+    touch: Option<(bool, u8)>,
+    outputs: [i32; 3],
+    act: [[i32; 7]; 3],
+    cost: [i64; 3],
+    count: [i64; 3],
+    fwd_acc: i64,
+    turn_acc: i64,
+    phase: u16,
+    stance: i32,
+    turn: i32,
+    side: bool,
+    points: [Option<(V3, i32)>; 3], // spawn, respawn (save), safe
+    stats: Stats,
+    rng: u32,
+    cue_quiet: [u16; 5],
+}
+
+impl Creature {
+    pub(crate) fn saved(&self) -> SavedCreature {
+        SavedCreature {
+            mode: self.mode,
+            pos: self.pos,
+            fwd: self.fwd,
+            up: self.up,
+            ints: [self.forward, self.turn_d, self.height, self.hvel, self.stance_height],
+            air: self.air,
+            air_ticks: self.air_ticks,
+            ground: self.ground,
+            surface: self.surface,
+            delay: self.delay,
+            left: self.left,
+            right: self.right,
+            touch: self.touch,
+            outputs: self.outputs,
+            act: self.act.clone().map(|a| [a.rate, a.shift as i32, a.pos, a.vel, a.last_dt, a.target, a.value]),
+            cost: self.cost,
+            count: self.count,
+            fwd_acc: self.fwd_acc,
+            turn_acc: self.turn_acc,
+            phase: self.phase,
+            stance: self.stance,
+            turn: self.turn,
+            side: self.side,
+            points: [self.spawn_point, self.save_point, self.safe_point],
+            stats: self.stats,
+            rng: self.rng.0,
+            cue_quiet: self.cue_quiet,
+        }
+    }
+
+    pub(crate) fn apply_saved(&mut self, s: SavedCreature) {
+        self.mode = s.mode;
+        self.pos = s.pos;
+        self.fwd = s.fwd;
+        self.up = s.up;
+        [self.forward, self.turn_d, self.height, self.hvel, self.stance_height] = s.ints;
+        self.air = s.air;
+        self.air_ticks = s.air_ticks;
+        self.ground = s.ground.filter(|g| g.obj < self.polys.len());
+        self.surface = s.surface;
+        self.delay = s.delay;
+        self.left = s.left;
+        self.right = s.right;
+        self.touch = s.touch;
+        self.outputs = s.outputs;
+        self.act = s.act.map(|[rate, shift, pos, vel, last_dt, target, value]| Actuator {
+            rate,
+            shift: shift.clamp(0, 31) as u32,
+            pos,
+            vel,
+            last_dt: if last_dt == 0 { 256 } else { last_dt },
+            target,
+            value,
+        });
+        self.cost = s.cost;
+        self.count = s.count;
+        self.fwd_acc = s.fwd_acc;
+        self.turn_acc = s.turn_acc;
+        self.phase = s.phase;
+        self.stance = s.stance;
+        self.turn = s.turn;
+        self.side = s.side;
+        [self.spawn_point, self.save_point, self.safe_point] = s.points;
+        self.stats = s.stats;
+        self.rng = Lcg(s.rng);
+        self.cue_quiet = s.cue_quiet;
+        self.build_vertices();
+    }
+
+    /// inferred: the exe only learns about save pads through its hull probe
+    /// (mask 0x100, `0x418595`), yet every save-pad polygon on the CD is
+    /// flagged 0x22, never solid. So we also test, both ways, whether his
+    /// hull segments or a vertical segment through his body cross a 0x20
+    /// polygon: "Mendel is walking on it" as the readme says.
+    fn touches_save_pad(&self, sim: &Sim) -> bool {
+        let near = self.gather_masked(sim, self.pos, 1200.0, SAVE_PAD);
+        if near.0.is_empty() {
+            return false;
+        }
+        let feet = self.height as f32 + STEP_DOWN;
+        let mut segments: Vec<(V3, V3)> = HULL[..8].iter().map(|&h| (self.pos, add(self.pos, self.rotate(h)))).collect();
+        segments.push((add(self.pos, scale(self.up, 450.0)), add(self.pos, scale(self.up, -feet))));
+        segments.iter().any(|&(a, b)| {
+            let d = sub(b, a);
+            let len = length(d);
+            let dir = scale(d, 1.0 / len.max(1e-3));
+            near.0.iter().any(|t| ray_tri(a, dir, t).is_some_and(|h| h <= len))
+        })
+    }
+
+    /// Part of `Game_TakeSnapshot` @ 0x41d170: his current spot becomes the
+    /// respawn point (`0x4124a0`/`0x4124f0` read the mover's surface and
+    /// surface-local position; the world is restored to this very instant,
+    /// so the world position is equivalent).
+    pub(crate) fn anchor_respawn(&mut self) {
+        if self.mode == Mode::Alive {
+            self.save_point = Some((self.pos, self.heading()));
+        }
+    }
+}
+
+impl SavedCreature {
+    pub(crate) fn write(&self, w: &mut Writer) {
+        let v3 = |w: &mut Writer, v: V3| v.iter().for_each(|&c| w.f32(c));
+        let (kind, n, after) = match self.mode {
+            Mode::Absent => (0, 0, None),
+            Mode::Appearing(n) => (1, n, None),
+            Mode::Alive => (2, 0, None),
+            Mode::Vanishing(n, a) => (3, n, Some(a)),
+        };
+        w.u8(kind);
+        w.u16(n);
+        match after {
+            Some(After::Teleport(at, h)) => {
+                w.u8(1);
+                v3(w, at);
+                w.i32(h);
+            }
+            _ => {
+                w.u8(0);
+                v3(w, [0.0; 3]);
+                w.i32(0);
+            }
+        }
+        for v in [self.pos, self.fwd, self.up] {
+            v3(w, v);
+        }
+        self.ints.iter().for_each(|&i| w.i32(i));
+        v3(w, self.air);
+        w.u32(self.air_ticks);
+        let g = self.ground;
+        w.u8(g.is_some() as u8);
+        let g = g.unwrap_or(Contact { obj: 0, poly: 0, local: [0.0; 3], fwd: [0.0; 3], up: [0.0; 3] });
+        w.u32(g.obj as u32);
+        w.u32(g.poly as u32);
+        for v in [g.local, g.fwd, g.up] {
+            v3(w, v);
+        }
+        w.u32(self.surface);
+        w.u16(self.delay);
+        w.i32(self.left);
+        w.i32(self.right);
+        let (has, left, n) = self.touch.map_or((0, 0, 0), |(l, n)| (1, l as u8, n));
+        w.u8(has);
+        w.u8(left);
+        w.u8(n);
+        self.outputs.iter().for_each(|&i| w.i32(i));
+        self.act.iter().flatten().for_each(|&i| w.i32(i));
+        self.cost.iter().chain(&self.count).for_each(|&i| w.i64(i));
+        w.i64(self.fwd_acc);
+        w.i64(self.turn_acc);
+        w.u16(self.phase);
+        w.i32(self.stance);
+        w.i32(self.turn);
+        w.u8(self.side as u8);
+        for p in self.points {
+            w.u8(p.is_some() as u8);
+            let (at, h) = p.unwrap_or(([0.0; 3], 0));
+            v3(w, at);
+            w.i32(h);
+        }
+        let s = self.stats;
+        w.u32(s.ticks_alive);
+        w.f32(s.walked);
+        [s.touches_posted, s.deaths, s.teleports, s.evolutions].iter().for_each(|&i| w.u32(i));
+        w.u32(self.rng);
+        self.cue_quiet.iter().for_each(|&q| w.u16(q));
+    }
+
+    pub(crate) fn read(r: &mut Reader) -> Result<Self, &'static str> {
+        fn v3(r: &mut Reader) -> Result<V3, &'static str> {
+            Ok([r.f32()?, r.f32()?, r.f32()?])
+        }
+        let kind = r.u8()?;
+        let n = r.u16()?;
+        let teleport = r.u8()? != 0;
+        let (at, h) = (v3(r)?, r.i32()?);
+        let after = if teleport { After::Teleport(at, h) } else { After::Respawn };
+        let mode = match kind {
+            0 => Mode::Absent,
+            1 => Mode::Appearing(n.max(1)),
+            2 => Mode::Alive,
+            3 => Mode::Vanishing(n.max(1), after),
+            _ => return Err("bad creature mode"),
+        };
+        let (pos, fwd, up) = (v3(r)?, v3(r)?, v3(r)?);
+        let mut ints = [0; 5];
+        for i in &mut ints {
+            *i = r.i32()?;
+        }
+        let air = v3(r)?;
+        let air_ticks = r.u32()?;
+        let grounded = r.u8()? != 0;
+        let contact = Contact { obj: r.u32()? as usize, poly: r.u32()? as usize, local: v3(r)?, fwd: v3(r)?, up: v3(r)? };
+        let surface = r.u32()?;
+        let delay = r.u16()?;
+        let (left, right) = (r.i32()?, r.i32()?);
+        let (has, l, tn) = (r.u8()?, r.u8()?, r.u8()?);
+        let mut outputs = [0; 3];
+        for i in &mut outputs {
+            *i = r.i32()?;
+        }
+        let mut act = [[0; 7]; 3];
+        for i in act.iter_mut().flatten() {
+            *i = r.i32()?;
+        }
+        let (mut cost, mut count) = ([0; 3], [0; 3]);
+        for i in cost.iter_mut().chain(&mut count) {
+            *i = r.i64()?;
+        }
+        let (fwd_acc, turn_acc) = (r.i64()?, r.i64()?);
+        let phase = r.u16()?;
+        let (stance, turn) = (r.i32()?, r.i32()?);
+        let side = r.u8()? != 0;
+        let mut points = [None; 3];
+        for p in &mut points {
+            let has = r.u8()? != 0;
+            let (at, h) = (v3(r)?, r.i32()?);
+            *p = has.then_some((at, h));
+        }
+        let ticks_alive = r.u32()?;
+        let walked = r.f32()?;
+        let (touches_posted, deaths, teleports, evolutions) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+        let stats = Stats { ticks_alive, walked, touches_posted, deaths, teleports, evolutions };
+        let rng = r.u32()?;
+        let mut cue_quiet = [0; 5];
+        for q in &mut cue_quiet {
+            *q = r.u16()?;
+        }
+        Ok(SavedCreature {
+            mode,
+            pos,
+            fwd,
+            up,
+            ints,
+            air,
+            air_ticks,
+            ground: grounded.then_some(contact),
+            surface,
+            delay,
+            left,
+            right,
+            touch: (has != 0).then_some((l != 0, tn)),
+            outputs,
+            act,
+            cost,
+            count,
+            fwd_acc,
+            turn_acc,
+            phase,
+            stance,
+            turn,
+            side,
+            points,
+            stats,
+            rng,
+            cue_quiet,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1349,5 +1671,53 @@ mod tests {
         }
         println!("section 0, 60 s: {world} world sounds, {cues} Mendel cues");
         assert!(world > 0 && cues > 0);
+    }
+
+    /// Save pads: every polygon whose frame has flag 0x20, in section 3
+    /// (12 pads). Dropped onto one, Mendel reports `on_save_pad`, and a ray
+    /// from above picks a 0x20 polygon: the two conditions of the Save
+    /// dialog (click handler 0x41baa3..0x41bb07).
+    #[test]
+    fn standing_on_a_save_pad_when_data_present() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 3);
+        sim.wake_all = true; // every pad pickable, wherever it is
+        sim.step(&mut mesh);
+        let a = Archive::parse(&d).unwrap();
+        let section = a.world(3).unwrap();
+        let mut tried = 0;
+        let mut found = 0;
+        for (i, o) in section.objects.iter().enumerate() {
+            let Object::World(w) = o else { continue };
+            let (Some(m), Some(st)) = (w.mesh.as_ref(), w.appearance.as_ref()) else { continue };
+            for (p, poly) in m.polygons.iter().enumerate() {
+                if sim.frame_flags(i, p) & SAVE_PAD == 0 || poly.len() < 3 || st.is_empty() {
+                    continue;
+                }
+                let (pos, rot) = sim.pose(i);
+                let t = sim::transform(pos, rot);
+                let pts: Vec<V3> = poly.iter().map(|&k| sim::apply(&t, m.vertices[k as usize].map(|c| c as f32))).collect();
+                let c = scale(pts.iter().fold([0.0; 3], |a, &p| add(a, p)), 1.0 / pts.len() as f32);
+                tried += 1;
+                let mendel = sim.creature.as_mut().unwrap();
+                mendel.place(add(c, scale(UP, 400.0)), 0);
+                mendel.mode = Mode::Alive;
+                let mut on = false;
+                for _ in 0..24 {
+                    sim.step(&mut mesh);
+                    on |= sim.creature.as_ref().unwrap().on_save_pad;
+                }
+                // Aim at the panel along its normal, from either side.
+                let n = normalize(cross(sub(pts[1], pts[0]), sub(pts[2], pts[0])));
+                let hit = [1.0, -1.0].iter().find_map(|&s| sim.pick_hit(add(c, scale(n, 3000.0 * s)), scale(n, -s)).filter(|h| h.1 & SAVE_PAD != 0));
+
+                println!("pad #{} poly {p}: flags {:#x} normal {n:?} visible {} on_save_pad {on}, pick {hit:?}, ground {:?}", i + 1, sim.frame_flags(i, p), sim.visible()[i], sim.creature.as_ref().unwrap().ground());
+                if on && hit.is_some_and(|(_, f)| f & SAVE_PAD != 0) {
+                    found += 1;
+                }
+            }
+        }
+        assert!(tried > 0);
+        assert!(found > 0, "Mendel can stand on a save pad and click it");
     }
 }

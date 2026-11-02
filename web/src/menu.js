@@ -96,7 +96,6 @@ export function createMenu(app) {
 
   function show(panel) {
     root.querySelectorAll(".menu__panel").forEach((p) => (p.hidden = p.dataset.panel !== panel));
-    $(".menu__save-hint").hidden = app.engine.canSave();
   }
   function setOpen(v) {
     open = v;
@@ -121,10 +120,14 @@ export function createMenu(app) {
         const b = Object.assign(document.createElement("button"), { textContent: s.name });
         b.append(Object.assign(document.createElement("small"), { textContent: s.date.toLocaleString() }));
         b.onclick = async () => {
-          if (app.engine.loadGame(await readSave(s.name))) {
+          try {
+            app.engine.game.load(await readSave(s.name));
             app.afterLoad();
-            setOpen(false);
+            app.status(`Opened “${s.name}”.`);
+          } catch (err) {
+            app.status(`Could not open “${s.name}”: ${err.message}.`);
           }
+          setOpen(false);
         };
         const li = document.createElement("li");
         li.append(b);
@@ -181,7 +184,7 @@ export function createMenu(app) {
   saveForm.onsubmit = async (e) => {
     e.preventDefault();
     const name = saveForm.name.value.trim().replace(/[\\/:*?"<>|]/g, "_");
-    const bytes = name && app.engine.saveGame();
+    const bytes = name && app.engine.game.save();
     if (bytes) {
       await writeSave(name, bytes);
       app.status(`Saved “${name}”.`);

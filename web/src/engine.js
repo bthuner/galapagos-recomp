@@ -121,6 +121,43 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
       touch: (o, d) => [null, "left", "right"][wasm.creature_touch_ray(o[0], o[1], o[2], d[0], d[1], d[2])],
     },
 
+    // Saved games, the respawn snapshot and the time screen
+    // (crates/engine/src/sim/save.rs, docs/re/saves.md).
+    game: {
+      // Serialises the whole game ("GLPS" v1) and, like the original after
+      // a successful save, makes Mendel's current spot the respawn point.
+      save() {
+        const n = wasm.game_save();
+        return new Uint8Array(wasm.memory.buffer, wasm.game_save_ptr(), n).slice();
+      },
+      // Rebuilds the saved section and restores everything (brain included).
+      // Returns the section index; then re-read worlds.current().
+      load(bytes) {
+        const r = wasm.game_load(...upload(bytes));
+        if (r !== 0) throw new Error(["", "Not a Galapagos save", "Unknown section", "Save does not fit its section"][-r]);
+        return wasm.game_section();
+      },
+      // Read when EV_SECTION arrives, before building the next section.
+      times() {
+        const [levelTicks, totalTicks, levelSeconds, totalSeconds] = new Uint32Array(wasm.memory.buffer, wasm.game_times(), 4);
+        return { levelTicks, totalTicks, levelSeconds, totalSeconds };
+      },
+      onSavePad: () => wasm.game_on_save_pad() === 1,
+      resetProgress: () => wasm.game_reset_progress(),
+      // Which picture and where to draw the times, for level 0..7 (8 = the
+      // end of the game) in a view of w x h pixels; null if too small.
+      timeScreen(level, w, h) {
+        const v = new Int32Array(wasm.memory.buffer, wasm.time_screen_layout(level, w, h), 30).slice();
+        if (v[0] < 0) return null;
+        const glyphs = {};
+        "0123456789:".split("").forEach((ch, k) => (glyphs[ch] = { x: v[8 + 2 * k], w: v[9 + 2 * k] }));
+        return {
+          picture: v[0], width: v[1], height: v[2], visibleHeight: v[3], glyphHeight: v[4],
+          levelX: v[5], y: v[6], totalRight: v[7], glyphs,
+        };
+      },
+    },
+
     // ——— Menus ———
     // File ▸ New with the Preferences age (0..255); then build section 0.
     newGame: (age) => wasm.game_new(age),
@@ -144,19 +181,6 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
     pictureCount: () => wasm.picture_count(),
     // Preferences ▸ Fidelity: 1 = 8-bit 11 kHz … 4 = CD quality.
     setSoundQuality: (q) => wasm.sound_set_quality(q),
-    // Saved games (provided by the save-pad work; absent in older builds).
-    saveGame() {
-      if (!wasm.game_save) return null;
-      const n = wasm.game_save();
-      return new Uint8Array(wasm.memory.buffer, wasm.game_save_ptr(), n).slice();
-    },
-    loadGame(bytes) {
-      if (!wasm.game_load) return false;
-      const ptr = wasm.alloc(bytes.length);
-      new Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
-      return wasm.game_load(ptr, bytes.length) === 0;
-    },
-    canSave: () => !!wasm.game_save,
 
     // Sound `i` of a bank (0 = current world, 1 = Mendel, 2 = predators):
     // { rate, baseNote, samples: Int16Array } copied out of WASM memory, or

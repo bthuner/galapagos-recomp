@@ -240,3 +240,18 @@ kbd { font: 0.7rem ui-monospace, monospace; color: var(--mute); border: 1px soli
   font-weight: 600;
   cursor: pointer;
 }
+
+/* ——— Time screen ——— */
+.time-screen {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 1rem;
+  background: #000;
+  z-index: 11;
+  cursor: pointer;
+}
+.time-screen canvas { width: min(92vw, calc(80vh * 560 / 397)); height: auto; image-rendering: auto; }
+.time-screen p { margin: 0; font-size: 0.75rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--mute); }
