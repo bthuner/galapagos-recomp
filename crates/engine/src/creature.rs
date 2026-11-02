@@ -1519,8 +1519,8 @@ mod tests {
     pub(super) fn world(d: &[u8], s: usize) -> (Sim, WorldMesh) {
         let a = Archive::parse(d).unwrap();
         let section = a.world(s).unwrap();
-        let mesh = WorldMesh::build(&section);
-        let mut sim = Sim::new(&section, &mesh);
+        let mut mesh = WorldMesh::build(&section);
+        let mut sim = Sim::new(&section, &mut mesh);
         let body = CreatureBody::parse(d, a.header.creature as usize).unwrap();
         let brain = Brain::parse(d, a.header.creature_overlays[overlay_for_age(128).unwrap()] as usize).unwrap();
         sim.creature = Some(Creature::new(&section, &mesh, body, brain));
@@ -2053,12 +2053,17 @@ mod walker_tests {
     }
 
     /// Section 2 begins upside down: its `Strt` #194 puts Mendel on a
-    /// polygon facing −z, and the walker stands him on it, his up −z.
+    /// polygon facing −z, and the walker stands him on it, his up −z. No
+    /// "wake every machine" needed: folder #193 (which holds #194) tests
+    /// #178's state on its first tick, and the level load has already
+    /// entered #178's initial state 1 (`World_Read` @ 0x4222d0), so the
+    /// folder stays on and #194 counts its 100 ticks.
     #[test]
     fn section2_starts_on_its_downward_start_polygon() {
         let Some(d) = data() else { return };
         let (mut sim, mut mesh) = world(&d, 2);
-        sim.wake_all = true;
+        assert!(!sim.wake_all);
+        assert_eq!(sim.state_of(178), 1, "#178 entered its initial state at load");
         for _ in 0..30 * sim::TICKS_PER_SECOND {
             sim.step(&mut mesh);
             if sim.creature.as_ref().unwrap().mode != Mode::Absent {
@@ -2088,11 +2093,17 @@ mod walker_tests {
     #[test]
     fn section2_belt_carries_him_at_the_exes_speed() {
         let Some(d) = data() else { return };
-        let (mut sim, mut mesh) = world(&d, 2);
         let belt = 197 - 1;
-        // Before its appearance is applied the scroll record is the zeros
-        // 0x41d9e0 wrote: no flow.
-        assert_eq!(sim.uv_step(belt, 2), (0, 0), "no frame applied yet");
+        {
+            // Before its appearance is applied the scroll record is the
+            // zeros 0x41d9e0 wrote: no flow. (The load pass of 0x4222d0
+            // applies it, so only a section not yet entered shows this.)
+            let a = Archive::parse(&d).unwrap();
+            let section = a.world(2).unwrap();
+            let sim = Sim::build(&section, &WorldMesh::build(&section));
+            assert_eq!(sim.uv_step(belt, 2), (0, 0), "no frame applied yet");
+        }
+        let (mut sim, mut mesh) = world(&d, 2);
         sim.wake_all = true;
         for _ in 0..4 {
             sim.step(&mut mesh);
@@ -2148,8 +2159,8 @@ mod walker_tests {
     }
 
     /// Walking across the seam between two polygons of one floor never
-    /// lets go. Section 0's arrival pad (#82 on #83) is a flat top with two
-    /// sloping ramps; driven straight from the top across a ramp, the
+    /// lets go. Section 0's arrival pad (#83 over #82) is a flat top with
+    /// two sloping ramps; driven straight from the top across a ramp, the
     /// mover goes from polygon to polygon (re-attaching at each seam,
     /// turning across the hinge) and is grounded every tick until he walks
     /// off the ramp's far end.
@@ -2169,7 +2180,13 @@ mod walker_tests {
             let heading = (dir[1].atan2(dir[0]) * 1024.0 / core::f32::consts::TAU).round() as i32;
             let mut w = Mover::default();
             w.place(&c.polys, &mut sim, None, add(top, [0.0, 0.0, 100.0]), heading, 124);
-            assert!(w.grounded && w.on == Some((pad, 2)), "placed over the top, he stands on it: {:?}", w.on);
+            // #83 is the same pad drawn 7 units higher (top = polygon 9,
+            // ramps 3 and 6); its floors are set from the level load on
+            // (0x4222d0 enters its initial state), so it is the one he
+            // stands on.
+            let shell = 83 - 1;
+            assert!(w.grounded && w.on == Some((shell, 9)), "placed over the top, he stands on it: {:?}", w.on);
+            let (ramp, m) = ([3usize, 6][ramp], sim::transform(sim.pose(shell).0, sim.pose(shell).1));
             let mut seq = vec![w.on];
             let mut posted = Vec::new();
             let mut let_go = None;
@@ -2186,12 +2203,12 @@ mod walker_tests {
                 }
             }
             println!("towards ramp {ramp}: polygons {seq:?}, let go {let_go:?}, now at {:?} (walked {} ticks)", w.pos, let_go.map_or(300, |l| l.0));
-            if seq.iter().any(|&o| o == Some((pad, ramp))) {
+            if seq.iter().any(|&o| o == Some((shell, ramp))) {
                 crossed += 1;
                 // If he let go, it was past the ramp's lower end (or off
                 // the side where it meets the ground), never on the seam.
                 if let Some((_, at)) = let_go {
-                    let lp = &c.polys[pad][ramp];
+                    let lp = &c.polys[shell][ramp];
                     let lowest = lp.points.iter().map(|p| sim::apply(&m, *p)[2]).fold(f32::MAX, f32::min);
                     assert!(at[2] < lowest + 200.0, "let go at the ramp's lower end ({lowest}), not on a seam: {at:?}");
                 }
@@ -2307,3 +2324,78 @@ mod walker_tests {
     }
 }
 
+/// The level load (`World_Read` @ 0x4222d0) enters every initial state
+/// before the first tick; without it, folders read their neighbours in
+/// state 0 on tick 0 and some switch whole areas off for good.
+#[cfg(test)]
+mod level_load_tests {
+    use super::tests::{data, world};
+    use super::*;
+    use galapagos_formats::worlds::{Archive, Object};
+
+    /// After `Sim::new`, before any tick: every object is in its initial
+    /// state (or the one its entry actions chain to, 0x42ce70).
+    #[test]
+    fn the_load_enters_every_initial_state() {
+        let Some(d) = data() else { return };
+        let a = Archive::parse(&d).unwrap();
+        for s in 0..a.sections.len() {
+            let section = a.world(s).unwrap();
+            let (sim, _mesh) = world(&d, s);
+            for (i, o) in section.objects.iter().enumerate() {
+                let Object::World(w) = o else { continue };
+                let Some(sm) = w.logic.states.as_ref() else { continue };
+                let init = w.initial_state();
+                let chained = sm.states.get(init as usize).and_then(|st| st.entry.goto_state).map(|g| g as u16);
+                let now = sim.state_of(i as u16 + 1);
+                assert!(now == init || Some(now) == chained, "section {s} #{}: state {now}, initial {init}", i + 1);
+            }
+        }
+    }
+
+    /// Every section that has a `Strt` brings Mendel to life with the
+    /// folders gating as in the original (no "wake every machine").
+    #[test]
+    fn every_start_spawns_mendel_without_waking_all() {
+        let Some(d) = data() else { return };
+        let a = Archive::parse(&d).unwrap();
+        let mut report = Vec::new();
+        for s in 0..a.sections.len() {
+            let section = a.world(s).unwrap();
+            if !section.objects.iter().any(|o| &o.kind() == b"Strt") {
+                continue;
+            }
+            let (mut sim, mut mesh) = world(&d, s);
+            assert!(!sim.wake_all);
+            let mut born = None;
+            for t in 0..60 * sim::TICKS_PER_SECOND {
+                sim.step(&mut mesh);
+                let c = sim.creature.as_ref().unwrap();
+                if c.mode != Mode::Absent {
+                    born = Some((t, c.ground().map(|(o, p)| (o + 1, p))));
+                    break;
+                }
+            }
+            report.push((s, born));
+            // (Where he lands is the walker's business: in section 5 the
+            // pad's spot rests on an `Objt`, in section 6 he drops in.)
+            assert!(born.is_some(), "section {s}: Mendel never spawned");
+        }
+        println!("spawns (section, (tick, on)): {report:?}");
+        assert!(!report.is_empty());
+    }
+
+    /// Section 2 specifically: alive on #194's downward polygon 6 a few
+    /// seconds in (the `Strt` waits 100 ticks, then 11 of rematerialising).
+    #[test]
+    fn section2_spawns_mendel_on_194() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 2);
+        for _ in 0..5 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+        }
+        let c = sim.creature.as_ref().unwrap();
+        assert_eq!(c.mode, Mode::Alive);
+        assert_eq!(c.ground().map(|(o, p)| (o + 1, p)), Some((194, 6)), "standing on the Strt's polygon 6");
+    }
+}

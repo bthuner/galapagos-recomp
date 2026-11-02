@@ -978,8 +978,8 @@ mod tests {
     fn section0(d: &[u8]) -> (Sim, WorldMesh, Camera) {
         let a = Archive::parse(d).unwrap();
         let section = a.world(0).unwrap();
-        let mesh = WorldMesh::build(&section);
-        let mut sim = Sim::new(&section, &mesh);
+        let mut mesh = WorldMesh::build(&section);
+        let mut sim = Sim::new(&section, &mut mesh);
         let body = CreatureBody::parse(d, a.header.creature as usize).unwrap();
         let brain = Brain::parse(d, a.header.creature_overlays[overlay_for_age(128).unwrap()] as usize).unwrap();
         sim.creature = Some(Creature::new(&section, &mesh, body, brain));
@@ -1036,7 +1036,7 @@ mod tests {
         let a = Archive::parse(&d).unwrap();
         let section = a.world(0).unwrap();
         let mut mesh = WorldMesh::build(&section);
-        let mut sim = Sim::new(&section, &mesh);
+        let mut sim = Sim::new(&section, &mut mesh);
         let body = CreatureBody::parse(&d, a.header.creature as usize).unwrap();
         let brain = Brain::parse(&d, a.header.creature_overlays[overlay_for_age(128).unwrap()] as usize).unwrap();
         sim.creature = Some(Creature::new(&section, &mesh, body, brain));

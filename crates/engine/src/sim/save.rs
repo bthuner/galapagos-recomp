@@ -558,8 +558,8 @@ mod tests {
     fn world(d: &[u8], s: usize, mendel: bool) -> (Sim, WorldMesh) {
         let a = Archive::parse(d).unwrap();
         let section = a.world(s).unwrap();
-        let mesh = WorldMesh::build(&section);
-        let mut sim = Sim::new(&section, &mesh);
+        let mut mesh = WorldMesh::build(&section);
+        let mut sim = Sim::new(&section, &mut mesh);
         sim.section = s;
         if mendel {
             let body = CreatureBody::parse(d, a.header.creature as usize).unwrap();

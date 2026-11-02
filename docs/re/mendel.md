@@ -759,6 +759,13 @@ Running Mendel in the live simulation confirmed or corrected:
   until it feels Mendel; the port ignores requests whose destination is
   within 1,500 units (inferred: in the exe a request only becomes a
   teleport through a lethal-surface reaction with reason 1/2).
+* **Every section spawns him unaided** (no "wake every machine"): the
+  level load enters all initial states before the first tick
+  (`World_Read` @ `0x4222d0`, objects.md §2), so section 2's folder #193
+  sees #178 in state 1 and keeps `Strt` #194 awake; he appears on its
+  polygon 6 at tick 100 (tests `every_start_spawns_mendel_without_waking_all`,
+  `section2_spawns_mendel_on_194`). Spawn ticks: sections 0..7 = 333, 12,
+  100, 60, 60, 20, 50, 1067.
 * **Conveyors push hard, faithfully**: section 2's belt #197 sweeps him
   off its side at 139 units/tick within 16 ticks of stepping on it, and he
   falls to his death. Checked against the exe (§2.2 Conveyors): basis,
@@ -784,10 +791,6 @@ Running Mendel in the live simulation confirmed or corrected:
   takes the new list's last frame (looping) to avoid saving the record.
   (The earlier note that `0x41dbc0` lags a frame was wrong: it reads the
   frame record after `0x42e050` advanced it.)
-* Section 2 needs "wake every machine" to spawn Mendel: on tick 0 folder
-  #193 sees #178 still in state 0 (its initial state 1 is only queued) and
-  switches itself off, Strt #194 included. Does the exe's level load run an
-  apply pass first?
 * The `+0x11c..+0x134` filter of the additive pose setter `0x422e80`
   (key components equal to stored values are zeroed): who sets it.
 * `World_Cast`'s camera and predator users: do they reject back faces?

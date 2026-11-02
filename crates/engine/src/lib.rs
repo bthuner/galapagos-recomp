@@ -231,11 +231,11 @@ pub extern "C" fn world_build(i: usize) -> i32 {
 fn build_section(worlds: &mut Worlds, i: usize) -> i32 {
     let Ok(archive) = Archive::parse(&worlds.data) else { return -1 };
     let Ok(section) = archive.world(i) else { return -1 };
-    let mesh = world::WorldMesh::build(&section);
+    let mut mesh = world::WorldMesh::build(&section);
     let n = (mesh.vertices.len() / world::FLOATS_PER_VERTEX) as i32;
     worlds.banks[sound::BANK_WORLD as usize] = sound::Bank::decode(&worlds.data, &section.sounds, worlds.quality);
     worlds.section = i;
-    let mut sim = sim::Sim::new(&section, &mesh);
+    let mut sim = sim::Sim::build(&section, &mesh);
     sim.section = i;
     let old = worlds.sim.take();
     // The `Save` variables and the game clock outlive the section; the
@@ -245,6 +245,10 @@ fn build_section(worlds: &mut Worlds, i: usize) -> i32 {
         sim.total_ticks = o.total_ticks;
         sim.level_start_ticks = o.total_ticks;
     }
+    // The load pass of `World_Read` @ 0x4222d0: every initial state is
+    // entered now, with the variables already in place (they live in the
+    // archive object, which outlives the section: `0x41cc20`).
+    sim.enter_initial_states(&mut mesh);
     // Mendel carries his brain from section to section; the first time,
     // it comes from the CD for the age preference (see `brain_for_age`).
     let carried = old.and_then(|s| s.creature).map(|c| c.brain);
