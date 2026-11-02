@@ -336,6 +336,29 @@ pos = first_stream_with_valid_crc(overlay)
           floors are cruel: each is also a delayed lethal floor, so Mendel spends eighty ticks frantic before he
           dies.
         </p>
+        <h3>Seven ways to leave the world</h3>
+        <p>
+          Until now, when Mendel died or a predator vanished, our port just blinked them. In 1997 these moments
+          belong to a small effects library (<code>0x424520</code>): seven kinds, each with a table of variants,
+          and a level designer picks one per lethal floor, portal or predator. Every effect works the same way. It
+          copies the owner's mesh, one vertex per polygon corner and one material per polygon, animates that
+          copy, and hands the real mesh back when it's done. Played backwards, the same code brings him back.
+        </p>
+        <ul class="strings">
+          <li><b>1 fade</b><span>polygons one by one glow white, dim and vanish (portals, falls). A 1997 bug survives: sorted lists store <code>i+1</code>, so polygon 0 is never picked</span></li>
+          <li><b>2 burst</b><span>pieces fly out at random speeds, tumbling, under a white or pink flash</span></li>
+          <li><b>3 squash</b><span>flattened onto the floor; backwards he springs up or grows from nothing, which is his birth under the beam at 0:15 in the footage</span></li>
+          <li><b>4 jolt</b><span>jitter and flicker, then a burst</span></li>
+          <li><b>5 melt</b><span>a long white glow, then pieces drop and bounce until they settle</span></li>
+          <li><b>6 stretch</b><span>volume-preserving squash and stretch, unused on the CD</span></li>
+          <li><b>7 shatter</b><span>pieces leap up, fall, and land on the floor with a clink each</span></li>
+        </ul>
+        <p>
+          The effect also sets the rhythm of the game around it. Mendel stays "dying" until the effect ends, then
+          respawns and plays it backwards before he walks again: 101 ticks out and 60 back for the common burst.
+          A gate no longer switches levels on touch. The screen bleaches to white, as the footage does at 9:53, and
+          only then does the next section load.
+        </p>
         <h3>Predators are just machines that hunt</h3>
         <p>
           We expected predators to be second creatures with brains of their own. They're ordinary world objects (a mesh,
@@ -796,6 +819,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> Glass: <code>−4</code> frames are additive, untextured panes, and the "colour ramps" are materials. The intro capsule turns into the footage's grey veil when its ride starts.</li>
           <li><time>2026‑11‑02</time> The original lighting: per-polygon levels from materials, Direct3D diffuse plus specular, per-vertex fog (white in World 1), and Brightness as the palette adjustment it really was.</li>
           <li><time>2026‑11‑02</time> Mendel's per-face texture offsets (his glowing head) and front-face culling as the exe does it, glass excepted.</li>
+          <li><time>2026‑11‑02</time> The seven transition effects (fade, burst, squash, jolt, melt, stretch, shatter) replace the blinking, for Mendel and the predators; gates white out before the level changes.</li>
           <li><time>2026‑11‑02</time> The bounce response (<code>0x408c50</code>) ported exactly, for predators and the camera: a perpendicular push only when the probe went behind the wall, plus the stored normal's nudge.</li>
           <li><time>2026‑11‑02</time> Level load enters every initial state before the first tick, as <code>0x4222d0</code> does: World 2 (and World 1) now spawn Mendel without "Wake every machine".</li>
           <li><time>2026‑11‑02</time> Blinking reported again: traced to a browser serving the pre-fix engine from its cache. Checked against the footage; the engine is now always revalidated before use.</li>
