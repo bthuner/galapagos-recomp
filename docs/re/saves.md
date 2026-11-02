@@ -216,20 +216,20 @@ Saving also refreshes the respawn point to Mendel's current spot (the
 (*.mnd)"`) is the brain alone, see `mendel.md` §4.5.
 
 We are **not** binary compatible (the in-memory object layouts would have
-to be mirrored byte for byte). Our own format, `GLPS` version 3 (versions 1 and 2 still open),
+to be mirrored byte for byte). Our own format, `GLPS` version 4 (versions 1 to 3 still open),
 carries the same facts:
 
 ```text
-u8[4] "GLPS"   u32 version = 3
+u8[4] "GLPS"   u32 version = 4
 u32 section    u32 total_ticks   u32 level_start_ticks   u64 sim_tick
 WorldState                          the live world
 u8 has_snapshot, WorldState         the respawn snapshot
 u8 has_creature, u32 brain_len, u8[brain_len] brain (the .mnd bytes),
-                 SavedCreature (432 bytes in v3; 434 in v2, 414 in v1: v2 added the injected flags, fall counter and limit, last ground flags, affliction 6 noise — afflictions themselves are not saved, `Creature_Read` ends them)
+                 SavedCreature (432 bytes since v3; 434 in v2, 414 in v1: v2 added the injected flags, fall counter and limit, last ground flags, affliction 6 noise — afflictions themselves are not saved, `Creature_Read` ends them)
 
 WorldState = u32 rng; u16 picked; u16 next_pick (0 = none);
              i32 vars[10]; u32 object_count; object_count x ObjState;
-             (v2) u32 n; n x { u32 object; u8 class; predator state } (predators.md)
+             (v2) u32 n; n x { u32 object; u8 class; predator state } (predators.md; v4 adds each hunter's heading input and probe angles)
 ObjState   = u16 state; u16 ticks; u32 events; u32 prev_events;
              u8 pending_mask; i16 value per set bit 1..6;
              i32 pos[3]; i32 rot[3];
@@ -380,7 +380,7 @@ the width of every glyph.) That is just under the LEVEL / TOTAL labels.
 |---|---|
 | `EV_SAVE_PAD = 6` (event, `a` = object id) | from `sim_click` when a `0x20` polygon is clicked while Mendel is on a pad: open the Save dialog |
 | `EV_GAME_COMPLETE = 7` (`a` = 8, `b` = 9) | portal kind 5: show picture 9 with the times |
-| `game_save() -> u32` / `game_save_ptr()` | take a snapshot (new respawn point) and serialise `GLPS` v3 |
+| `game_save() -> u32` / `game_save_ptr()` | take a snapshot (new respawn point) and serialise `GLPS` v4 |
 | `game_load(ptr, len) -> i32` | adopt an `alloc`ed buffer, rebuild its section, restore; 0 ok, -1 not a save, -2 bad section, -3 does not fit |
 | `game_section() -> i32`, `world_vertex_count() -> u32` | re-read the buffers after a load |
 | `game_times() -> *const u32` | level ticks, total ticks, level s, total s |

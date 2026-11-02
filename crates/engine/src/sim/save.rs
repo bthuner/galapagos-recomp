@@ -38,7 +38,9 @@ pub const MAGIC: [u8; 4] = *b"GLPS";
 /// keeps it (object, polygon, `(u, v, h)`, heading) and the respawn point
 /// and pending teleport as polygon places. Versions 1 and 2 still open
 /// (fresh predators for 1; the old world-space mover is converted).
-pub const VERSION: u32 = 3;
+/// Version 4 adds each hunter's heading input (`+0x32c`) and probe
+/// angles (`+0xf0`) to its predator record (predator.rs).
+pub const VERSION: u32 = 4;
 
 /// The dynamic part of one object: everything the simulation changes.
 /// The original writes the same facts (`WorldObject` slot 0x4c @ 0x424010:
@@ -204,10 +206,10 @@ impl Sim {
         ]
     }
 
-    /// Serialises the whole game. Format `GLPS` version 3, little-endian:
+    /// Serialises the whole game. Format `GLPS` version 4, little-endian:
     ///
     /// ```text
-    /// u8[4] "GLPS"   u32 version (3; 1 and 2 are still read)
+    /// u8[4] "GLPS"   u32 version (4; 1 to 3 are still read)
     /// u32 section    u32 total_ticks   u32 level_start_ticks   u64 sim_tick
     /// WorldState     the live world
     /// u8 has_snapshot,  WorldState     the respawn snapshot
@@ -434,7 +436,7 @@ fn read_world(r: &mut Reader, version: u32) -> Result<WorldState, &'static str> 
                 _ => return Err("bad predator class"),
             };
             let mut p = Predator::new(obj, class);
-            p.read(r)?;
+            p.read(r, version)?;
             predators.push(p);
         }
     }
