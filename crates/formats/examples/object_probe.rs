@@ -23,14 +23,14 @@ fn main() {
     }
     if let (Some(sh), Some(m)) = (&w.logic.shape, &w.mesh) {
         for (k, st) in sh.states.iter().enumerate() {
-            println!("shape state {k}: rate {}, {} frames", st.rate, st.frames.len());
+            println!("shape state {k}: {} polygons, {} frames", st.polygon_count, st.frames.len());
             for (f, fr) in st.frames.iter().enumerate().step_by((st.frames.len() / 4).max(1)) {
                 // z range of each polygon in this frame, vs the rest mesh
                 let zs: Vec<String> = m.polygons.iter().map(|poly| {
                     let z: Vec<i16> = poly.iter().map(|&i| fr.vertices[i as usize][2]).collect();
                     format!("{}..{}", z.iter().min().unwrap(), z.iter().max().unwrap())
                 }).collect();
-                println!("  frame {f}: polygon z ranges {:?}; mapping[1] {:?}", zs, fr.polygon_mapping.get(1));
+                println!("  frame {f}: polygon z ranges {:?}; texels {:?}", zs, fr.polygon_mapping);
             }
         }
         let zs: Vec<String> = m.polygons.iter().map(|poly| {
@@ -42,6 +42,9 @@ fn main() {
     if let Some(sm) = &w.logic.states {
         for (i, st) in sm.states.iter().enumerate() {
             println!("state {i}: entry {:?}, {} transitions", st.entry, st.transitions.len());
+            for t in &st.transitions {
+                println!("    -> {:?} when {:?}", t.actions, t.groups);
+            }
         }
     }
 }

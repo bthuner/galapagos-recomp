@@ -336,21 +336,26 @@ impl StateMachine {
 }
 
 /// One frame of a vertex morph: a full vertex set for the mesh plus six
-/// floats per polygon (copied to the in-memory polygon at `+0x44`; most
-/// likely the texture-mapping gradients — inferred).
+/// floats per polygon, copied to the in-memory polygon at `+0x44..+0x5b`
+/// (`0x423530`, `0x4236be`): the texels `(u, v)` of its vertices 0, 1, 2,
+/// replacing the defaults (0,127) (0,0) (127,0) of `0x42320d`. Observed:
+/// the Direct3D draw maps the texture by them (docs/re/worlds.md).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShapeFrame {
     pub vertices: Vec<[i16; 3]>,
     pub polygon_mapping: Vec<[f32; 6]>,
 }
 
-/// One morph state: `frames` play in order, the engine blends consecutive
-/// frames with a 1/256 weight (`0x4235d0`).
+/// One morph state: `frames` play in order, one per tick, and **loop**
+/// (`0x42ae50` wraps the frame index to 0). `0x4235d0` can blend the new
+/// frame with the mesh's vertices by a 1/256 weight, but `Game_Tick`
+/// always passes a full tick (0x100), so the frame is used as is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShapeState {
-    /// `u16` stored at `+0xe` of the helper (1..45 on the CD; inferred:
-    /// playback speed or frame duration).
-    pub rate: u16,
+    /// `u16` stored at `+0xe` of the helper: on the CD always the mesh's
+    /// polygon count (checked on every block), not a speed. Frames play
+    /// one per tick (`0x42ae50`).
+    pub polygon_count: u16,
     pub frames: Vec<ShapeFrame>,
 }
 
@@ -360,7 +365,7 @@ pub struct ShapeState {
 ///
 /// ```text
 /// u16 state_count
-/// state_count x { u16 rate; u16 frame_count; u16 key_count;
+/// state_count x { u16 polygon_count; u16 frame_count; u16 key_count;
 ///   key_count x { Frame; u16 m; m x Frame } }          frame_count = total
 /// Frame = u32 nv; nv x i16[3]; u32 np; np x f32[6]
 /// ```
@@ -392,7 +397,7 @@ impl ShapeAnim {
         let n = c.u16()? as usize;
         let mut states = Vec::with_capacity(n);
         for _ in 0..n {
-            let rate = c.u16()?;
+            let polygon_count = c.u16()?;
             let total = c.u16()? as usize;
             let keys = c.u16()?;
             let mut frames = Vec::with_capacity(total.min(4096));
@@ -403,7 +408,7 @@ impl ShapeAnim {
                     frames.push(read_frame(c)?);
                 }
             }
-            states.push(ShapeState { rate, frames });
+            states.push(ShapeState { polygon_count, frames });
         }
         Ok(Self { states })
     }
@@ -817,6 +822,7 @@ mod tests {
                         assert_eq!(f.vertices.len(), mesh.vertices.len());
                         assert_eq!(f.polygon_mapping.len(), mesh.polygons.len());
                     }
+                    assert!(shape.states.iter().all(|s| s.polygon_count as usize == mesh.polygons.len()));
                 }
                 for p in &l.motions {
                     assert_eq!(p.frames().len(), p.frame_count as usize);

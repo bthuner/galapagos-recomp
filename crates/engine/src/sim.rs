@@ -118,6 +118,12 @@ struct Runtime {
     /// Which motion path `motion` expanded (needed to rebuild it from a
     /// snapshot or a saved game).
     motion_path: u16,
+    /// The vertex morph (`ShapeAnim` at `+0xbc`): selected state (`+0xc`),
+    /// frame (`+0x10`), and whether it plays (`WorldObject +0x13c`, set by
+    /// `0x423320` when the state has more than one frame).
+    shape: u16,
+    shape_frame: u16,
+    morphing: bool,
     /// Current appearance state and per-polygon flip-book frame.
     appearance: usize,
     poly_frame: Vec<usize>,
@@ -173,6 +179,8 @@ pub struct Sim {
     pub pole: Option<usize>,
     /// The screen's palette flash (flash.rs).
     pub flash: Flash,
+    /// Objects whose shape frame changed (see [`Sim::take_reshaped`]).
+    reshaped: Vec<usize>,
 }
 
 impl Sim {
@@ -223,6 +231,9 @@ impl Sim {
                     rot: [0; 3],
                     motion: None,
                     motion_path: 0,
+                    shape: 0,
+                    shape_frame: 0,
+                    morphing: false,
                     appearance: 0,
                     poly_frame: Vec::new(),
                     flags,
@@ -259,6 +270,7 @@ impl Sim {
             predators,
             pole,
             flash: Flash::default(),
+            reshaped: Vec::new(),
         }
     }
 
@@ -502,6 +514,9 @@ impl Sim {
             // the reset flag below does.
             self.objs[i].state = s.max(0) as u16;
         }
+        if let Some(n) = a.shape {
+            self.select_shape(i, (n - 1).max(0) as usize, mesh);
+        }
         if let Some(n) = a.appearance {
             self.select_appearance(i, (n - 1).max(0) as usize, mesh);
         }
@@ -539,7 +554,8 @@ impl Sim {
         let fallback = ([(o[0] + off[0]) as f32, (o[1] + off[1]) as f32, (o[2] + off[2]) as f32], None);
         let Some(mesh) = self.objs[i].obj.as_ref().and_then(|w| w.mesh.as_ref()) else { return fallback };
         let Some(pts) = mesh.polygons.get(poly).filter(|p| p.len() >= 3) else { return fallback };
-        let v = |k: usize| mesh.vertices.get(pts[k] as usize).map(|v| v.map(|c| c as f32));
+        let verts = self.vertices_of(i).unwrap_or(&mesh.vertices);
+        let v = |k: usize| verts.get(pts[k] as usize).map(|v| v.map(|c| c as f32));
         let (Some(a), Some(b), Some(c)) = (v(0), v(1), v(2)) else { return fallback };
         let sub = |p: [f32; 3], q: [f32; 3]| [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
         let (e1, e2) = (sub(b, a), sub(c, a));
@@ -665,6 +681,57 @@ impl Sim {
         o.motion_path = n as u16;
     }
 
+    /// Shape action (slot 0x08 `0x423320`): `ShapeAnim_SelectState` @
+    /// 0x42adc0 (state `n`, frame 0; plays if it has more than one frame,
+    /// `+0x13c`), then slot 0x70 `0x423530` puts frame 0 on the mesh.
+    fn select_shape(&mut self, i: usize, n: usize, mesh: &mut WorldMesh) {
+        let o = &mut self.objs[i];
+        let Some(frames) = o.obj.as_ref().and_then(|w| w.logic.shape.as_ref()).and_then(|s| s.states.get(n)).map(|s| s.frames.len()) else {
+            return;
+        };
+        o.shape = n as u16;
+        o.shape_frame = 0;
+        o.morphing = frames > 1;
+        self.put_shape(i, mesh);
+    }
+
+    /// Writes object `i`'s current shape frame into the render buffers
+    /// and tells Mendel his collision polygons of it changed.
+    fn put_shape(&mut self, i: usize, mesh: &mut WorldMesh) {
+        let o = &self.objs[i];
+        let (Some(obj), Some(draw)) = (o.obj.as_ref(), o.draw) else { return };
+        let (Some(m), Some(f)) = (obj.mesh.as_ref(), self.shape_frame_of(i)) else { return };
+        if let Some(r) = mesh.set_shape(draw, &m.polygons, &f.vertices, &f.polygon_mapping) {
+            mark(&mut self.dirty, r.first, r.first + r.count);
+        }
+        if !self.reshaped.contains(&i) {
+            self.reshaped.push(i);
+        }
+    }
+
+    /// The shape frame object `i` is in (`0x423130`: what the mover and
+    /// the world casts read as its polygons), if it has a `ShapeAnim`.
+    pub(crate) fn shape_frame_of(&self, i: usize) -> Option<&galapagos_formats::logic::ShapeFrame> {
+        let o = self.objs.get(i)?;
+        o.obj.as_ref()?.logic.shape.as_ref()?.states.get(o.shape as usize)?.frames.get(o.shape_frame as usize)
+    }
+
+    /// Object `i`'s current local vertices: its shape frame, or the mesh.
+    pub(crate) fn vertices_of(&self, i: usize) -> Option<&[[i16; 3]]> {
+        self.shape_frame_of(i).map(|f| &f.vertices[..]).or_else(|| self.objs.get(i)?.obj.as_ref()?.mesh.as_ref().map(|m| &m.vertices[..]))
+    }
+
+    /// Object `i`'s mesh (polygon index lists), if it has one.
+    pub(crate) fn mesh_of(&self, i: usize) -> Option<&galapagos_formats::worlds::Mesh> {
+        self.objs.get(i)?.obj.as_ref()?.mesh.as_ref()
+    }
+
+    /// Objects whose shape frame changed since the last call (Mendel
+    /// rebuilds his collision polygons of them).
+    pub(crate) fn take_reshaped(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.reshaped)
+    }
+
     fn select_appearance(&mut self, i: usize, n: usize, mesh: &mut WorldMesh) {
         let o = &mut self.objs[i];
         let (Some(obj), Some(draw)) = (o.obj.as_ref(), o.draw) else { return };
@@ -684,6 +751,16 @@ impl Sim {
     }
 
     fn update_animations(&mut self, i: usize, mesh: &mut WorldMesh) {
+        // Vertex morph (`0x423420` step 3 → slot 0x74 `0x4235d0`): the
+        // next frame, wrapping to 0 (`0x42ae50`: a playing state loops
+        // until another shape action). `Game_Tick` passes a full tick
+        // (0x100), so the frame is taken as is, no blend.
+        if self.objs[i].morphing {
+            let n = self.objs[i].obj.as_ref().and_then(|w| w.logic.shape.as_ref()).and_then(|s| s.states.get(self.objs[i].shape as usize)).map_or(1, |s| s.frames.len());
+            let o = &mut self.objs[i];
+            o.shape_frame = if o.shape_frame as usize + 1 >= n { 0 } else { o.shape_frame + 1 };
+            self.put_shape(i, mesh);
+        }
         let o = &mut self.objs[i];
 
         // Motion path: one expanded frame per tick.
@@ -759,6 +836,7 @@ impl Sim {
                 continue;
             }
             let Some(m) = obj.mesh.as_ref() else { continue };
+            let verts = self.vertices_of(i).unwrap_or(&m.vertices);
             let t = transform(o.pos, o.rot);
             for (p, poly) in m.polygons.iter().enumerate() {
                 // The polygon's flag-array entry (`0x408730` → `0x409680`),
@@ -770,7 +848,7 @@ impl Sim {
                 }
                 let pts: Vec<[f32; 3]> = poly
                     .iter()
-                    .filter_map(|&k| m.vertices.get(k as usize))
+                    .filter_map(|&k| verts.get(k as usize))
                     .map(|v| apply(&t, [v[0] as f32, v[1] as f32, v[2] as f32]))
                     .collect();
                 for k in 1..pts.len().saturating_sub(1) {

@@ -91,7 +91,7 @@ state timer; `flag[0]` is always 1 and never read.
 | Slot | Meaning | Handler (WorldObject vtable `0x460ac8`) | Index base |
 |-----:|---------|------------------------------------------|-----------|
 | 0 | **class trigger** with params entry `n` | slot `0x18`, base `0x423400`, overridden per class | 1-based |
-| 1 | shape (vertex morph) state `n` | slot `0x08` `0x423320` → `ShapeAnim_SelectState` @ `0x42adc0` | 1-based |
+| 1 | shape (vertex morph) state `n` | slot `0x08` `0x423320` → `ShapeAnim_SelectState` @ `0x42adc0`, then slot `0x70` `0x423530` (§4) | 1-based |
 | 2 | appearance state `n` | slot `0x0c` `0x423350` → `0x42df50` | 1-based |
 | 3 | play sound emitter `n` | slot `0x10` `0x4233a0` → emitter vtable +4 | 1-based |
 | 4 | start motion path `n` | slot `0x14` `0x4233c0` → `MotionPaths_Select` @ `0x428c90` | 1-based |
@@ -270,8 +270,8 @@ texture scrolling (see `worlds.md`).
 1. if the transform is dirty (`+0xf8`): rebuild the matrix from position
    `+0xe4..+0xec` and rotation `+0xf0..+0xf4` (`0x402370`);
 2. if vertices are dirty (`+0xfa`): slot `0x70`;
-3. if a shape morph is playing (`+0x13c`): step it (slot `0x74` = `0x4235d0`):
-   blend two frames per vertex, `v = a + ((b - a) * w >> 8)`, `w` in 1/256;
+3. if a shape morph is playing (`+0x13c`): step it (slot `0x74` = `0x4235d0`,
+   below): next frame, `w = 0x100` so no blend;
 4. if an appearance animation is playing (`+0x13e`): slot `0x7c`;
 5. if a motion path is playing (`+0x140`): slot `0x84` = `0x423a30`: one
    frame per tick;
@@ -314,20 +314,60 @@ matrix is `Math_RotationMatrix(+0xf2, +0xf0, +0xf4)` @ `0x430ce0`
 keys `x = 0 → -3000 → 3000 → 0` with 30/60/30 steps: a platform that sways
 3,000 units each side over 124 ticks, looping.
 
-### Vertex morphs (`ShapeAnim`) — observed layout, inferred meaning
+### Vertex morphs (`ShapeAnim`) — observed, ported in `sim.rs`
 
 ```text
 u16 state_count
-state_count x { u16 rate; u16 frame_count; u16 key_count;
+state_count x { u16 polygon_count; u16 frame_count; u16 key_count;
   key_count x { Frame; u16 m; m x Frame } }       (frame_count = total frames)
 Frame = u32 nv; nv x i16[3]; u32 np; np x f32[6]
 ```
 
-`nv` and `np` always equal the mesh's vertex and polygon counts (2,521
-frames). The six floats per polygon are copied into the in-memory polygon
-at `+0x44` (`0x4236be`) — most likely the texture-mapping gradients, since
-there are no UVs on disk (inferred). `rate` (1..45) is unknown, probably a
-playback speed.
+`nv` and `np` always equal the mesh's vertex and polygon counts, and the
+`u16` the reader keeps at `+0xe` (once read as a "rate") is the polygon
+count too, on every block of the CD. **Every object with a mesh has one**
+(1,679 of 1,679), and it is not decoration: it is where the world's
+texture coordinates live.
+
+* **Select** (shape action, slot `0x08` `0x423320`): `ShapeAnim_SelectState`
+  `0x42adc0` stores the state (`+0xc`) and frame 0 (`+0x10`) and returns
+  "more than one frame", kept at `WorldObject +0x13c` (playing); then
+  slot `0x70` `0x423530` puts the current frame on the mesh: its vertices
+  become the mesh's (`0x402280`), and its six floats per polygon are
+  copied to the polygon record's `+0x44..+0x5b`: the texels `(u, v)` of
+  vertices 0, 1, 2, replacing the initialiser's (0,127) (0,0) (127,0)
+  (`0x42320d`).
+* **Play** (update step 3, slot `0x74` `0x4235d0(w)`): slot 1 of the
+  helper (`0x42ae50`) advances the frame and **wraps it to 0** (a playing
+  state loops until another shape action); with `w != 0x100` the frame
+  would be blended with the mesh's vertices (`a + (b − a)·w >> 8`, into
+  `+0x154`, `+0xfa` dirty), but `Game_Tick` always passes `0x100`, so
+  the frame is used as is; then vertices and texels as above.
+* **Read by**: the draw (Direct3D re-derives every vertex's `(u, v)` from
+  the three texels when the mesh changes, docs/re/worlds.md), the casts
+  (`0x423130` returns the current frame's vertices to the mover,
+  `0x411c3d`, `0x4125ba`, and the world cast, `0x408822`), and the
+  scrolling-floor basis (`0x41d9e0` calls slot `0x70` right before
+  `0x41d6d0` reads `+0x44`, at build: state 0, frame 0).
+* **Saved** (`0x42b0f0` / `0x42b120`: `+0xc`, `+0x10`); the object's
+  load (`0x423f29`) calls slot `0x70` after reading it.
+
+On the CD **every object's initial state selects a shape** but one
+(section 0's #113, until it enters its state 0: 1,678 of 1,679;
+`examples/shape_probe.rs`), and **no** frame carries the initialiser's
+texels, so the level-load pass (§2) re-maps the whole world's textures
+before the first frame is drawn. 28 objects have real morphs (states of
+more than one frame), e.g.
+section 0's flame curtains #70 around the start disc: state 0 shape 1
+(flat, ±93) and appearance 3 (hidden); when #57 enters state 2 (Mendel is
+born) it waits 60 ticks, starts shape 2 (32 frames, rising) with
+appearance 1 (red, texture 37), and at 90 ticks shape 3 holds it at full
+height (−93..2960) until the capsule #3 enters its state 2, when shapes 4
+and 6 lower it and appearance 3 hides it again.
+
+The port had none of this until `fix/pose-red-panels`: the curtains
+stayed flat (the low red wedges on the pad's sides) and every polygon of
+the world wore one stretched texture copy.
 
 ### Sound emitters — observed layout, inferred meaning
 
