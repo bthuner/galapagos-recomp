@@ -256,6 +256,9 @@ pub struct Creature {
 
     /// The posed mesh in world space, `world::FLOATS_PER_VERTEX` per vertex.
     pub vertices: Vec<f32>,
+    /// The mesh of the tick before, for the renderer's in-between frames
+    /// ([`Creature::vertices_at`]); empty after a cut.
+    prev_vertices: Vec<f32>,
     /// Teaching/debug counters.
     pub stats: Stats,
 
@@ -369,6 +372,7 @@ impl Creature {
             respawn: None,
             on_save_pad: false,
             vertices: Vec::new(),
+            prev_vertices: Vec::new(),
             stats: Stats::default(),
             seen_flags: 0,
             landed: false,
@@ -473,6 +477,7 @@ impl Creature {
         }
         self.sync(sim);
         self.attach_menc(sim, mesh);
+        std::mem::swap(&mut self.prev_vertices, &mut self.vertices);
         self.build_vertices();
     }
 
@@ -1105,6 +1110,33 @@ impl Creature {
     }
 
 
+    /// His mesh a fraction `alpha` of the way from the previous tick's to
+    /// this tick's, positions only (the rest is this tick's).
+    ///
+    /// not in the original (it drew once per tick): the browser draws at
+    /// the display's rate, and the world's objects blend the same way
+    /// ([`Sim::transforms_at`]), so riding a platform he stays on it.
+    /// inferred: a mesh of another size (the transition effect changing
+    /// what is drawn) or a vertex that moved more than 4096 units in one
+    /// tick (a teleport, a respawn) is a cut, drawn as it is now.
+    pub fn vertices_at(&self, alpha: f32, out: &mut Vec<f32>) {
+        out.clear();
+        out.extend_from_slice(&self.vertices);
+        if !(0.0..1.0).contains(&alpha) || self.prev_vertices.len() != self.vertices.len() {
+            return;
+        }
+        let far = |a: &[f32], b: &[f32]| (0..3).any(|k| (a[k] - b[k]).abs() > 4096.0);
+        let (prev, cur) = (self.prev_vertices.chunks_exact(FLOATS_PER_VERTEX), self.vertices.chunks_exact(FLOATS_PER_VERTEX));
+        if prev.clone().zip(cur.clone()).any(|(a, b)| far(a, b)) {
+            return;
+        }
+        for ((o, a), b) in out.chunks_exact_mut(FLOATS_PER_VERTEX).zip(prev).zip(cur) {
+            for k in 0..3 {
+                o[k] = a[k] + (b[k] - a[k]) * alpha;
+            }
+        }
+    }
+
     /// The posed body in world space: shell plus both leg sides, real UVs,
     /// texture layers 16..19, lit like the world's polygons
     /// ([`world::light_level`] of his world-space normals), so the shader
@@ -1329,6 +1361,7 @@ impl Creature {
         self.mover.refresh_angles(&self.polys, sim);
         self.sync(sim);
         self.build_vertices();
+        self.prev_vertices.clear();
     }
 
     /// A version 1–2 mover (world frame + the contact in its object's local
@@ -3030,5 +3063,159 @@ mod shape_tests {
         let c = sim.creature.as_ref().unwrap();
         let top = c.polys[70 - 1].iter().flat_map(|p| p.points.iter()).map(|p| p[2]).fold(f32::MIN, f32::max);
         assert_eq!(top, 2960.0, "his polygons of #70 follow its shape frame");
+    }
+}
+
+#[cfg(test)]
+mod blend_tests {
+    use super::tests::{data, world};
+    use super::*;
+
+    /// A column-major 4×4 (WebGL) applied to a point, and its inverse
+    /// for a rotation plus translation.
+    fn to_world(m: &[f32], p: V3) -> V3 {
+        core::array::from_fn(|r| m[r] * p[0] + m[4 + r] * p[1] + m[8 + r] * p[2] + m[12 + r])
+    }
+    fn to_local(m: &[f32], p: V3) -> V3 {
+        let d = [p[0] - m[12], p[1] - m[13], p[2] - m[14]];
+        core::array::from_fn(|c| m[c * 4] * d[0] + m[c * 4 + 1] * d[1] + m[c * 4 + 2] * d[2])
+    }
+    fn centroid(v: &[f32]) -> V3 {
+        let n = (v.len() / FLOATS_PER_VERTEX) as f32;
+        v.chunks_exact(FLOATS_PER_VERTEX).fold([0.0; 3], |a, x| [a[0] + x[0] / n, a[1] + x[1] / n, a[2] + x[2] / n])
+    }
+
+    /// The intro's capsule #3 carries Mendel through the sky. Drawn
+    /// between ticks (not in the original), the capsule glides: its
+    /// in-between frames lie on the way from one tick's pose to the next;
+    /// and Mendel, blended with the same `alpha`, stays where he stands
+    /// in the capsule's frame (within a unit or two).
+    #[test]
+    fn the_capsule_glides_between_ticks_and_mendel_rides_it() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 0);
+        let capsule = 3 - 1;
+        let draw = mesh.draw_of_object[capsule].unwrap();
+        let mut on = false;
+        for _ in 0..60 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            let c = sim.creature.as_ref().unwrap();
+            if c.mode == Mode::Alive && c.ground().is_some_and(|g| g.0 == capsule) {
+                on = true;
+                break;
+            }
+        }
+        assert!(on, "the capsule picks him up");
+        // Let the ride get going.
+        for _ in 0..10 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+        }
+        let (mut out, mut verts) = (Vec::new(), Vec::new());
+        let mut worst: f32 = 0.0;
+        let mut moved: f32 = 0.0;
+        let mut track = Vec::new();
+        for _ in 0..48 {
+            let m0 = mesh.transforms[draw * 16..draw * 16 + 16].to_vec();
+            let v0 = sim.creature.as_ref().unwrap().vertices.clone();
+            sim.step(&mut mesh);
+            let c = sim.creature.as_ref().unwrap();
+            if c.ground().map(|g| g.0) != Some(capsule) || v0.len() != c.vertices.len() {
+                continue;
+            }
+            let m1 = mesh.transforms[draw * 16..draw * 16 + 16].to_vec();
+            moved = moved.max(length(sub([m1[12], m1[13], m1[14]], [m0[12], m0[13], m0[14]])));
+            // Where he is in the capsule's frame, at both ticks…
+            let l0 = to_local(&m0, centroid(&v0));
+            let l1 = to_local(&m1, centroid(&c.vertices));
+            for a in [0.25f32, 0.5, 0.75] {
+                sim.transforms_at(a, &mesh, &mut out);
+                c.vertices_at(a, &mut verts);
+                let m = &out[draw * 16..draw * 16 + 16];
+                let want: V3 = core::array::from_fn(|k| m0[12 + k] + (m1[12 + k] - m0[12 + k]) * a);
+                // The capsule's origin is on its way (rotation blended
+                // through its angles, translation linearly).
+                assert!(length(sub([m[12], m[13], m[14]], want)) < 1.0, "capsule origin at {a}");
+                // …and in between: he has not slid on its floor.
+                let l = to_local(m, centroid(&verts));
+                let lerp: V3 = core::array::from_fn(|k| l0[k] + (l1[k] - l0[k]) * a);
+                worst = worst.max(length(sub(l, lerp)));
+                track.push((a, to_world(m, [0.0; 3]).map(|v| v as i32)));
+            }
+        }
+        println!("capsule: up to {moved:.0} units a tick; Mendel off his spot in its frame by at most {worst:.2}");
+        println!("capsule origin at quarter ticks: {:?}", &track[..12]);
+        assert!(moved > 20.0, "the capsule moves ({moved})");
+        assert!(worst < 3.0, "he stays glued to the capsule between ticks ({worst})");
+    }
+
+    /// A cut (a path restarting elsewhere, a predator parked at 100000, a
+    /// teleport) is drawn as it is, never blended across.
+    #[test]
+    fn cuts_are_not_blended() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 0);
+        sim.step(&mut mesh);
+        let i = 6 - 1; // #6 sways on its path
+        let draw = mesh.draw_of_object[i].unwrap();
+        let (pos, rot) = sim.pose(i);
+        sim.set_pose(i, [pos[0] + 50_000, pos[1], pos[2]], rot, &mut mesh);
+        let mut out = Vec::new();
+        sim.transforms_at(0.5, &mesh, &mut out);
+        assert_eq!(&out[draw * 16..draw * 16 + 16], &mesh.transforms[draw * 16..draw * 16 + 16]);
+        // After a cut (`cut_motion`, e.g. a snapshot coming back) nothing blends.
+        sim.cut_motion();
+        sim.transforms_at(0.5, &mesh, &mut out);
+        assert_eq!(out, mesh.transforms);
+    }
+}
+
+#[cfg(test)]
+mod click_tests {
+    use super::tests::{data, world};
+    use super::*;
+
+    /// A click lasts one tick (`ObjectRegistry_TickAll` @ 0x4284f0 clears
+    /// the picked object after the update pass): section 0's lift #159
+    /// (state 0 → 1 on `Event(1) ∧ Clicked`, a 156-tick ride) carries
+    /// Mendel up exactly once per click, and never starts without one.
+    #[test]
+    fn one_click_one_ride() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 0);
+        sim.wake_all = true; // folder #145 sleeps until Mendel is near
+        let lift = 159 - 1;
+        for _ in 0..4 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+        }
+        // Drop him onto the lift's floor and let him land.
+        let c = sim.creature.as_ref().unwrap();
+        let m = sim::transform(sim.pose(lift).0, sim.pose(lift).1);
+        let p = (0..c.polys[lift].len()).find(|&k| sim.frame_flags(lift, k) & FLOOR != 0 && c.polys[lift][k].normal[2] > 0.7).expect("a floor");
+        let at = add(sim::apply(&m, c.polys[lift][p].centre), [0.0, 0.0, 300.0]);
+        let c = sim.creature.as_mut().unwrap();
+        c.drop_at(at, 0);
+        c.mode = Mode::Alive;
+        for _ in 0..2 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+        }
+        assert_eq!(sim.creature.as_ref().unwrap().ground().map(|g| g.0), Some(lift), "standing on the lift");
+        assert_eq!(sim.state_of(159), 0);
+        // Without a click, nothing moves while he stands there.
+        for _ in 0..2 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            assert_eq!(sim.state_of(159), 0, "no ride without a click");
+        }
+        // One click while he touches it: one ride.
+        assert_eq!(sim.creature.as_ref().unwrap().ground().map(|g| g.0), Some(lift), "still on the lift");
+        sim.click(159);
+        let mut rides = 0;
+        let mut was = 0;
+        for _ in 0..30 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            let s = sim.state_of(159);
+            rides += (was == 0 && s == 1) as u32;
+            was = s;
+        }
+        assert_eq!(rides, 1, "exactly one ride per click");
     }
 }

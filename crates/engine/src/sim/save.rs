@@ -188,6 +188,8 @@ impl Sim {
         self.picked = w.picked;
         self.next_pick = w.next_pick;
         self.requests.clear();
+        // The renderer must not blend from the abandoned timeline.
+        self.cut_motion();
         true
     }
 

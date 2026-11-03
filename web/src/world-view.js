@@ -302,7 +302,11 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       gl.bufferSubData(gl.ARRAY_BUFFER, a * STRIDE * 4, current.liveVertices().subarray(a * STRIDE, b * STRIDE));
     }
     const { draws } = current;
-    const transforms = current.transforms();
+    // The objects and Mendel blend between the last two ticks with the
+    // camera's `alpha`, so a platform glides at the display's rate and he
+    // stays glued to it (not in the original: it drew once per tick).
+    const blend = Math.max(0, Math.min(alpha, 0.9999));
+    const transforms = current.transforms(blend);
     const visible = current.visible?.();
     const cull = current.cull?.();
     // Faces (world.rs `culls_glass`): a polygon is seen from the side its
@@ -330,7 +334,7 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     // Mendel: a few hundred triangles, re-uploaded every frame. His body
     // is a mesh like any other (backface flag on, 0x402150), so he is
     // culled the same way.
-    const mendel = current.creatureVertices?.();
+    const mendel = current.creatureVertices?.(blend);
     if (mendel && mendel.length) {
       gl.bindVertexArray(mvao);
       gl.bindBuffer(gl.ARRAY_BUFFER, mvbo);

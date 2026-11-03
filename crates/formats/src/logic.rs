@@ -507,22 +507,106 @@ impl MotionPath {
     }
 
     /// Expands the keys to one `(position, rotation)` per tick, like the
-    /// loader does (integer division truncating toward zero, as in C).
+    /// loader `MotionPaths_Read` @ 0x428cf0 does: every key lands on its
+    /// own frame and `MotionKey_Lerp` @ 0x428a90 fills the frames between
+    /// (integer division truncating toward zero, as in C).
+    ///
+    /// Then, for a path of **more than two keys** whose mode is not 0
+    /// (additive paths are nudges, left alone; 0x429010..0x42901f), the
+    /// loader rounds the corners off (0x429025..0x4291af): it runs every
+    /// frame up to the second-to-last key through a [`Smoother`] per axis
+    /// (`0xeb85` ≈ 0.92 for positions, `0xf0a3` ≈ 0.94 for rotations,
+    /// both reset first), then re-lerps the last stretch from that
+    /// smoothed key frame towards the exact last key. Without it a
+    /// platform changes speed abruptly at every key: the "jumping"
+    /// platforms of the port before this was understood.
     pub fn frames(&self) -> Vec<([i32; 3], [i32; 3])> {
         let mut out = Vec::with_capacity(self.frame_count as usize);
         for (i, a) in self.keys.iter().enumerate() {
             out.push((a.position, a.rotation));
             let Some(b) = self.keys.get(i + 1) else { break };
-            let d = a.steps + 1;
-            for s in 1..=a.steps {
-                let l = |x: i32, y: i32| x + (y - x) * s / d;
-                out.push((
-                    [l(a.position[0], b.position[0]), l(a.position[1], b.position[1]), l(a.position[2], b.position[2])],
-                    [l(a.rotation[0], b.rotation[0]), l(a.rotation[1], b.rotation[1]), l(a.rotation[2], b.rotation[2])],
-                ));
+            out.extend((1..=a.steps).map(|s| lerp(out_key(a), out_key(b), s, a.steps)));
+        }
+        let n = self.keys.len();
+        if n > 2 && self.relative != 0 {
+            // The frame of the second-to-last key (`[esp+0x18]` after the
+            // read loop) and of the last one (`[esp+0x28]`).
+            let from: usize = self.keys[..n - 2].iter().map(|k| (k.steps + 1).max(0) as usize).sum();
+            let to = from + (self.keys[n - 2].steps + 1).max(0) as usize;
+            if to < out.len() {
+                let mut pos = [Smoother::new(0xeb85), Smoother::new(0xeb85), Smoother::new(0xeb85)];
+                let mut rot = [Smoother::new(0xf0a3), Smoother::new(0xf0a3), Smoother::new(0xf0a3)];
+                for f in &mut out[..=from] {
+                    for k in 0..3 {
+                        f.0[k] = pos[k].step(f.0[k]);
+                        f.1[k] = rot[k].step(f.1[k]);
+                    }
+                }
+                // 0x429142..0x4291ad: `i = 1 .. steps - 1` (`jl`), so the
+                // frame just before the last key keeps its first lerp.
+                let steps = self.keys[n - 2].steps;
+                for i in 1..steps {
+                    out[from + i as usize] = lerp(out[from], out[to], i, steps);
+                }
             }
         }
         out
+    }
+}
+
+fn out_key(k: &MotionKey) -> ([i32; 3], [i32; 3]) {
+    (k.position, k.rotation)
+}
+
+/// `MotionKey_Lerp` @ 0x428a90: frame `i` of `steps` in-betweens from `a`
+/// towards `b`, `a + (b − a)·i / (steps + 1)` per component (32-bit
+/// `imul`, `idiv` truncating toward zero).
+fn lerp(a: ([i32; 3], [i32; 3]), b: ([i32; 3], [i32; 3]), i: i32, steps: i32) -> ([i32; 3], [i32; 3]) {
+    let d = steps + 1;
+    let l = |x: i32, y: i32| (y.wrapping_sub(x)).wrapping_mul(i) / d + x;
+    (
+        [l(a.0[0], b.0[0]), l(a.0[1], b.0[1]), l(a.0[2], b.0[2])],
+        [l(a.1[0], b.1[0]), l(a.1[1], b.1[1]), l(a.1[2], b.1[2])],
+    )
+}
+
+/// The loader's path smoother (ctor `0x406aa0`, reset `0x406af0`, step
+/// `0x406b90`; three per vector, `0x401140` / `0x401300`): a critically
+/// damped alpha-beta tracker in 16.16 fixed point. For a factor `a`, the
+/// position gain is `g = 1 − a²` and the velocity gain `h = (1 − a)²`;
+/// each step predicts `x + v`, then pulls position and velocity towards
+/// the input by the error. The first input passes through as is.
+/// Observed in the listing (32-bit `imul` / `sar`, reproduced with
+/// wrapping arithmetic).
+#[derive(Debug, Clone, Copy)]
+pub struct Smoother {
+    g: i32,
+    h: i32,
+    /// Velocity, 16.16 (`+0x14`).
+    v: i32,
+    /// Position (`+0x18`).
+    x: i32,
+    started: bool,
+}
+
+impl Smoother {
+    pub fn new(a: u32) -> Self {
+        let g = 0x10000 - (a.wrapping_mul(a) >> 16) as i32;
+        let h = ((0x10000 - a as i32).wrapping_mul(0x10000 - a as i32)) >> 16;
+        Self { g, h, v: 0, x: 0, started: false }
+    }
+
+    pub fn step(&mut self, input: i32) -> i32 {
+        if !self.started {
+            self.started = true;
+            self.x = input;
+            return input;
+        }
+        let pred = (self.v >> 16).wrapping_add(self.x);
+        let err = input.wrapping_sub(pred);
+        self.x = (self.g.wrapping_mul(err) >> 16).wrapping_add(pred);
+        self.v = self.h.wrapping_mul(err).wrapping_add(self.v);
+        self.x
     }
 }
 
@@ -777,6 +861,85 @@ mod tests {
         let f = p.frames();
         assert_eq!(f.len(), 5);
         assert_eq!(f[2].0[0], -2000);
+    }
+
+    /// The loader's smoother (0x406aa0 / 0x406b90): gains from the factor,
+    /// and a step input settles without overshooting much.
+    #[test]
+    fn smoother_follows_0x406b90() {
+        let s = Smoother::new(0xeb85);
+        assert_eq!((s.g, s.h), (10067, 419));
+        let s = Smoother::new(0xf0a3);
+        assert_eq!((s.g, s.h), (7630, 236));
+        let mut s = Smoother::new(0xeb85);
+        assert_eq!(s.step(100), 100, "the first input passes through");
+        let out: Vec<i32> = (0..200).map(|_| s.step(10_100)).collect();
+        assert!(out.windows(2).take(20).all(|w| w[1] > w[0]), "it eases in: {:?}", &out[..20]);
+        assert!((out[199] - 10_100).abs() <= 20, "and settles: {}", out[199]);
+    }
+
+    /// A path of more than two keys (mode != 0) has its corners rounded:
+    /// the speed changes gradually around the middle key, the path still
+    /// starts on the first key and ends exactly on the last one.
+    #[test]
+    fn three_key_paths_are_smoothed_like_the_loader() {
+        let k = |x, s| MotionKey { position: [x, 0, 0], rotation: [0; 3], steps: s };
+        // Section 0's #6: 0 → −3000 → 3000 → 0 with 30/60/30 steps.
+        let p = MotionPath { looping: 1, relative: 1, frame_count: 124, keys: vec![k(0, 30), k(-3000, 60), k(3000, 30), k(0, 0)] };
+        let f = p.frames();
+        assert_eq!(f.len(), 124);
+        assert_eq!(f[0].0[0], 0);
+        assert_eq!(f[123].0[0], 0, "ends on the last key");
+        let v: Vec<i32> = f.windows(2).map(|w| w[1].0[0] - w[0].0[0]).collect();
+        // Up to the second-to-last key (frame 92) the corners are rounded:
+        // unsmoothed, the speed flips from −97 to +98 units/tick at the
+        // −3000 key; smoothed it changes by at most ~30 units a tick.
+        let jerk = v[..92].windows(2).map(|w| (w[1] - w[0]).abs()).max().unwrap();
+        assert!(jerk <= 32, "largest change of speed {jerk}: {v:?}");
+        // The last stretch is re-lerped from the smoothed key frame to the
+        // exact last key, so the last corner keeps its kink, as in the exe.
+        assert!(v[92] < -90 && v[91] > 90, "{:?}", &v[88..96]);
+        // Additive (mode 0) and two-key paths are left as lerped.
+        let q = MotionPath { relative: 0, ..p.clone() };
+        assert_eq!(q.frames()[31].0[0], -3000);
+        let r = MotionPath { looping: 0, relative: 1, frame_count: 32, keys: vec![k(0, 30), k(-3000, 0)] };
+        assert_eq!(r.frames()[15].0[0], -1451);
+    }
+
+    /// On the CD: how many paths the loader smooths, and what it does to
+    /// the intro's capsule (section 0, #3): the largest change of speed
+    /// from one tick to the next, raw lerp vs smoothed.
+    #[test]
+    fn smoothed_paths_on_the_cd() {
+        let Some(d) = data() else { return };
+        let a = Archive::parse(&d).unwrap();
+        let jerk = |f: &[([i32; 3], [i32; 3])]| {
+            let v: Vec<[i32; 3]> = f.windows(2).map(|w| core::array::from_fn(|k| w[1].0[k] - w[0].0[k])).collect();
+            v.windows(2).map(|w| (0..3).map(|k| (w[1][k] - w[0][k]).abs()).max().unwrap()).max().unwrap_or(0)
+        };
+        let mut smoothed = 0;
+        let mut total = 0;
+        for i in 0..a.sections.len() {
+            for o in &a.world(i).unwrap().objects {
+                let Object::World(o) = o else { continue };
+                for p in &o.logic.motions {
+                    total += 1;
+                    smoothed += (p.keys.len() > 2 && p.relative != 0) as u32;
+                }
+            }
+        }
+        let s0 = a.world(0).unwrap();
+        let Object::World(capsule) = &s0.objects[3 - 1] else { panic!() };
+        let p = capsule.logic.motions.iter().max_by_key(|p| p.frame_count).unwrap();
+        let raw = MotionPath { relative: 0, ..p.clone() }.frames();
+        let smooth = p.frames();
+        // Up to the second-to-last key, where the smoothing stops.
+        let from: usize = p.keys[..p.keys.len() - 2].iter().map(|k| (k.steps + 1) as usize).sum();
+        let (jr, js) = (jerk(&raw[..=from]), jerk(&smooth[..=from]));
+        println!("{smoothed} of {total} paths smoothed; capsule ({} frames, {} keys): largest speed change {jr} → {js} units/tick", p.frame_count, p.keys.len());
+        assert!(smoothed > 100);
+        assert!(js * 4 < jr, "the capsule's corners are rounded off");
+        assert_eq!(smooth.last(), raw.last(), "it still ends on its last key");
     }
 
     #[test]
