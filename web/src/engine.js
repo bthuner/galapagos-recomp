@@ -115,6 +115,12 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
       // numbers, lo/hi for red, green, blue; each channel c (0..255) is
       // drawn as lo + c * (hi - lo) / 256. [0,255,0,255,0,255] = no flash.
       tint: () => [...new Int32Array(wasm.memory.buffer, wasm.sim_tint_ptr(), 6)],
+      // The picture over the 3-D view (`Over` class: world 0's title) for
+      // a view of w×h original pixels, or null.
+      overlay(w, h) {
+        const [picture, width, height, x, y, centred] = new Int32Array(wasm.memory.buffer, wasm.sim_overlay(w, h), 6);
+        return picture < 0 ? null : { picture, width, height, x, y, centred: centred !== 0 };
+      },
       // The predators of the section (crates/engine/src/predator.rs).
       predators() {
         const out = [];

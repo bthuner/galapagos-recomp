@@ -683,6 +683,17 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           World 2 after four, upside down on his start pad. What happens next is the original's doing: he walks onto
           the fast belt and it throws him off, again and again, until the player stops it.
         </p>
+        <h3>The title is an object too</h3>
+        <p>
+          A player missed the huge chrome GALAPAGOS that greets you in World 0. We had assumed a title belongs to
+          the game shell, drawn after the intro movie. It doesn't: it's world object #59, the only one of class
+          <code>Over</code> on the CD, a little state machine like the others. It waits 40 ticks, then fires an
+          "overlay" entry: picture 0, centred, with the white flash. 150 ticks later a second entry takes it down.
+          The renderer blits it as a DirectDraw surface whose transparent colour is its own top-left pixel, and it
+          appears and disappears in a single frame, with no fade. The footage agrees to the frame: up at 1.7 s
+          under the flash, down at 8.0 s. We draw it on a 2-D canvas over the 3-D view, at the size the original
+          picks for the current view.
+        </p>
         <h3>Sound: four copies of everything</h3>
         <p>
           Every sample is stored four times in the archive: 8-bit at 11 kHz, then 16-bit at 11, 22 and 44 kHz, one
@@ -958,6 +969,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑03</time> Correction: the objects' shape morphs were never ported. They carry each polygon's texture coordinates, so the whole world was mis-textured, and they raise the start room's flame curtains. With them, the intro matches the footage. The "different build" verdict of the day before is withdrawn.</li>
           <li><time>2026‑11‑03</time> Concave polygons ear-clipped as <code>0x40be00</code> does: the save pads' rims no longer cover their shimmering pools, and 816 polygons across the CD regain their holes.</li>
           <li><time>2026‑11‑03</time> Collisions cast against the real outlines too: doorways and windows open, Mendel walks between rooms, and the intro capsule flies through the hall's opening.</li>
+          <li><time>2026‑11‑03</time> World 0's GALAPAGOS title, which turned out to be an <code>Over</code> world object: up after 40 ticks under a white flash, down 150 ticks later.</li>
           <li><time>2026‑11‑03</time> The original camera is on by default from the moment a section loads, as in 1997, instead of waiting for Mendel to appear.</li>
           <li><time>2026‑11‑02</time> <code>PMan</code>, the unused fourth predator, ported and tested on a re-classed fork; the shared chase now holds its heading between re-aims, and predators face their prey.</li>
           <li><time>2026‑11‑02</time> The bounce response (<code>0x408c50</code>) ported exactly, for predators and the camera: a perpendicular push only when the probe went behind the wall, plus the stored normal's nudge.</li>

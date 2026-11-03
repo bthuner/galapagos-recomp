@@ -100,8 +100,15 @@ read the current section (`u16`) plus a 40-byte array (`+0x13c`).
 On a 16-bit display each index goes through the palette into the surface's
 pixel format (`0x40aa20`); in 8-bit mode the bytes are copied directly. Sizes on
 the CD: 560x421 (full-screen panels such as the "LEVEL / TOTAL" score screen),
-288x211 and 144x108 (save-slot thumbnails at two sizes), 504x30, 256x15,
+288x211 and 144x108 (the same panels at two smaller sizes), 504x30, 256x15,
 248x15, 128x8 (bars and strips).
+
+Pictures 0 / 10 / 20 (8-bit) and 30 / 33 / 36 (16-bit) are the chrome
+**GALAPAGOS title strip** at three sizes, on a flat violet background.
+The game shows it over the 3-D view at the start of world 0 through the
+`Over` object class (objects.md, "The title overlay"): the picture's
+top-left pixel is its colour key, so only the letters are drawn. The
+pause menu of the port reuses picture 0 as its title.
 
 ## 3. Font — observed
 

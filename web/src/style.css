@@ -156,6 +156,9 @@ body::before {
 .stage__bar { display: flex; gap: 2rem; font-size: 0.85rem; }
 .world { width: calc(var(--view-size, 1) * min(94vw, calc(78vh * 16 / 9))); aspect-ratio: 16 / 9; display: block; cursor: grab; touch-action: none; }
 .world:active { cursor: grabbing; }
+/* The title over the world (title.js places and sizes it, in CSS pixels). */
+.world-frame { position: relative; }
+.title-overlay { position: absolute; pointer-events: none; }
 .sections { display: flex; gap: 0.4rem; flex-wrap: wrap; justify-content: center; }
 .sections button, .jukebox button { transition: background 0.2s, color 0.2s; }
 .sections button {
