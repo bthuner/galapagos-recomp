@@ -63,8 +63,13 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
             draws: new Uint32Array(mem, wasm.world_draws_ptr(), wasm.world_draw_count() * 2).slice(),
             // Transforms change as the simulation runs, so this is a getter
             // returning a fresh view each frame (memory may have grown).
-            transforms: () =>
-              new Float32Array(wasm.memory.buffer, wasm.world_transforms_ptr(), wasm.world_draw_count() * 16),
+            // With `alpha` (0..1), the in-between frame from the previous
+            // tick to the current one (not in the original, which drew
+            // once per tick: Sim::transforms_at in crates/engine/src/sim.rs).
+            transforms: (alpha) => {
+              const p = alpha === undefined ? 0 : wasm.world_transforms_at(alpha);
+              return new Float32Array(wasm.memory.buffer, p || wasm.world_transforms_ptr(), wasm.world_draw_count() * 16);
+            },
             liveVertices: () => new Float32Array(wasm.memory.buffer, wasm.world_vertices_ptr(), verts * 10),
             // Objects hidden by a -5 appearance frame (fresh view each frame).
             visible: () => new Uint8Array(wasm.memory.buffer, wasm.world_visible_ptr(), wasm.world_draw_count()),
@@ -149,7 +154,12 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
     creature: {
       // A fresh view each call: memory may have grown, and the vertex
       // count changes (0 while he is absent or blinking).
-      vertices: () => new Float32Array(wasm.memory.buffer, wasm.creature_vertices_ptr(), wasm.creature_vertex_count() * 10),
+      // With `alpha` (0..1): blended from the previous tick's mesh, like
+      // the objects' transforms (Creature::vertices_at).
+      vertices: (alpha) => {
+        const p = alpha === undefined ? wasm.creature_vertices_ptr() : wasm.creature_vertices_at(alpha);
+        return new Float32Array(wasm.memory.buffer, p, wasm.creature_vertex_count() * 10);
+      },
       state() {
         const s = new Float32Array(wasm.memory.buffer, wasm.creature_state(), 16);
         return {

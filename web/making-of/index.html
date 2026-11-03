@@ -694,6 +694,15 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           under the flash, down at 8.0 s. We draw it on a 2-D canvas over the 3-D view, at the size the original
           picks for the current view.
         </p>
+        <h3>Why the platforms stuttered</h3>
+        <p>
+          The player put it well: Mendel's animation was almost perfect, while every platform seemed to "jump".
+          Two causes, one of them ours to fix and one of them nobody's fault.
+        </p>
+        <ul class="strings">
+          <li><b>A smoother we never ran</b><span>the motion-path loader (<code>0x428cf0</code>) quietly post-processes paths with more than two keys: every frame runs through a critically damped alpha-beta tracker in 16.16 fixed point (<code>0x406b90</code>), then the last stretch is re-interpolated onto the exact final key. Our notes had called it an "unknown post-process". 108 of the CD's 1,516 paths need it; on the intro capsule the worst tick-to-tick change in speed drops from 536 units to 81</span></li>
+          <li><b>24 ticks on a 60 Hz screen</b><span>in 1997 the game drew once per tick, so a platform moved in even steps. A browser draws two or three frames per tick, and an object that only moves on some of them judders. Like the camera before it, objects and Mendel are now drawn blended between the last two ticks, in step, so he stays glued to whatever he rides. Teleports and other cuts are drawn as they are, never blended. This one is not in the original; it's what the original looked like at its own frame rate</span></li>
+        </ul>
         <h3>Sound: four copies of everything</h3>
         <p>
           Every sample is stored four times in the archive: 8-bit at 11 kHz, then 16-bit at 11, 22 and 44 kHz, one
@@ -969,6 +978,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑03</time> Correction: the objects' shape morphs were never ported. They carry each polygon's texture coordinates, so the whole world was mis-textured, and they raise the start room's flame curtains. With them, the intro matches the footage. The "different build" verdict of the day before is withdrawn.</li>
           <li><time>2026‑11‑03</time> Concave polygons ear-clipped as <code>0x40be00</code> does: the save pads' rims no longer cover their shimmering pools, and 816 polygons across the CD regain their holes.</li>
           <li><time>2026‑11‑03</time> Collisions cast against the real outlines too: doorways and windows open, Mendel walks between rooms, and the intro capsule flies through the hall's opening.</li>
+          <li><time>2026‑11‑03</time> Platforms glide: the motion-path loader's smoother (<code>0x428cf0</code>), and objects drawn between ticks like the camera.</li>
           <li><time>2026‑11‑03</time> World 0's GALAPAGOS title, which turned out to be an <code>Over</code> world object: up after 40 ticks under a white flash, down 150 ticks later.</li>
           <li><time>2026‑11‑03</time> The original camera is on by default from the moment a section loads, as in 1997, instead of waiting for Mendel to appear.</li>
           <li><time>2026‑11‑02</time> <code>PMan</code>, the unused fourth predator, ported and tested on a re-classed fork; the shared chase now holds its heading between re-aims, and predators face their prey.</li>

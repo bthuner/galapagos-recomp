@@ -185,6 +185,9 @@ pub struct Sim {
     pub overlay: Option<Overlay>,
     /// Objects whose shape frame changed (see [`Sim::take_reshaped`]).
     reshaped: Vec<usize>,
+    /// Every object's pose at the start of the last tick, for the
+    /// renderer's in-between frames ([`Sim::transforms_at`]).
+    prev_pose: Vec<([i32; 3], [i32; 3])>,
 }
 
 impl Sim {
@@ -276,6 +279,7 @@ impl Sim {
             flash: Flash::default(),
             overlay: None,
             reshaped: Vec::new(),
+            prev_pose: Vec::new(),
         }
     }
 
@@ -345,6 +349,8 @@ impl Sim {
     }
 
     pub fn step(&mut self, mesh: &mut WorldMesh) {
+        self.prev_pose.clear();
+        self.prev_pose.extend(self.objs.iter().map(|o| (o.pos, o.rot)));
         self.picked = self.next_pick.take();
         let ids = self.enabled_ids();
 
@@ -398,6 +404,53 @@ impl Sim {
         self.tick += 1;
         // `Game_Tick` @ 0x41bc50 ends with `++level_ticks; ++total_ticks`.
         self.total_ticks = self.total_ticks.wrapping_add(1);
+    }
+
+    // ——— In-between frames for the renderer ———
+
+    /// Forget the previous poses: the next frames show the current ones
+    /// as they are (a level load, a snapshot coming back).
+    pub fn cut_motion(&mut self) {
+        self.prev_pose.clear();
+    }
+
+    /// The object matrices (WebGL column-major, as in `mesh.transforms`)
+    /// a fraction `alpha` of the way from the previous tick's poses to the
+    /// current ones.
+    ///
+    /// not in the original: the 1997 game drew once per tick, whatever the
+    /// last tick left (`Game_Tick` @ 0x41bc50 passes a full tick, `0x100`,
+    /// to the updates). A browser draws at the display's rate, 60 Hz or
+    /// more, so without this a platform holds still for two or three
+    /// frames, then jumps. The camera (`world-view.js`) and Mendel
+    /// ([`crate::creature::Creature::vertices_at`]) blend with the same
+    /// `alpha`, so he stays glued to the floor he rides.
+    ///
+    /// Angles blend the short way round (1024ths of a turn, so a fan whose
+    /// path wraps from 2048 back to 0 keeps turning forwards). inferred:
+    /// a move of more than 8192 units or a quarter turn in one tick is a
+    /// cut (a path restarting elsewhere, a predator parked at 100000),
+    /// shown as is.
+    pub fn transforms_at(&self, alpha: f32, mesh: &WorldMesh, out: &mut Vec<f32>) {
+        out.clear();
+        out.extend_from_slice(&mesh.transforms);
+        if !(0.0..1.0).contains(&alpha) || self.prev_pose.len() != self.objs.len() {
+            return;
+        }
+        for (o, &(p0, r0)) in self.objs.iter().zip(&self.prev_pose) {
+            let Some(d) = o.draw else { continue };
+            if (p0, r0) == (o.pos, o.rot) {
+                continue;
+            }
+            let dp: [i32; 3] = core::array::from_fn(|k| o.pos[k].wrapping_sub(p0[k]));
+            let dr: [i32; 3] = core::array::from_fn(|k| ((o.rot[k].wrapping_sub(r0[k]) + 512) & 1023) - 512);
+            if dp.iter().any(|v| v.abs() > 8192) || dr.iter().any(|v| v.abs() > 256) {
+                continue;
+            }
+            let pos: [f32; 3] = core::array::from_fn(|k| p0[k] as f32 + dp[k] as f32 * alpha);
+            let rot: [f32; 3] = core::array::from_fn(|k| r0[k] as f32 + dr[k] as f32 * alpha);
+            write_matrix(&mut out[d * 16..d * 16 + 16], &transform_f(pos, rot));
+        }
     }
 
     // ——— What the creature may see and touch ———
@@ -952,8 +1005,13 @@ pub(crate) type M = [f32; 12]; // 3×3 rotation (row-major) + translation
 /// `M = Math_RotationMatrix(yaw = rot[0], pitch = rot[1], roll = rot[2])`
 /// (same formula as `camera::Trig::rot`, in floating point).
 pub(crate) fn transform(pos: [i32; 3], rot: [i32; 3]) -> M {
-    let sc = |r: i32| {
-        let a = -(r as f32) * core::f32::consts::TAU / 1024.0;
+    transform_f(pos.map(|v| v as f32), rot.map(|v| v as f32))
+}
+
+/// [`transform`] for an in-between pose ([`Sim::transforms_at`]).
+fn transform_f(pos: [f32; 3], rot: [f32; 3]) -> M {
+    let sc = |r: f32| {
+        let a = -r * core::f32::consts::TAU / 1024.0;
         a.sin_cos()
     };
     let (sa, ca) = sc(rot[0]);
@@ -970,7 +1028,7 @@ pub(crate) fn transform(pos: [i32; 3], rot: [i32; 3]) -> M {
         cc * ca * sb - scc * sa,
         cc * cb,
     ];
-    [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8], pos[0] as f32, pos[1] as f32, pos[2] as f32]
+    [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8], pos[0], pos[1], pos[2]]
 }
 
 /// The flag array of a freshly loaded object: its first appearance
@@ -1024,7 +1082,10 @@ pub(crate) fn apply(m: &M, v: [f32; 3]) -> [f32; 3] {
 
 /// Writes a column-major 4×4 for WebGL.
 fn write_transform(out: &mut [f32], pos: [i32; 3], rot: [i32; 3]) {
-    let m = transform(pos, rot);
+    write_matrix(out, &transform(pos, rot));
+}
+
+fn write_matrix(out: &mut [f32], m: &M) {
     out.copy_from_slice(&[
         m[0], m[3], m[6], 0.0, m[1], m[4], m[7], 0.0, m[2], m[5], m[8], 0.0, m[9], m[10], m[11], 1.0,
     ]);

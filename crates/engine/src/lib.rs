@@ -369,6 +369,28 @@ pub extern "C" fn world_transforms_ptr() -> *const f32 {
     with_mesh(|m| m.transforms.as_ptr(), core::ptr::null())
 }
 
+thread_local! {
+    /// The in-between frame of the object matrices and of Mendel's mesh
+    /// (`world_transforms_at`, `creature_vertices_at`).
+    static BLENDED: core::cell::RefCell<(Vec<f32>, Vec<f32>)> = const { core::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
+/// The object matrices `alpha` (0..1) of the way from the previous tick
+/// to the current one, same layout as [`world_transforms_ptr`]. not in the
+/// original: see `Sim::transforms_at`.
+#[no_mangle]
+pub extern "C" fn world_transforms_at(alpha: f32) -> *const f32 {
+    WORLDS.with(|w| {
+        let guard = w.borrow();
+        let Some((sim, mesh)) = guard.as_ref().and_then(|w| Some((w.sim.as_ref()?, w.mesh.as_ref()?))) else { return core::ptr::null() };
+        BLENDED.with(|b| {
+            let out = &mut b.borrow_mut().0;
+            sim.transforms_at(alpha, mesh, out);
+            out.as_ptr()
+        })
+    })
+}
+
 // ——— Simulation ——————————————————————————————————————————————————————
 //
 // JavaScript owns the clock: it calls `sim_tick` as many times as 24 Hz
@@ -539,6 +561,23 @@ fn with_creature<T>(f: impl FnOnce(&creature::Creature) -> T, default: T) -> T {
 #[no_mangle]
 pub extern "C" fn creature_vertices_ptr() -> *const f32 {
     with_creature(|c| c.vertices.as_ptr(), core::ptr::null())
+}
+
+/// Mendel's mesh `alpha` (0..1) of the way from the previous tick to the
+/// current one ([`creature_vertex_count`] vertices). not in the original:
+/// see `Creature::vertices_at`.
+#[no_mangle]
+pub extern "C" fn creature_vertices_at(alpha: f32) -> *const f32 {
+    with_creature(
+        |c| {
+            BLENDED.with(|b| {
+                let out = &mut b.borrow_mut().1;
+                c.vertices_at(alpha, out);
+                out.as_ptr()
+            })
+        },
+        core::ptr::null(),
+    )
 }
 
 /// Number of vertices at [`creature_vertices_ptr`] (0 while he is absent).

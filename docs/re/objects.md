@@ -293,10 +293,25 @@ path_count x {
 The loader expands keys into one pose per tick with
 `MotionKey_Lerp` @ `0x428a90`: `p = a + (b - a) * i / (steps + 1)`, integer
 division (C truncation), for position and rotation alike. There is no
-easing: speed is chosen by the number of in-between steps. A path with more
-than two keys and `relative != 0` is post-processed with two 16.16 constants
-(`0xeb85` ≈ 0.92, `0xf0a3` ≈ 0.94, `0x401140`/`0x401300`) — unknown,
-possibly a rotation of the keys into the object's frame. Rotations are in
+easing between two keys: speed is chosen by the number of in-between steps.
+
+**Paths of more than two keys are smoothed** (observed, `0x429010..0x4291af`;
+ported in `MotionPath::frames`). If the path's mode (`path+2`) is not 0, the
+loader runs every expanded frame up to the **second-to-last key** through a
+per-axis smoother — positions with factor `0xeb85` (≈ 0.92), rotations with
+`0xf0a3` (≈ 0.94), both reset first (`0x401140` → `0x406aa0`, reset
+`0x406af0`, step `0x401300` → `0x406b90`). The smoother is a critically
+damped alpha-beta tracker in 16.16: `g = 1 − a²` (`0x10000 − (a·a >> 16)`),
+`h = (1 − a)²`; the first input passes through, then each step predicts
+`p = x + (v >> 16)`, `e = in − p`, `x = p + (g·e >> 16)`, `v += h·e`. Then
+the last stretch is re-lerped from the smoothed second-to-last key towards
+the exact last key, for `i = 1 .. steps − 1` (`jl`: the frame just before
+the last key keeps its first lerp). So corners are rounded off, the path
+still ends exactly on its last key, and only that last corner keeps its
+kink. 108 of the CD's 1,516 paths qualify, the intro's capsule among them
+(its largest change of speed from one tick to the next drops from 536 to
+81 units). The first port skipped this step ("unknown"), and platforms
+visibly lurched at every key. Rotations are in
 1024ths of a turn (conditions mask them with `0x3ff`); values such as 2048
 mean "two full turns", which is how fans spin.
 
@@ -313,6 +328,20 @@ matrix is `Math_RotationMatrix(+0xf2, +0xf0, +0xf4)` @ `0x430ce0`
 `rz` about y (`sim::transform`). Example, section 0 #6:
 keys `x = 0 → -3000 → 3000 → 0` with 30/60/30 steps: a platform that sways
 3,000 units each side over 124 ticks, looping.
+
+### Drawing between ticks — not in the original
+
+The 1997 game drew once per tick (`Game_Tick` @ `0x41bc50` passes a full
+tick, `0x100`, to the updates; the motion step takes no fraction). A browser
+draws at 60 Hz or more, so a 24 Hz pose holds for two or three frames and
+then jumps. The port blends the object matrices (`Sim::transforms_at`),
+Mendel's mesh (`Creature::vertices_at`) and the camera with the same
+`alpha` (the fraction of the next tick already elapsed): a platform glides
+and Mendel stays glued to it. Angles blend the short way round; inferred:
+a move of more than 8192 units or a quarter turn in one tick (a path
+restarting elsewhere, a parked predator), a teleport of Mendel (> 4096), a
+change in his mesh size, or a snapshot coming back is a cut, drawn as is.
+Shape morphs are not blended.
 
 ### Vertex morphs (`ShapeAnim`) — observed, ported in `sim.rs`
 
