@@ -1,5 +1,5 @@
 # Original game data is copyrighted: never commit it. Bring your own ISO.
-/originals/
+/originals
 *.iso
 *.smk
 /target/
