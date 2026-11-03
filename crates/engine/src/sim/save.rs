@@ -43,7 +43,10 @@ pub const MAGIC: [u8; 4] = *b"GLPS";
 /// Version 5 adds each object's vertex morph (shape state, frame, playing),
 /// which the exe saves too (`0x42b0f0`: `+0xc`, `+0x10`; reapplied by
 /// slot 0x70 on load, `0x423f29`).
-pub const VERSION: u32 = 5;
+/// Version 6 adds the looping appearance a one-shot goes back to
+/// (`WorldObject +0x14c`, saved by the exe too: `0x423f9a`, read back at
+/// `0x4240d0`).
+pub const VERSION: u32 = 6;
 
 /// The dynamic part of one object: everything the simulation changes.
 /// The original writes the same facts (`WorldObject` slot 0x4c @ 0x424010:
@@ -68,6 +71,9 @@ pub struct ObjState {
     /// version 5: the shape the freshly loaded section shows is kept
     /// (inferred: its initial state's, the best guess without the data).
     pub shape: Option<(u16, u16, bool)>,
+    /// `+0x14c`: the appearance state a running one-shot returns to.
+    /// inferred: none from saves older than version 6.
+    pub return_appearance: Option<u16>,
 }
 
 /// One world snapshot: all objects, the `Save` variables, the random
@@ -106,6 +112,7 @@ impl Sim {
                     animating: o.animating,
                     skip: o.skip,
                     shape: Some((o.shape, o.shape_frame, o.morphing)),
+                    return_appearance: o.return_appearance.map(|a| a as u16),
                 })
                 .collect(),
             vars: self.vars,
@@ -147,6 +154,7 @@ impl Sim {
             o.appearance = s.appearance as usize;
             o.poly_frame = s.poly_frame.iter().map(|&f| f as usize).collect();
             o.animating = s.animating;
+            o.return_appearance = s.return_appearance.map(usize::from);
             o.skip = s.skip;
             if let Some((shape, frame, playing)) = s.shape {
                 (o.shape, o.shape_frame, o.morphing) = (shape, frame, playing);
@@ -223,10 +231,10 @@ impl Sim {
         ]
     }
 
-    /// Serialises the whole game. Format `GLPS` version 5, little-endian:
+    /// Serialises the whole game. Format `GLPS` version 6, little-endian:
     ///
     /// ```text
-    /// u8[4] "GLPS"   u32 version (5; 1 to 4 are still read)
+    /// u8[4] "GLPS"   u32 version (6; 1 to 5 are still read)
     /// u32 section    u32 total_ticks   u32 level_start_ticks   u64 sim_tick
     /// WorldState     the live world
     /// u8 has_snapshot,  WorldState     the respawn snapshot
@@ -244,6 +252,7 @@ impl Sim {
     ///              u32 appearance; u8 animating; u32 skip;
     ///              u32 n; u16 poly_frame[n];
     ///              (v5) u16 shape; u16 shape_frame; u8 morphing
+    ///              (v6) i16 return_appearance (-1 = none)
     /// pending_mask: bit 0 present, 1 trigger, 2 shape, 3 appearance,
     ///              4 sound, 5 motion, 6 goto, 7 reset_timer
     ///              (the i16 values follow in that order).
@@ -369,6 +378,7 @@ fn write_world(w: &mut Writer, s: &WorldState) {
         w.u16(shape);
         w.u16(frame);
         w.u8(playing as u8);
+        w.u16(o.return_appearance.map_or(0xffff, |a| a));
     }
     w.u32(s.predators.len() as u32);
     for p in &s.predators {
@@ -427,6 +437,7 @@ fn read_world(r: &mut Reader, version: u32) -> Result<WorldState, &'static str> 
             poly_frame.push(r.u16()?);
         }
         let shape = if version >= 5 { Some((r.u16()?, r.u16()?, r.u8()? != 0)) } else { None };
+        let return_appearance = if version >= 6 { Some(r.u16()?).filter(|&a| a != 0xffff) } else { None };
         objs.push(ObjState {
             state,
             ticks,
@@ -441,6 +452,7 @@ fn read_world(r: &mut Reader, version: u32) -> Result<WorldState, &'static str> 
             animating,
             skip,
             shape,
+            return_appearance,
         });
     }
     let mut predators = Vec::new();

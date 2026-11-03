@@ -398,6 +398,58 @@ The port had none of this until `fix/pose-red-panels`: the curtains
 stayed flat (the low red wedges on the pad's sides) and every polygon of
 the world wore one stretched texture copy.
 
+### Appearance flip-books and one-shots — observed, ported in `sim.rs`
+
+Each appearance state has a `looping` short and, per polygon, a list of
+frames (texture, shade, texel offset, collision flags, `enabled`).
+
+* **Select** (appearance action, slot `0x0c` `0x423350`): if the state
+  being replaced loops (`0x42e0d0`; the appearance's current state `+0xc`
+  is -1 until the first selection, `0x42de50`, so the load pass records
+  nothing), its number is kept in `WorldObject +0x14c` (-1 at
+  construction, `0x422896`; saved with the object, `0x423f9a` /
+  `0x4240d0`). Then `0x42df50` puts every polygon on frame 0 (flags copied
+  only from an `enabled > 0` frame) and returns "some polygon has more
+  than one frame" into `+0x13e` (playing); slot `0x78` applies the
+  textures.
+* **Step** (update step 4, slot `0x7c` `0x423810`), polygon by polygon:
+  `0x42e050` advances the frame and wraps it to 0. In a state that does
+  **not** loop, the wrap is the end: it returns NULL *before* touching the
+  polygon, and `0x423810` (`0x423976`) stops the polygon loop there and,
+  if `+0x14c >= 0`, selects that looping state again through slot `0x0c`
+  — back to its frame 0: textures *and* collision flags. Nothing clears
+  `+0x13e`.
+
+So a non-looping state of `n` frames is a **one-shot**: it shows for `n`
+ticks (selected in a tick's apply pass, frames 1..n−1 in the next
+updates, the revert in the update after that), then the object looks and
+collides as before. 418 one-shots on the CD, almost all `[1, 0]` objects
+whose click flashes a 6-frame state. Corner cases the port keeps: a
+polygon with a single frame in a one-shot ends it on the first step (s2
+#84, whose polygon 0 has one frame: a one-tick flash); a one-shot with no
+looping state to return to (s1 #236, its only state) keeps cycling
+through frames 1..n−1 with a tick of rest at each wrap, the polygons
+after the one that wrapped not stepped that tick.
+
+**Why it matters — the jump pads.** Section 0's #110 (folder #108), the
+platform after the lift #111 and the white corridor, lies under the
+ice-blue helix #109 (a `Rend` cross of lethal blades, `0x1582380` /
+`0x15e2380`, sweeping 150..370 units above its floor; a click on #109
+swaps its motion paths 1 ↔ 2, the other way round). #110: state 0 → 1 on
+`Event(1)`, back on `NoEvent(1)`; in both a click selects appearance 2,
+6 frames, not looping, whose frame 0 turns floor polygons 6, 9, 10, 16
+from `0x2` (floor) into `0x510` (a wall, `0x100`, with bounce
+`0x510 & 0xe00` → 0x6400 = 100 units/tick). Mendel's floor probe loses
+the floor, his hull meets the wall and bounces him over the blades
+(`0x418450`, mendel.md §2.2); 6 ticks later the revert makes it a floor
+again, so he lands after his ~30-tick flight: **one jump per click**. A
+left click aimed at Mendel jumps him too: his `MEnc` hull carries only
+pick bit 0, which the click's mask `0xfffffffe` drops, so the ray goes
+through him to the floor. The port used to stop a non-looping flip-book
+on its last frame: the trampoline flags stayed, and he bounced forever
+(test `one_click_one_jump`; `examples/oneshot_probe.rs` lists every
+one-shot). The same fix applies to every clickable pad of the game.
+
 ### Sound emitters — observed layout, inferred meaning
 
 ```text
