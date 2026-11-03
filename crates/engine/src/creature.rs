@@ -3218,4 +3218,117 @@ mod click_tests {
         }
         assert_eq!(rides, 1, "exactly one ride per click");
     }
+
+    /// Section 0, after the clickable lift #111 and the white corridor:
+    /// platform #110 (folder #108) under the ice-blue helix #109, a `Rend`
+    /// cross of lethal blades (flags `0x1582380` / `0x15e2380`) sweeping
+    /// 150..370 units above its floor (the face at y = 25160, facing −y:
+    /// Mendel stands on it sideways). Clicking #110 selects its one-shot
+    /// appearance 2 (6 frames, not looping): frame 0 turns the floor
+    /// polygons 6, 9, 10, 16 from `0x2` (floor) into `0x510` (a wall
+    /// whose bounce, `0x510 & 0xe00`, is 0x6400 = 100 units/tick), so he
+    /// is thrown up over the blades. When the one-shot ends (`0x42e050`
+    /// returns NULL at the wrap) `0x423810` selects the looping state it
+    /// replaced (`+0x14c`) again and the floor is a floor: one jump per
+    /// click. The port used to hold the one-shot's last frame, so the
+    /// floor stayed a trampoline and he never stopped jumping.
+    #[test]
+    fn one_click_one_jump() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = world(&d, 0);
+        sim.wake_all = true; // folder #108 sleeps until Mendel is near
+        let (pad, helix) = (110 - 1, 109 - 1);
+        for _ in 0..4 * sim::TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+        }
+        // Stand him (alive) on polygon 9 of the platform, by the shaft.
+        let stand = |sim: &mut Sim| {
+            let mut c = sim.creature.take().unwrap();
+            let f = Frame::of(&c.polys, sim, Some((pad, 9)));
+            assert!(f.normal()[1] < -0.99, "the floor faces -y: {:?}", f.normal());
+            let mut at = f.unpoint([18130.0, 25160.0, -32398.0]);
+            at[2] = c.stance_height as f32;
+            c.place(Place { on: Some((pad, 9)), at, heading: 0 }, sim);
+            c.mode = Mode::Alive;
+            sim.creature = Some(c);
+        };
+        // What Mendel does tick by tick: when he first died (and on what),
+        // and every tick he starts going up: a throw off the floor or a
+        // bounce in flight (the stuck trampoline bounced him without ever
+        // letting him stand again).
+        #[derive(Default)]
+        struct Watch {
+            died_on: Option<u32>,
+            launches: Vec<u64>,
+            rising: bool,
+        }
+        impl Watch {
+            fn run(&mut self, sim: &mut Sim, mesh: &mut WorldMesh, ticks: u32) {
+                for _ in 0..ticks {
+                    sim.step(mesh);
+                    let c = sim.creature.as_ref().unwrap();
+                    if self.died_on.is_none() && matches!(c.mode, Mode::Vanishing(..)) {
+                        self.died_on = Some(c.surface);
+                    }
+                    let rising = !c.mover.grounded && dot(c.mover.air, c.mover.up) > 0.0;
+                    if rising && !self.rising {
+                        self.launches.push(sim.tick);
+                    }
+                    self.rising = rising;
+                }
+            }
+        }
+        let floors = [6, 9, 10, 16];
+        for click in 0..2 {
+            // A left click on Mendel goes through him (his `MEnc` hull
+            // only carries pick bit 0, masked off by 0xfffffffe) to the
+            // floor under him.
+            stand(&mut sim);
+            // He touches it this tick; it reacts the next.
+            sim.step(&mut mesh);
+            sim.step(&mut mesh);
+            assert_eq!(sim.state_of(110), 1, "#110 feels him (event 1)");
+            let pos = sim.creature.as_ref().unwrap().mover.pos;
+            assert_eq!(sim.pick(add(pos, [-60.0, -3000.0, 60.0]), [0.0, 1.0, 0.0]), Some(110), "the click lands on the platform");
+            let mut w = Watch::default();
+            sim.click(110);
+            let mut flags = Vec::new();
+            for _ in 0..8 {
+                w.run(&mut sim, &mut mesh, 1);
+                flags.push(floors.map(|p| sim.frame_flags(pad, p)));
+            }
+            // The one-shot shows for its 6 frames, then the floor is back.
+            assert!(flags[..6].iter().all(|f| *f == [0x510; 4]), "click {click}: trampoline for 6 ticks: {flags:x?}");
+            assert!(flags[6..].iter().all(|f| *f == [0x2; 4]), "click {click}: then a floor again: {flags:x?}");
+            // His flight lasts about 30 ticks; a death on landing takes 80
+            // to send him back to the respawn point, so 72 ticks see it all.
+            w.run(&mut sim, &mut mesh, 64);
+            let c = sim.creature.as_ref().unwrap();
+            assert_eq!(w.launches.len(), 1, "click {click}: exactly one jump: {:?}", w.launches);
+            assert!(c.mover.grounded && c.mover.on.map(|o| o.0) == Some(pad), "click {click}: back on the platform: {:?}", c.mover.on);
+        }
+        // Without a click he never leaves the floor; the blades come round
+        // and kill him (lethal kind 2: `(f >> 12) & 15`).
+        stand(&mut sim);
+        let mut w = Watch::default();
+        w.run(&mut sim, &mut mesh, 72);
+        assert!(w.launches.is_empty(), "no jump without a click: {:?}", w.launches);
+        let surface = w.died_on.expect("the helix kills on contact");
+        assert_eq!(surface & 0xf000, 0x2000, "killed by the blades: {surface:#x}");
+        // Clicking the helix reverses it (state 0 ↔ 1, motion 2 ↔ 1).
+        let spin = |sim: &mut Sim, mesh: &mut WorldMesh| {
+            let a = sim.pose(helix).1;
+            sim.step(mesh);
+            let b = sim.pose(helix).1;
+            [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+        };
+        let before = spin(&mut sim, &mut mesh);
+        let s0 = sim.state_of(109);
+        sim.click(109);
+        sim.step(&mut mesh);
+        assert_ne!(sim.state_of(109), s0, "the click switches the helix");
+        let after = spin(&mut sim, &mut mesh);
+        println!("helix turns {before:?} a tick, then {after:?}");
+        assert!(before.iter().zip(&after).any(|(a, b)| a * b < 0), "it turns the other way: {before:?} then {after:?}");
+    }
 }

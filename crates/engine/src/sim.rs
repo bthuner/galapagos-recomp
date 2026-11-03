@@ -131,7 +131,14 @@ struct Runtime {
     /// Per polygon, the collision flags the exe's flag array holds
     /// (`appearance+0x14`, read by `0x409680`): see [`Sim::frame_flags`].
     flags: Vec<u32>,
+    /// `WorldObject +0x13e`: the flip-book plays (some polygon of the
+    /// selected state has more than one frame). Only a selection changes
+    /// it (`0x423350`); the end of a one-shot does not.
     animating: bool,
+    /// `WorldObject +0x14c`: the looping appearance state a one-shot goes
+    /// back to when it ends (`0x423350` stores the state it replaces, if
+    /// that one loops; -1 at construction, `0x422896`).
+    return_appearance: Option<usize>,
     /// Registry skip count: when this folder is disabled, the update loop
     /// jumps over its `skip` descendants.
     skip: u32,
@@ -245,6 +252,7 @@ impl Sim {
                     poly_frame: Vec::new(),
                     flags,
                     animating: false,
+                    return_appearance: None,
                     skip: 0,
                 }
             })
@@ -511,8 +519,10 @@ impl Sim {
     /// once per tick (`Game_Tick` → `0x4284f0` → object slot 0x28 →
     /// `0x423420` → `0x423810`; the record takes the frame's own offset,
     /// not the sub-tick interpolated one), so the step is the difference
-    /// of consecutive frames. A stopped flip-book (non-looping state at its
-    /// end, or an object in a switched-off folder) keeps its last step.
+    /// of consecutive frames. A flip-book that does not step (an object in
+    /// a switched-off folder) keeps its last step. inferred: a one-shot
+    /// with no state to go back to, on its rest tick at the wrap (frame 0,
+    /// see `update_animations`), is read as no step here.
     /// inferred: on the first tick of a state, "previous" is taken as the
     /// list's last frame (looping) instead of the old state's frame, which
     /// would need the record saved with the game.
@@ -803,6 +813,14 @@ impl Sim {
         let o = &mut self.objs[i];
         let (Some(obj), Some(draw)) = (o.obj.as_ref(), o.draw) else { return };
         let Some(state) = obj.appearance.as_ref().and_then(|s| s.get(n)) else { return };
+        // `0x423350`: if the state being replaced loops (`0x42e0d0`, 0
+        // while none was ever selected: the appearance's `+0xc` starts at
+        // -1, `0x42de50`), remember it (`+0x14c`): a one-shot selected now
+        // goes back to it when it ends (see `update_animations`).
+        let replaced = obj.appearance.as_ref().and_then(|s| s.get(o.appearance));
+        if !o.poly_frame.is_empty() && replaced.is_some_and(|r| r.looping != 0) {
+            o.return_appearance = Some(o.appearance);
+        }
         o.appearance = n;
         o.poly_frame = vec![0; state.polygons.len()];
         o.animating = state.polygons.iter().any(|f| f.len() > 1);
@@ -854,24 +872,38 @@ impl Sim {
             }
         }
 
-        // Appearance flip-book: every polygon steps through its frames.
+        // Appearance flip-book (`0x423420` step 4 → slot 0x7c `0x423810`):
+        // polygon by polygon, `0x42e050` advances the frame and wraps it
+        // to 0; in a state that does not loop, the wrap *is the end*: it
+        // returns NULL before touching the polygon, `0x423810` stops the
+        // polygon loop there (later polygons are not stepped this tick)
+        // and, if a looping state was replaced by this one-shot (`+0x14c
+        // >= 0`), selects it again (`0x423976` → slot 0x0c `0x423350`),
+        // which puts back its frame 0: textures and collision flags. So a
+        // one-shot of n frames shows for n ticks, then the object is what
+        // it was. Without a state to go back to, `+0x13e` stays set and
+        // the one-shot keeps cycling through frames 1..n-1, a tick of
+        // rest at each wrap (s1 #236). Section 0's #110 turns its floor
+        // into a bouncing wall (`0x2` → `0x510`) for 6 ticks this way:
+        // Mendel is thrown up once and lands on a floor again.
         if o.animating {
             let (Some(obj), Some(draw)) = (o.obj.as_ref(), o.draw) else { return };
             let Some(state) = obj.appearance.as_ref().and_then(|s| s.get(o.appearance)) else { return };
             let looping = state.looping != 0;
-            let mut still = false;
+            let mut ended = false;
             for (p, frames) in state.polygons.iter().enumerate() {
-                if frames.len() < 2 {
-                    continue;
-                }
-                let f = &mut o.poly_frame[p];
-                if *f + 1 < frames.len() {
-                    *f += 1;
-                    still = true;
-                } else if looping {
+                let Some(f) = o.poly_frame.get_mut(p) else { break };
+                let was = *f;
+                *f += 1;
+                if *f >= frames.len() {
                     *f = 0;
-                    still = true;
-                } else {
+                }
+                if !looping && *f == 0 {
+                    ended = true;
+                    break;
+                }
+                if *f == was {
+                    // A looping single frame: re-applying it changes nothing.
                     continue;
                 }
                 if let (Some(fl), Some(fr)) = (o.flags.get_mut(p), frames.get(*f).filter(|fr| (fr.enabled as i8) > 0)) {
@@ -881,7 +913,11 @@ impl Sim {
                     mark(&mut self.dirty, r.first, r.first + r.count);
                 }
             }
-            o.animating = still;
+            if ended {
+                if let Some(back) = o.return_appearance {
+                    self.select_appearance(i, back, mesh);
+                }
+            }
         }
     }
 

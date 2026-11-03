@@ -487,7 +487,12 @@ appearance's per-polygon flag array `+0x14`, which applying a frame
 (`0x42df50` state change, `0x42e050` flip-book step) overwrites **only
 when the frame's `enabled` byte is positive**. Disabled frames (all of
 them flagged 0 on the CD) leave the polygon what it was: pad #83's
-`[e1 0x2, e0 0x0, e0 0x0]` stays a floor.
+`[e1 0x2, e0 0x0, e0 0x0]` stays a floor. A state that does not loop
+is a one-shot, though: when its flip-book wraps, `0x423810` re-selects
+the looping state it replaced (objects.md §4, "Appearance flip-books and
+one-shots"), and that state's frame 0 rewrites the flags. That is how a
+click on section 0's #110 makes its floor a bouncing wall (`0x510`,
+bounce 100 units/tick) for exactly 6 ticks: one jump.
 
 **Object rotations** (needed to know which way a moving polygon faces):
 a motion key's `rx` goes to the object's `+0xf2`, `ry` to `+0xf0`, `rz`
