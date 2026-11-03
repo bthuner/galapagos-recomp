@@ -21,6 +21,7 @@
 
 use crate::creature::Creature;
 use crate::flash::Flash;
+use crate::overlay::{self, Overlay};
 use crate::predator::{Class, Predator};
 use crate::world::WorldMesh;
 use galapagos_formats::logic::{Actions, LogicView, PortalAction};
@@ -179,6 +180,9 @@ pub struct Sim {
     pub pole: Option<usize>,
     /// The screen's palette flash (flash.rs).
     pub flash: Flash,
+    /// The 2-D picture over the view (`Over` class, overlay.rs): world 0's
+    /// "GALAPAGOS" title.
+    pub overlay: Option<Overlay>,
     /// Objects whose shape frame changed (see [`Sim::take_reshaped`]).
     reshaped: Vec<usize>,
     /// Every object's pose at the start of the last tick, for the
@@ -273,6 +277,7 @@ impl Sim {
             predators,
             pole,
             flash: Flash::default(),
+            overlay: None,
             reshaped: Vec::new(),
             prev_pose: Vec::new(),
         }
@@ -655,6 +660,15 @@ impl Sim {
                 self.objs[i].skip = if p.shorts[0] != 0 { 0 } else { p.shorts[1].max(0) as u32 };
             }
             b"Voic" => self.events.push(HostEvent { kind: EV_MUSIC, a: p.shorts[0] as i32, b: 0, c: 0 }),
+            // A picture over the view (overlay.rs): show (and maybe flash
+            // white, script 0 at priority 250) or take it down.
+            b"Over" => {
+                let (o, flash) = overlay::trigger(p.shorts);
+                self.overlay = o;
+                if flash {
+                    self.flash.play(0, 250);
+                }
+            }
             b"Tele" | b"Strt" | b"STel" => {
                 let place = |off: [i32; 3], mode: i32| self.portal_place(i, mode.max(0) as usize, off);
                 match p.portal() {

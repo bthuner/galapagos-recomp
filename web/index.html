@@ -38,14 +38,18 @@
       <canvas id="screen" width="640" height="480"></canvas>
       <button id="start" class="start">Press to begin</button>
     </div>
-    <canvas id="world" class="world" hidden></canvas>
+    <div class="world-frame">
+      <canvas id="world" class="world" hidden></canvas>
+      <!-- The picture over the 3-D view: world 0's "GALAPAGOS" (title.js). -->
+      <canvas id="title" class="title-overlay" aria-label="Galapagos" hidden></canvas>
+    </div>
     <nav id="sections" class="sections" aria-label="Worlds" hidden></nav>
     <label id="wake" class="wake" hidden>
       <input type="checkbox" id="wake-all" />
       Wake every machine <small>(debug: ignores the folders that normally wait for Mendel)</small>
     </label>
     <label id="follow" class="wake" hidden>
-      <input type="checkbox" id="follow-mendel" />
+      <input type="checkbox" id="follow-mendel" checked />
       Follow Mendel <small>(chase camera; drag to look around him, shift-drag to break away)</small>
     </label>
     <pre id="log" class="log"></pre>

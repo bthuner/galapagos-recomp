@@ -432,12 +432,58 @@ classes:
 | `Save` | `0x41af80` | `0x45fe38` | `0x41afe0` | **not the save pads**: a persistent variable. `shorts[0] = 1`: store this object's state in slot `shorts[1]` of the archive object's `i32[10]` (`0x41ce90` → `0x41d530`); `0`: read the slot back as the next state (`0x41ceb0` → `0x41d560`, `0x42ce50`). Observed; see `saves.md` |
 | `Voic` | `0x41b510` | `0x45ff98` | `0x41b570` | `shorts[0] = n`: play Smacker file `data/<n>` (`sprintf("%d")`, `Music_PlaySmacker` @ `0x439d90` → `SmackOpen`); 0 = stop. Values 1..10 match files `1`..`10`: music/voice tracks. Observed. |
 | `Rend` | `0x419ee0` | `0x45fcd0` | `0x419f40` | 9-way switch on `shorts[0]` (0..8): renderer effects (unknown) |
-| `Over` | `0x419e30` | `0x45fc20` | `0x419e90` | `0x419c50(shorts[0])`: overlay (unknown) |
+| `Over` | `0x419e30` | `0x45fc20` | `0x419e90` | a flat picture over the 3-D view (observed, see **The title overlay** below): `shorts[0]` picture (0 = the GALAPAGOS strip, -1 = take it down), `shorts[1]` centre, `shorts[2..3]` x, y, `shorts[6]` white flash. One on the CD: section 0's #59, world 0's title |
 | `MEnc` | `0x4260d0` | `0x460c10` | base | at (0,0,0) in every section; Update `0x426150`: when picked, makes Mendel react (`0x41cb80`); its polygons carry pick bit 0 (inferred: Mendel's own click target) |
 | `Pred` | `0x42a1a0` | `0x460ea8` | `0x42a2d0` | predator (observed, see **predators.md**): `shorts[0]` 1 = vanish (then parked at 100000), 2 = appear at home then active; ignored while one runs; `shorts[1]` play the transition effect, `shorts[2..3]` its kind and variant (the same effect class as Mendel's dematerialisation, `0x424520`/`0x424870`; ported in transition.rs, see predators.md) |
 | `PBal`, `PFrk`, `PMan` | `0x415020`, `0x415480`, `0x415930` | `0x45f6c0`, `0x45f7b0`, `0x45f8a0` | `0x42a2d0` (shared with `Pred`) | hunters: once active, a trapezoidal mover lunges past Mendel; six probes (mask 0x103) touch his click hull `MEnc`, which hands him the predator's flags (`0x405b2100` / `0x40582100`: lethal kind 2, death; `PMan`'s `0x40000100` is harmless: a hazard he sees). Bit 30 on their polygons makes his eyes see them. No `PMan` on the CD |
 | `PPol` | `0x4292b0` | `0x460de8` | `0x429430` | the launcher: `ints` = mode, radius, angle, bob amplitude/phase, wobble amplitude/phase, lift; circles its home towards Mendel's bearing; `PBal` appears where it is (`Game+0x17efc0`) |
 | `Cmra` | `0x412700` | `0x45f608` | — | camera, section 8 |
+
+### The title overlay (`Over`) — observed
+
+The huge chrome "GALAPAGOS" that appears over world 0 is neither in the
+intro movie nor a 3-D object: it is section 0's object #59, class `Over`
+(the only one on the CD), with two params entries and three states:
+
+```text
+state 0  (initial)  entry: reset timer          -> state 1 after 40 ticks
+state 1             entry: trigger 1, sound 1   -> state 2 after 150 ticks
+state 2             entry: trigger 2, sound 1
+param 1  shorts [0, 1, 0, 0, 508, 37, 1, 0, 0, 0]   show picture 0, centred, flash
+param 2  shorts [-1, 0, ...]                         take it down
+```
+
+The trigger `0x419e90` selects the entry and calls `0x419c50(shorts[0])`:
+
+* `-1`: `0x436230(1)` releases the overlay surface (`0x48b65c`) and zeroes
+  `0x46972c`, which keeps the blitter from drawing any overlay for the next
+  10 frames.
+* otherwise: if `shorts[6] != 0`, `Palette_Play(0, 250)` (the white flash,
+  flash.rs script 0, 10 frames from white back to normal);
+  `TimeScreen_Select` `0x41a2d0(shorts[0])` picks the picture by the view
+  size (`0` gives the title strips: 504x30 / 256x15 / 128x8, pictures 0 /
+  10 / 20 in 8-bit, 30 / 33 / 36 in 16-bit); `0x435e70` creates one
+  off-screen DirectDraw surface of that size, `0x41aa10` fills it and sets
+  its source colour key to **the top-left pixel**; position: x = `shorts[2]`,
+  y = `shorts[3]`, centred if `shorts[1]` (`shorts[4..5]`, 508 and 37, are
+  read and unused).
+* `0x436270`, called from the frame presenters (`0x40f72e`, `0x42efd9`,
+  `0x42f21e`), `BltFast`s that surface onto the back buffer with
+  `SRCCOLORKEY` every frame, adding `(screen − picture) / 2` (screen size
+  `0x46971c`/`0x469720`, 640x480) when centred.
+
+So: 40 ticks (1.67 s) after world 0 is loaded the title appears, centred,
+with a white flash; 150 ticks (6.25 s) later it disappears, no fade. The
+1997 footage agrees: up at 1.68 s, down at 7.97 s, the strip 504/640 of the
+screen's width, vertically centred, and *not* whitened by the flash (it is
+blitted after the palette remap). Only world 0 has an `Over` object: the
+other levels show no title card. The overlay belongs to the renderer, not
+to the world, so it is not saved.
+
+Port: `overlay.rs` (the trigger and the strip sizes), `Sim::overlay`,
+`sim_overlay(w, h)`, and `web/src/title.js` (a 2-D canvas over the WebGL
+one, colour-keyed, sized in original pixels × the canvas's scale).
+`examples/overlay_probe.rs` lists every `Over` and `Rend` object.
 
 ### Portals (`Tele` / `Strt` / `STel`) — observed
 
@@ -693,7 +739,8 @@ creature code asks.
   the per-polygon camera (ported: camera.rs, §6).
 * Predators (`Pred`, `PBal`, `PFrk`, `PPol`; predator.rs, predators.md).
 * Transition effects: transition.rs (mendel.md §2.3.1).
-* Still missing: `Rend`, `Over`, the save-pad
+* `Over`: world 0's title (overlay.rs, title.js).
+* Still missing: `Rend`, the save-pad
   dialog wiring.
 
 ## Open questions
@@ -707,7 +754,7 @@ creature code asks.
   solid surface).
 * Camera style `a, b` fields and the exact smoothing.
 * Event bits other than 1 (none used on the CD).
-* `Rend` (9 effects), `Over`, `MEnc` details (how predators hurt Mendel
+* `Rend` (9 effects), `MEnc` details (how predators hurt Mendel
   is in predators.md).
 * The tick period actually programmed into `App_IdleTick`.
 

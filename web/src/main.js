@@ -5,6 +5,7 @@ import { createWorldView } from "./world-view.js";
 import { createSfx } from "./audio.js";
 import { createMenu } from "./menu.js";
 import { showTimeScreen } from "./time-screen.js";
+import { startTitleOverlay } from "./title.js";
 
 const $ = (id) => document.getElementById(id);
 const log = (msg) => ($("log").textContent += msg + "\n");
@@ -61,6 +62,7 @@ async function boot(files) {
   $("screen").parentElement.hidden = true;
   $("world").hidden = false;
   const worlds = engine.openWorlds(await bytesOf(files.worlds));
+  startTitleOverlay(engine, $("world"), $("title")); // world 0's "GALAPAGOS"
   const hz = engine.sim.ticksPerSecond();
   let clock = 0, last = performance.now(), current = 0;
 
@@ -130,8 +132,9 @@ async function boot(files) {
     onFollowChange: (on) => ($("follow-mendel").checked = on),
     camera: engine.camera.state,
   });
-  // Follow Mendel by default as soon as he appears, unless the user turned
-  // the chase camera off in this section.
+  // The original camera is on by default, from the moment a section loads
+  // (before Mendel exists it holds the section's default key), and again
+  // whenever he appears, unless the player turned it off.
   let mendelSeen = false, followDeclined = false;
   const mendelWatch = () => {
     const c = engine.creature.state();
@@ -168,6 +171,7 @@ async function boot(files) {
     const w = built ? worlds.current() : worlds.build(i);
     view.load({ ...w, takeDirty: engine.sim.takeDirty, creatureVertices: engine.creature.vertices, tint: engine.sim.tint });
     mendelSeen = false;
+    if (!followDeclined) view.follow(true, engine.creature.state);
     engine.sim.wakeAll($("wake-all").checked);
     picker.querySelectorAll("button").forEach((b, j) => b.classList.toggle("is-on", j === i));
     summary =
