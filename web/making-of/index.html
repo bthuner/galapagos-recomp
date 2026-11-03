@@ -979,6 +979,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑03</time> Concave polygons ear-clipped as <code>0x40be00</code> does: the save pads' rims no longer cover their shimmering pools, and 816 polygons across the CD regain their holes.</li>
           <li><time>2026‑11‑03</time> Collisions cast against the real outlines too: doorways and windows open, Mendel walks between rooms, and the intro capsule flies through the hall's opening.</li>
           <li><time>2026‑11‑03</time> Platforms glide: the motion-path loader's smoother (<code>0x428cf0</code>), and objects drawn between ticks like the camera.</li>
+          <li><time>2026‑11‑03</time> A merged title "did not show": the browser was still running yesterday's <code>main.js</code>. <code>tools/serve.py</code> now serves everything with <code>Cache-Control: no-cache</code>, finishing what the engine-only fix began.</li>
           <li><time>2026‑11‑03</time> World 0's GALAPAGOS title, which turned out to be an <code>Over</code> world object: up after 40 ticks under a white flash, down 150 ticks later.</li>
           <li><time>2026‑11‑03</time> The original camera is on by default from the moment a section loads, as in 1997, instead of waiting for Mendel to appear.</li>
           <li><time>2026‑11‑02</time> <code>PMan</code>, the unused fourth predator, ported and tested on a re-classed fork; the shared chase now holds its heading between re-aims, and predators face their prey.</li>

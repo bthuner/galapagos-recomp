@@ -34,8 +34,11 @@ parsing in JavaScript and cached in your browser's private storage (OPFS).
 ```sh
 rustup target add wasm32-unknown-unknown
 ./tools/build.sh
-python3 -m http.server -d web 8000   # open http://localhost:8000
+python3 tools/serve.py 8000          # open http://localhost:8000
 ```
+
+`tools/serve.py` is `http.server` plus `Cache-Control: no-cache`, so the
+browser never keeps running stale JavaScript after you pull.
 
 Tests that need game data look for it under `originals/` (gitignored) and
 skip themselves when it's absent:
