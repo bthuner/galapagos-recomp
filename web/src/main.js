@@ -5,6 +5,7 @@ import { createWorldView } from "./world-view.js";
 import { createSfx } from "./audio.js";
 import { createMenu } from "./menu.js";
 import { showTimeScreen } from "./time-screen.js";
+import { startTitleOverlay } from "./title.js";
 
 const $ = (id) => document.getElementById(id);
 const log = (msg) => ($("log").textContent += msg + "\n");
@@ -61,6 +62,7 @@ async function boot(files) {
   $("screen").parentElement.hidden = true;
   $("world").hidden = false;
   const worlds = engine.openWorlds(await bytesOf(files.worlds));
+  startTitleOverlay(engine, $("world"), $("title")); // world 0's "GALAPAGOS"
   const hz = engine.sim.ticksPerSecond();
   let clock = 0, last = performance.now(), current = 0;
 

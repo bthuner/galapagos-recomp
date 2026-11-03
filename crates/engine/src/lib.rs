@@ -12,6 +12,7 @@ mod affliction;
 mod camera;
 mod creature;
 mod flash;
+mod overlay;
 mod predator;
 mod sim;
 mod sound;
@@ -641,6 +642,30 @@ pub extern "C" fn sim_tint_ptr() -> *const i32 {
     let t = WORLDS.with(|w| w.borrow().as_ref().and_then(|w| w.sim.as_ref()).map_or(flash::IDENTITY, |s| s.flash.current()));
     TINT.with(|c| c.set(t));
     TINT.with(|c| c.as_ptr() as *const i32)
+}
+
+thread_local! {
+    static OVERLAY: std::cell::Cell<[i32; 6]> = const { std::cell::Cell::new([-1, 0, 0, 0, 0, 0]) };
+}
+
+/// The picture over the 3-D view (`Over` class, overlay.rs) for a view of
+/// `w`×`h` original pixels: six i32 — picture index for `Archive::picture`
+/// (-1: none, or the view is too small), width, visible height, x, y,
+/// centred (1: add `(screen − picture) / 2` to x and y, `0x436270`). The
+/// picture's top-left pixel is the transparent colour.
+#[no_mangle]
+pub extern "C" fn sim_overlay(w: u32, h: u32) -> *const i32 {
+    let o = WORLDS.with(|w| w.borrow().as_ref().and_then(|w| w.sim.as_ref()).and_then(|s| s.overlay));
+    let pick = o.and_then(|o| match o.picture {
+        0 => overlay::title_strip(w, h),
+        n => time_screen(n as i32 - 1, w, h).map(|l| (l.0, l.1, l.2 - l.3)),
+    });
+    let out = match (o, pick) {
+        (Some(o), Some((pic, pw, ph))) => [pic, pw, ph, o.x as i32, o.y as i32, o.centred as i32],
+        _ => [-1, 0, 0, 0, 0, 0],
+    };
+    OVERLAY.with(|c| c.set(out));
+    OVERLAY.with(|c| c.as_ptr() as *const i32)
 }
 
 /// Teaching/debug switch, not in the original: run the class trigger of
