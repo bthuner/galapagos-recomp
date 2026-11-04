@@ -17,6 +17,7 @@
 // `onTouch` (touching Mendel). In follow mode we show the original game
 // camera, which the engine runs (crates/engine/src/camera.rs); dragging
 // orbits around Mendel for a while, then hands the view back.
+// Touch screens reach the same moves through `input` (qol/touch.js).
 
 // Lighting, as the 1997 Direct3D renderer did it (crates/engine/src/world.rs
 // has the Rust reference of every step, with the exe's addresses):
@@ -449,7 +450,7 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       // not in the original: the user's look-around, an orbit around
       // Mendel that fades back into the original camera when left alone.
       const c = follow.creature?.();
-      if (!drag) look.idle += dt;
+      if (!drag && !held) look.idle += dt;
       if (look.idle > LOOK.idle) look.weight -= dt / LOOK.back;
       if (!c || look.weight <= 0) {
         follow.look = null;
@@ -484,8 +485,9 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     return follow.look;
   }
 
-  // Input: orbit / pan / zoom.
-  let drag = null;
+  // Input: orbit / pan / zoom. `held`: a finger is down (qol/touch.js),
+  // which keeps a look-around from fading back, like a mouse drag.
+  let drag = null, held = false;
   canvas.addEventListener("pointerdown", (e) => {
     drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, button: e.button, pan: e.button === 1 || e.shiftKey };
     if (e.button === 1) e.preventDefault(); // no auto-scroll
@@ -514,27 +516,46 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     const dir = norm(fwd.map((f, i) => f + nx * k * basis.aspect * right[i] + ny * k * up[i]));
     return [basis.eye, dir];
   }
+  // A click at a page point, from the keyboard (#49) or a finger (#43).
+  function clickAt(clientX, clientY, button = 0) {
+    if (!basis || free) return; // no clicks into a world frozen in photo mode
+    (button === 2 ? onTouch : onPick)(...rayThrough({ clientX, clientY }));
+  }
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointermove", (e) => {
     if (!drag) return;
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     [drag.x, drag.y] = [e.clientX, e.clientY];
+    if (drag.pan) pan(dx, dy);
+    else orbit(dx, dy);
+  });
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    zoom(Math.exp(e.deltaY * 0.001));
+  }, { passive: false });
+
+  // The three camera moves, by screen pixels (and a distance factor for
+  // zoom), shared by the mouse above and the touch gestures (qol/touch.js).
+  // In photo mode they steer the free camera instead, so a finger flies it
+  // exactly as the mouse does.
+  function pan(dx, dy) {
     if (free) {
-      // Photo mode: drag turns the head (mouse-look), shift-drag slides.
-      if (drag.pan) {
-        const s = (radius * 0.6) / canvas.clientHeight;
-        fly(0, -dx * s, dy * s);
-      } else {
-        free.yaw += dx * 0.004;
-        free.pitch = Math.max(-1.55, Math.min(1.55, free.pitch - dy * 0.004));
-      }
-    } else if (drag.pan) {
-      // Panning means "I want to look elsewhere": leave follow mode.
-      if (follow.on) setFollow(false);
-      const s = cam.dist / canvas.clientHeight;
-      cam.target[0] -= (Math.cos(cam.yaw) * dx) * s;
-      cam.target[1] += (Math.sin(cam.yaw) * dx) * s;
-      cam.target[2] += cam.flip * dy * s;
+      // Photo mode: slide the eye sideways and up.
+      const s = (radius * 0.6) / canvas.clientHeight;
+      return fly(0, -dx * s, dy * s);
+    }
+    // Panning means "I want to look elsewhere": leave follow mode.
+    if (follow.on) setFollow(false);
+    const s = cam.dist / canvas.clientHeight;
+    cam.target[0] -= (Math.cos(cam.yaw) * dx) * s;
+    cam.target[1] += (Math.sin(cam.yaw) * dx) * s;
+    cam.target[2] += cam.flip * dy * s;
+  }
+  function orbit(dx, dy) {
+    if (free) {
+      // Photo mode: drag turns the head (mouse-look).
+      free.yaw += dx * 0.004;
+      free.pitch = Math.max(-1.55, Math.min(1.55, free.pitch - dy * 0.004));
     } else if (follow.on) {
       const look = lookAround();
       if (look) {
@@ -545,14 +566,14 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       cam.yaw -= dx * 0.005;
       cam.pitch = Math.max(-1.5, Math.min(1.5, cam.pitch + dy * 0.005));
     }
-  });
-  canvas.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    if (free) return fly(-e.deltaY * radius * 0.0004, 0, 0); // photo mode: dolly
+  }
+  function zoom(factor) {
+    // Photo mode: dolly along the view (the old wheel step, -deltaY·r·0.0004).
+    if (free) return fly(-Math.log(factor) * radius * 0.4, 0, 0);
     const look = follow.on && lookAround();
-    if (look) look.dist = Math.max(600, Math.min(40000, look.dist * Math.exp(e.deltaY * 0.001)));
-    else if (!follow.on) cam.dist *= Math.exp(e.deltaY * 0.001);
-  }, { passive: false });
+    if (look) look.dist = Math.max(600, Math.min(40000, look.dist * factor));
+    else if (!follow.on) cam.dist *= factor;
+  }
 
   function setFollow(on) {
     if (follow.on === on) return;
@@ -624,10 +645,17 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     setColourMatrix(m) { colourMatrix = m ? [...m] : [1, 0, 0, 0, 1, 0, 0, 0, 1]; },
     setFlashStrength(k) { flashStrength = k; },
     // A click at a page point, exactly as the mouse delivers it (button 0:
-    // onPick, 2: onTouch), for keyboard-only play (#49).
-    click(clientX, clientY, button = 0) {
-      if (!basis) return;
-      (button === 2 ? onTouch : onPick)(...rayThrough({ clientX, clientY }));
+    // onPick, 2: onTouch), for keyboard-only play (#49) and touch (#43).
+    // Like the mouse, it never reaches a world frozen in photo mode.
+    click: clickAt,
+    // The camera moves and clicks, for other input devices (qol/touch.js):
+    // orbit/pan by screen pixels, zoom by a distance factor, click at a page
+    // point (button 0 picks an object, 2 touches Mendel), hold while a
+    // finger rests on the view.
+    input: {
+      orbit, pan, zoom,
+      click: clickAt,
+      hold(on) { held = on; },
     },
     // Flip the up axis, for exploring the geometry upside down.
     flipUp() { cam.flip = -cam.flip; },
