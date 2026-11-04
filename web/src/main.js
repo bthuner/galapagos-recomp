@@ -17,6 +17,7 @@ import { stats } from "./qol/stats.js";
 import { rewindAfterDeath } from "./qol/rewind.js";
 import { fullscreen } from "./qol/fullscreen.js";
 import { hints } from "./qol/hints.js";
+import { photoMode } from "./qol/photo.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -31,6 +32,7 @@ const speed = gameSpeed(); // the loop below scales game time by speed.factor()
 mendelsMind(() => globalThis.galapagos?.engine); // the engine exists once the CD boots
 fullscreen();
 hints(); // reads globalThis.galapagos once boot() has published it
+const photo = photoMode(); // attached to the running world in boot()
 const log = (msg) => ($("log").textContent += msg + "\n");
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
 
@@ -249,6 +251,8 @@ async function boot(files, { fromCache = false } = {}) {
     load: (bytes = lastSave) => show(engine.game.load(bytes), { built: true }),
   };
   globalThis.galapagos = { engine, worlds, view, show, sfx, menu, game };
+  // Photo mode (qol/photo.js) pauses without the menu: it needs the flag.
+  photo.attach({ view, menu, pause: (v) => (paused = v), paused: () => paused, section: () => current, world: $("world"), title: $("title") });
   jukebox(engine, files, audio);
 }
 

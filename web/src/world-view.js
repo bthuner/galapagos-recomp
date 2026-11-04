@@ -246,6 +246,10 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   // (`look`: an orbit around Mendel that fades back to the original).
   const follow = { on: false, creature: null, look: null, cut: false };
   let lastTime = performance.now();
+  // Photo mode (qol/photo.js; not in the original): a free camera that
+  // takes over while set and leaves `cam` and `follow` untouched, so
+  // leaving it brings back exactly the view that was there before.
+  let free = null; // { eye, yaw, pitch, fov, near }
 
   function load(world) {
     gl.bindVertexArray(vao);
@@ -311,10 +315,10 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     lastTime = now;
     // Run the simulation first: the camera we draw is the one it produced.
     const alpha = onFrame() ?? 1;
-    const view = (follow.on && engineView(alpha, dt)) || orbitView();
+    const view = (free && freeView()) || (follow.on && engineView(alpha, dt)) || orbitView();
     // Close to Mendel the near plane must be close too.
-    const near = follow.on ? 40 : radius / 500;
-    const fov = follow.on ? ORIGINAL_FOV : ORBIT_FOV;
+    const near = free ? free.near : follow.on ? 40 : radius / 500;
+    const fov = free ? free.fov : follow.on ? ORIGINAL_FOV : ORBIT_FOV;
     const proj = perspective(fov, w / h, near, radius * 8);
     basis = { ...view, aspect: w / h, fov };
     gl.useProgram(prog);
@@ -410,6 +414,21 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   }
   const orbitView = () => orbitAt(cam.target, cam.yaw, cam.pitch, cam.dist);
 
+  // The free camera: an eye and a heading (yaw about +z, pitch towards +z).
+  // It has no roll, so the horizon stays level.
+  function freeView() {
+    const c = Math.cos(free.pitch);
+    const forward = [c * Math.sin(free.yaw), c * Math.cos(free.yaw), Math.sin(free.pitch)];
+    const right = v3.norm(v3.cross(forward, UP.map((u) => u * cam.flip)));
+    return { eye: free.eye, forward, up: v3.cross(right, forward), right };
+  }
+  // Move the free eye by world units along its own axes.
+  function fly(f, r, u) {
+    if (!free) return;
+    const v = freeView();
+    free.eye = free.eye.map((e, i) => e + v.forward[i] * f + v.right[i] * r + v.up[i] * u);
+  }
+
   // The original camera, from the engine: it moves at 24 Hz, so we draw
   // the previous tick's view blended towards the current one by `alpha`,
   // the fraction of the next tick already elapsed. not in the original:
@@ -474,7 +493,7 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   });
   canvas.addEventListener("pointerup", (e) => {
     const moved = drag && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) > 4;
-    if (drag && !moved && !drag.pan && basis) {
+    if (drag && !moved && !drag.pan && basis && !free) { // no clicks into a paused world
       if (drag.button === 0) onPick(...rayThrough(e));
       if (drag.button === 2) onTouch(...rayThrough(e));
     }
@@ -500,7 +519,16 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     if (!drag) return;
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     [drag.x, drag.y] = [e.clientX, e.clientY];
-    if (drag.pan) {
+    if (free) {
+      // Photo mode: drag turns the head (mouse-look), shift-drag slides.
+      if (drag.pan) {
+        const s = (radius * 0.6) / canvas.clientHeight;
+        fly(0, -dx * s, dy * s);
+      } else {
+        free.yaw += dx * 0.004;
+        free.pitch = Math.max(-1.55, Math.min(1.55, free.pitch - dy * 0.004));
+      }
+    } else if (drag.pan) {
       // Panning means "I want to look elsewhere": leave follow mode.
       if (follow.on) setFollow(false);
       const s = cam.dist / canvas.clientHeight;
@@ -520,6 +548,7 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   });
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
+    if (free) return fly(-e.deltaY * radius * 0.0004, 0, 0); // photo mode: dolly
     const look = follow.on && lookAround();
     if (look) look.dist = Math.max(600, Math.min(40000, look.dist * Math.exp(e.deltaY * 0.001)));
     else if (!follow.on) cam.dist *= Math.exp(e.deltaY * 0.001);
@@ -613,5 +642,33 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     // and drop any look-around.
     snap() { follow.cut = true; follow.look = null; },
     stop() { running = false; },
+    // ——— Photo mode (qol/photo.js) ———
+    // Start a free camera exactly where the current one is, or drop it
+    // (the orbit or follow camera underneath was never touched).
+    freeCamera(on) {
+      if (!on) return void (free = null);
+      if (free || !basis) return;
+      const f = v3.norm(basis.forward);
+      free = {
+        eye: [...basis.eye],
+        yaw: Math.atan2(f[0], f[1]),
+        pitch: Math.asin(Math.max(-1, Math.min(1, f[2]))),
+        fov: basis.fov,
+        near: follow.on ? 40 : radius / 500,
+      };
+    },
+    fly,
+    // The section's half-diagonal in world units: a sense of scale for speeds.
+    get size() { return radius; },
+    // The picture as it is now, in a 2-D canvas. The WebGL canvas keeps no
+    // drawing buffer once a frame is shown (preserveDrawingBuffer is off: it
+    // would cost a copy every frame), so we draw one more frame and copy it
+    // out in the same task, before the browser may clear it.
+    snapshot() {
+      draw();
+      const out = Object.assign(document.createElement("canvas"), { width: canvas.width, height: canvas.height });
+      out.getContext("2d").drawImage(canvas, 0, 0);
+      return out;
+    },
   };
 }

@@ -687,3 +687,59 @@ body:not(.dev-mode) .dev-only { display: none !important; }
 
 .hint__close:hover, .hint__close:focus-visible { color: var(--lime); background: #ffffff10; outline: none; }
 @media (prefers-reduced-motion: reduce) { .hint { transition: opacity 0.2s; transform: none; } }
+
+/* Photo mode (qol/photo.js): only the 3-D view and the photo bar remain.
+   Generic on purpose: any overlay added later is hidden too. */
+body.is-photo > :not(#stage, .photo-hud, .photo-flash),
+body.is-photo .stage > :not(.world-frame),
+body.is-photo .world-frame > :not(#world) { display: none !important; }
+body.is-photo.is-photo-title .world-frame > #title:not([hidden]) { display: block !important; }
+body.is-photo #world { outline: 1px solid #c6ff3d33; outline-offset: 4px; }
+.photo-hud {
+  position: fixed;
+  left: 50%;
+  bottom: 1rem;
+  z-index: 20;
+  transform: translateX(-50%);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 0.6rem 1rem;
+  max-width: calc(100vw - 2rem);
+  padding: 0.55rem 0.7rem 0.55rem 1.1rem;
+  border: 1px solid #ffffff1f;
+  border-radius: 1.4rem;
+  background: #050b0dd9;
+  backdrop-filter: blur(8px);
+  font-size: 0.8rem;
+  animation: photo-in 0.4s var(--ease);
+}
+.photo-hud[hidden] { display: none; }
+.photo-hud strong { color: var(--lime); letter-spacing: 0.04em; }
+.photo-hud__help { color: var(--mute); }
+.photo-hud__title { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; }
+.photo-hud__title[hidden] { display: none; }
+.photo-hud button {
+  font: inherit;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid #ffffff33;
+  background: none;
+  color: var(--bone);
+  cursor: pointer;
+}
+.photo-hud button:hover, .photo-hud button:focus-visible { border-color: var(--lime); color: var(--lime); outline: none; }
+.photo-hud .photo-hud__shoot { background: var(--lime); border-color: var(--lime); color: var(--abyss); }
+.photo-hud .photo-hud__shoot:hover { color: var(--abyss); filter: brightness(1.1); }
+.photo-hud kbd { font: 0.7rem ui-monospace, monospace; opacity: 0.7; }
+.photo-hud__note { flex-basis: 100%; text-align: center; color: var(--mute); font-size: 0.7rem; }
+.photo-hud__note:empty { display: none; }
+/* The shutter: a white flash that fades, like the title's own entrance. */
+.photo-flash { position: fixed; inset: 0; z-index: 19; background: #fff; pointer-events: none; animation: photo-flash 0.45s ease-out forwards; }
+@keyframes photo-flash { from { opacity: 0.7; } to { opacity: 0; } }
+@keyframes photo-in { from { opacity: 0; transform: translate(-50%, 0.6rem); } }
+@media (prefers-reduced-motion: reduce) {
+  .photo-hud { animation: none; }
+  .photo-flash { animation-duration: 0.01s; opacity: 0.15; }
+}
