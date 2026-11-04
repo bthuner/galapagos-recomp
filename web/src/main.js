@@ -7,6 +7,7 @@ import { createMenu } from "./menu.js";
 import { showTimeScreen } from "./time-screen.js";
 import { startTitleOverlay } from "./title.js";
 import { frameMeter } from "./qol/frame-meter.js";
+import { touchControls } from "./qol/touch.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -137,6 +138,7 @@ async function boot(files) {
     onFollowChange: (on) => ($("follow-mendel").checked = on),
     camera: engine.camera.state,
   });
+  touchControls(view); // Quality of Life: taps, pinches, Menu and Skip buttons
   // The original camera is on by default, from the moment a section loads
   // (before Mendel exists it holds the section's default key), and again
   // whenever he appears, unless the player turned it off.
