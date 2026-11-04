@@ -264,6 +264,16 @@ kbd { font: 0.7rem ui-monospace, monospace; color: var(--mute); border: 1px soli
 
 /* ——— Quality of Life panel (rows rendered by qol.js) ——— */
 .qol { display: grid; gap: 0.2rem; margin: 1rem 0; }
+/* On tablets and desktops the card widens and the rows flow into two or
+   three columns (each at least 19rem): CSS columns suit the flat list of
+   group headings and rows qol.js renders. A row never splits, and a
+   heading never ends a column on its own. */
+@media (min-width: 48rem) {
+  .menu__card:has([data-panel="qol"]:not([hidden])) { width: min(66rem, 94vw); }
+  .qol { display: block; columns: 19rem 3; column-gap: 1.6rem; }
+  .qol__row { break-inside: avoid; margin-bottom: 0.2rem; }
+  .qol__group { break-after: avoid; }
+}
 .qol__group {
   margin: 0.8rem 0 0.2rem;
   font-size: 0.7rem;
