@@ -39,6 +39,7 @@ export function gameSpeed() {
     default: 1, // pacing changes default off (#37)
     notOriginal: true,
     group: "Pacing",
+    order: 0,
     shortcut: "KeyG",
   });
 

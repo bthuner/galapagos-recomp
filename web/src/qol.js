@@ -33,6 +33,17 @@
 // 4. Label honestly: `notOriginal: true` for anything the 1997 game did not
 //    have. `false` is for faithful options that merely live here.
 // 5. Add a line to the making-of journal.
+// 6. Pick an `order` of your own. Rows sort by `order` alone, and a tie
+//    falls back to registration order, which depends on when main.js calls
+//    each feature. So two features that both say 10 interleave their rows
+//    (Autosave, Fullscreen, Autosave interval…). Give each feature its own
+//    decade and number its rows inside it. Taken so far:
+//      Comfort        0 fullscreen · 10–11 autosave · 20–21 skip intro ·
+//                     30–31 hints · 40 hover highlight · 50 touch ·
+//                     90 developer mode · 100 frame meter
+//      Pacing         0 speed · 10 rewind
+//      Explore        0–1 worlds, music & movies · 10 Mendel's mind · 20 photo
+//      Accessibility  0–3 options · 10–12 keyboard-play keys
 //
 // Shortcuts are `KeyboardEvent.code` strings ("KeyF", "Backquote", "F2"):
 // physical keys, so they sit in the same place on AZERTY and QWERTY. They are
@@ -92,7 +103,8 @@ function valid(def, v) {
  *   default      initial value (ignored for buttons)
  *   notOriginal  true if the 1997 game had no such thing (required)
  *   group        panel heading, default "Comfort"
- *   order        sort order inside the group (default 0; then registration)
+ *   order        sort order inside the group (default 0; ties fall back to
+ *                registration order, so use your own decade: see step 6)
  *   shortcut     optional key code: flips a toggle, cycles a choice,
  *                presses a button
  *   inMenu       the shortcut also works while the pause menu is open

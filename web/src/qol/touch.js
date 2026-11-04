@@ -38,6 +38,7 @@ export function touchControls(view) {
     default: "auto",
     notOriginal: true,
     group: "Comfort",
+    order: 50,
   });
 
   const canvas = document.getElementById("world");

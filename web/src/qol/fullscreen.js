@@ -85,7 +85,7 @@ export function fullscreen() {
     buttonLabel: "Enter / leave",
     notOriginal: true, // the 1997 game ran in a window or switched display mode
     group: "Comfort",
-    order: 10,
+    order: 0,
     shortcut: "KeyF",
     inMenu: true, // so F also leaves fullscreen from the pause menu
     action: toggle,

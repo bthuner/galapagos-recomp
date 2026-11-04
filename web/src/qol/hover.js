@@ -35,6 +35,7 @@ export function hover(game = () => globalThis.galapagos, canvas = document.getEl
     default: false,
     notOriginal: true,
     group: "Comfort",
+    order: 40,
   });
 
   let pointer = null; // last mouse position over the view, or null

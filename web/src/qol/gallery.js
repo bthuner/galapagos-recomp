@@ -68,6 +68,7 @@ export function gallery() {
     default: false,
     notOriginal: true,
     group: "Explore",
+    order: 1, // right under the screen it unlocks
   });
   unlockAll.on(() => refresh());
   register({
@@ -78,7 +79,7 @@ export function gallery() {
     buttonLabel: "Open",
     notOriginal: true,
     group: "Explore",
-    order: -1, // the screen first, its toggle after
+    order: 0, // the screen first, its toggle after
     action: () => app?.menu.show("gallery"),
   });
 

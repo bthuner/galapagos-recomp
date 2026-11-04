@@ -41,6 +41,7 @@ export function rewindAfterDeath(engine, parent) {
     default: false,
     notOriginal: true,
     group: "Pacing",
+    order: 10,
   });
 
   const hz = engine.sim.ticksPerSecond();

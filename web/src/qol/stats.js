@@ -245,7 +245,12 @@ export function stats({ engine, menu }) {
   menu.onShow("stats", () => ((confirming = false), render()));
 }
 
-/** Run `fn` without counting a save (for autosave, #39). */
+/**
+ * Run `fn` without counting a save. Autosave (#39) does not need it: it
+ * calls `engine.game.autosave()`, which is never wrapped here, so autosaves
+ * are not "saves made" (and leave the respawn point alone). This is for any
+ * other caller of `engine.game.save()` that is not the player saving.
+ */
 let quiet = false;
 export function uncounted(fn) {
   quiet = true;

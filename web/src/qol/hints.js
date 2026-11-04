@@ -94,7 +94,7 @@ export function hints() {
     default: false,
     notOriginal: true,
     group: "Comfort",
-    order: 20,
+    order: 30,
   });
   register({
     key: "resetHints",
@@ -104,7 +104,7 @@ export function hints() {
     buttonLabel: "Reset",
     notOriginal: true,
     group: "Comfort",
-    order: 21,
+    order: 31,
     action: () => {
       seen = {};
       localStorage.removeItem(STORE);

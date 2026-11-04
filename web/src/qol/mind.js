@@ -84,6 +84,7 @@ export function mendelsMind(getEngine) {
     default: false,
     notOriginal: true,
     group: "Explore",
+    order: 10,
     shortcut: "KeyM",
   });
 

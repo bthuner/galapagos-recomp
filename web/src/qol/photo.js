@@ -52,6 +52,7 @@ export function photoMode() {
     buttonLabel: "Enter",
     notOriginal: true,
     group: "Explore",
+    order: 20,
     shortcut: "KeyP",
     action: () => (on ? leave() : enter()),
   });
