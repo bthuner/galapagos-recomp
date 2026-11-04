@@ -7,12 +7,14 @@ import { createMenu } from "./menu.js";
 import { showTimeScreen } from "./time-screen.js";
 import { startTitleOverlay } from "./title.js";
 import { frameMeter } from "./qol/frame-meter.js";
+import { hints } from "./qol/hints.js";
 
 const $ = (id) => document.getElementById(id);
 
 // Quality of Life features (Pause ▸ Quality of Life, see qol.js): one call
 // each. They register their settings; the menu renders whatever is there.
 frameMeter();
+hints(); // reads globalThis.galapagos once boot() has published it
 const log = (msg) => ($("log").textContent += msg + "\n");
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
 

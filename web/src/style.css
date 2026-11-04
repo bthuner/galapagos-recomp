@@ -350,3 +350,52 @@ kbd { font: 0.7rem ui-monospace, monospace; color: var(--mute); border: 1px soli
   font: 0.7rem ui-monospace, monospace;
   pointer-events: none;
 }
+
+/* First-time hints (qol/hints.js): bottom-left of the 3-D view, away from
+   Mendel in the centre and from toasts at the bottom centre. */
+.hint {
+  position: absolute;
+  left: 0.9rem;
+  bottom: 0.9rem;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  max-width: min(22rem, 70%);
+  padding: 0.5rem 0.5rem 0.5rem 0.85rem;
+  border-left: 2px solid var(--lime);
+  border-radius: 4px 10px 10px 4px;
+  background: #050b0dd9;
+  backdrop-filter: blur(6px);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  color: var(--bone);
+  opacity: 0;
+  transform: translateY(0.4rem);
+  pointer-events: none;
+  transition: opacity 0.5s var(--ease), transform 0.5s var(--ease);
+}
+.hint.is-on { opacity: 1; transform: none; pointer-events: auto; }
+.hint p { margin: 0; }
+.hint kbd {
+  font: 0.72rem ui-monospace, monospace;
+  padding: 0.05rem 0.35rem;
+  border: 1px solid #ffffff44;
+  border-radius: 4px;
+  color: var(--lime);
+}
+.hint__close {
+  flex: none;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--mute);
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.hint__close:hover, .hint__close:focus-visible { color: var(--lime); background: #ffffff10; outline: none; }
+@media (prefers-reduced-motion: reduce) { .hint { transition: opacity 0.2s; transform: none; } }
