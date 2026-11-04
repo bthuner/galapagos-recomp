@@ -374,3 +374,19 @@ kbd { font: 0.7rem ui-monospace, monospace; color: var(--mute); border: 1px soli
 }
 .continue small { font-size: 0.65rem; letter-spacing: 0.08em; text-transform: none; opacity: 0.75; }
 .continue:hover { filter: brightness(1.1); }
+
+/* Later visits with "Skip intro" on (qol/skip-intro.js): the start button
+   reads "New game", Continue stays under it, and the intro becomes a quiet
+   third choice at the foot of the screen. */
+.start__replay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 1.5rem;
+  margin: 0 auto;
+  width: max-content;
+  font-size: 0.8rem;
+  letter-spacing: 0.1em;
+  color: var(--mute);
+}
+.start__replay:hover { color: var(--bone); }
