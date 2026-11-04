@@ -534,7 +534,7 @@ export function mendelsMind(getEngine) {
     let y = y0 + 20;
     const mode = MODES[m[M.mode]] || "?";
     text(mode[0].toUpperCase() + mode.slice(1), 0, y, { font: `600 12px ${SANS}`, color: m[M.mode] === 2 ? C.lime : C.bone });
-    text(`pain ${m[M.pains]} · deaths ${m[M.deaths]} · touches felt ${m[M.touches]}${m[M.savePad] ? " · on a save pad" : ""}`, W, y, { font: `9.5px ${MONO}`, align: "right" });
+    text(`pain ${m[M.pains]} · deaths ${m[M.deaths]} · touched ${m[M.clicks]} · steps ${m[M.touches]}${m[M.savePad] ? " · on a save pad" : ""}`, W, y, { font: `9.5px ${MONO}`, align: "right" });
     y += 18;
     const kind = m[M.affliction];
     if (kind) {

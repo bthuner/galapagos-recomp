@@ -80,7 +80,7 @@ export function fullscreen() {
   register({
     key: "fullscreen",
     label: "Fullscreen",
-    help: "The world fills the screen, letterboxed. F again to leave.",
+    help: "The world fills the screen, letterboxed, at the View Size chosen in Preferences (Full = edge to edge). F again to leave.",
     type: "button",
     buttonLabel: "Enter / leave",
     notOriginal: true, // the 1997 game ran in a window or switched display mode
