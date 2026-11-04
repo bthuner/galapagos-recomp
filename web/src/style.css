@@ -350,3 +350,27 @@ kbd { font: 0.7rem ui-monospace, monospace; color: var(--mute); border: 1px soli
   font: 0.7rem ui-monospace, monospace;
   pointer-events: none;
 }
+
+/* Continue (qol/autosave.js): under "Press to begin", filled, so the two
+   read as "pick up where you were" and "start the game from its intro". */
+.continue {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(50% + 3.2rem);
+  margin: 0 auto;
+  width: max-content;
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.7rem 1.8rem;
+  border: 1px solid var(--lime);
+  border-radius: 999px;
+  background: var(--lime);
+  color: var(--abyss);
+  font: inherit;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.continue small { font-size: 0.65rem; letter-spacing: 0.08em; text-transform: none; opacity: 0.75; }
+.continue:hover { filter: brightness(1.1); }
