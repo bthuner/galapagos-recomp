@@ -1035,6 +1035,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑02</time> The bounce response (<code>0x408c50</code>) ported exactly, for predators and the camera: a perpendicular push only when the probe went behind the wall, plus the stored normal's nudge.</li>
           <li><time>2026‑11‑02</time> Level load enters every initial state before the first tick, as <code>0x4222d0</code> does: World 2 (and World 1) now spawn Mendel without "Wake every machine".</li>
           <li><time>2026‑11‑02</time> Blinking reported again: traced to a browser serving the pre-fix engine from its cache. Checked against the footage; the engine is now always revalidated before use.</li>
+          <li><time>2026‑11‑04</time> Rewind after death, a Quality of Life toggle (off by default). Every 5 s of game time, while Mendel is alive and well, the engine keeps a rewind point in memory: the world as the death snapshot sees it plus his body, never his brain (18 µs in WebAssembly). When he dies, a small prompt offers "Retry from 10, 20 or 30 s ago" until he has rematerialised; ignore it and the 1997 respawn happens. Choosing one puts the world and his body back but keeps his mind: the brain, this death's pain still waiting in the learning accumulators, and the death count. It is the original's own idea of a death, with a nearer snapshot, and it never writes a save.</li>
         </ol>
       </section>
 

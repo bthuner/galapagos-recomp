@@ -272,6 +272,20 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
     // `Tally::snapshot` documents. Counters only grow; see qol/stats.js.
     stats: () => new Uint32Array(wasm.memory.buffer, wasm.stats_snapshot(), 52),
 
+    // Quality of Life "Rewind after death" (#45, not in the original): a
+    // few in-memory rewind points (the world plus Mendel's body, never his
+    // brain), see web/src/qol/rewind.js and Sim::rewind_point.
+    rewind: {
+      // Into slot 0..15; false if Mendel is not alive and well.
+      take: (slot) => wasm.rewind_take(slot) === 1,
+      // Back to slot's point; false if empty or from another section build.
+      restore: (slot) => wasm.rewind_restore(slot) === 0,
+      forget: () => wasm.rewind_forget(),
+      // "absent" | "alive" | "dying" (towards a respawn) | "appearing" |
+      // "leaving" (a teleport or a level end).
+      status: () => ["absent", "alive", "dying", "appearing", "leaving"][wasm.rewind_status()],
+    },
+
     // ——— Menus ———
     // File ▸ New with the Preferences age (0..255); then build section 0.
     newGame: (age) => wasm.game_new(age),

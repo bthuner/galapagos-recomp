@@ -14,6 +14,7 @@ import { a11y } from "./qol/a11y.js";
 import { gameSpeed } from "./qol/speed.js";
 import { mendelsMind } from "./qol/mind.js";
 import { stats } from "./qol/stats.js";
+import { rewindAfterDeath } from "./qol/rewind.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -93,6 +94,7 @@ async function boot(files, { fromCache = false } = {}) {
   };
 
   const sfx = createSfx(engine, audio, volume);
+  rewindAfterDeath(engine, $("world").parentElement); // QoL #45: needs the engine, so it starts here
   let paused = false; // while the pause menu or the time screen is up
   let timeScreenUp = false;
 

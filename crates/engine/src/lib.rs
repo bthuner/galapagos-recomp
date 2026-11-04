@@ -240,6 +240,8 @@ fn build_section(worlds: &mut Worlds, i: usize) -> i32 {
     worlds.section = i;
     let mut sim = sim::Sim::build(&section, &mesh);
     sim.section = i;
+    // Rewind points belong to the build they were taken in (#45).
+    rewind_forget();
     let old = worlds.sim.take();
     // The `Save` variables and the game clock outlive the section; the
     // level clock restarts (`Game_LevelEnd` @ 0x41c8c0: start = total).
@@ -1071,6 +1073,84 @@ pub extern "C" fn game_reset_progress() {
         sim.total_ticks = 0;
         sim.level_start_ticks = 0;
     });
+}
+
+// ——— Quality of Life: rewind after death (#45, not in the original) ———————
+//
+// A few rewind points (`Sim::rewind_point`: the world plus Mendel's body,
+// never his brain) held in memory slots. The host decides when to take
+// them and which to offer (web/src/qol/rewind.js); they never reach a
+// saved game, and a new build of a section forgets them.
+
+thread_local! {
+    static REWIND: RefCell<Vec<Option<sim::save::RewindPoint>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Slots a host may use: 0..REWIND_SLOTS.
+pub const REWIND_SLOTS: u32 = 16;
+
+/// Take a rewind point into `slot`. Returns 1, or 0 if Mendel is not alive
+/// and well (dying, materialising, absent) or `slot` is out of range.
+#[no_mangle]
+pub extern "C" fn rewind_take(slot: u32) -> u32 {
+    if slot >= REWIND_SLOTS {
+        return 0;
+    }
+    let p = WORLDS.with(|w| w.borrow().as_ref().and_then(|w| w.sim.as_ref()).and_then(|s| s.rewind_point()));
+    let Some(p) = p else { return 0 };
+    REWIND.with(|r| {
+        let mut r = r.borrow_mut();
+        if r.len() <= slot as usize {
+            r.resize(slot as usize + 1, None);
+        }
+        r[slot as usize] = Some(p);
+    });
+    1
+}
+
+/// Go back to the point in `slot` (see `Sim::rewind_to`). Returns 0 on
+/// success, -1 for an empty slot, -2 if no section runs, -3 if the point
+/// belongs to another build of a section. The camera starts afresh from
+/// where he stands, and the next `sim_tick` reports a camera cut.
+#[no_mangle]
+pub extern "C" fn rewind_restore(slot: u32) -> i32 {
+    let Some(p) = REWIND.with(|r| r.borrow().get(slot as usize).cloned().flatten()) else { return -1 };
+    WORLDS.with(|w| {
+        let mut guard = w.borrow_mut();
+        let Some(worlds) = guard.as_mut() else { return -2 };
+        let (Some(sim), Some(mesh)) = (worlds.sim.as_mut(), worlds.mesh.as_mut()) else { return -2 };
+        if !sim.rewind_to(&p, mesh) {
+            return -3;
+        }
+        if let Some(cam) = worlds.camera.as_mut() {
+            cam.start_loaded(sim);
+        }
+        0
+    })
+}
+
+/// Forget every rewind point.
+#[no_mangle]
+pub extern "C" fn rewind_forget() {
+    REWIND.with(|r| r.borrow_mut().clear());
+}
+
+/// Where Mendel is in his life, as the rewind cares: 0 absent, 1 alive,
+/// 2 dying (vanishing towards a respawn: a lethal floor, a bite, a kind-6
+/// portal), 3 materialising, 4 vanishing for a teleport or a level end.
+#[no_mangle]
+pub extern "C" fn rewind_status() -> u32 {
+    use creature::{After, Mode};
+    with_creature(
+        |c| match c.mode {
+            Mode::Absent => 0,
+            Mode::Alive => 1,
+            Mode::Vanishing(_, After::Respawn) => 2,
+            Mode::Appearing(_) => 3,
+            Mode::Vanishing(..) => 4,
+        },
+        0,
+    )
 }
 
 /// Layout of the time screen (`TimeScreen_Select` @ 0x41a2d0) for `level`
