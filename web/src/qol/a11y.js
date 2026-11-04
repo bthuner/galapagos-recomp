@@ -319,7 +319,10 @@ export function a11y(game = () => globalThis.galapagos, canvas = document.getEle
       c = { node };
       shown.set(key, c);
     }
-    c.node.lastChild.textContent = text;
+    if (c.node.lastChild.textContent !== text) {
+      c.node.lastChild.textContent = text;
+      c.size = null; // measure again, once, in place()
+    }
     c.node.classList.remove("is-fading");
     c.until = performance.now() + CUE_MS;
     c.where = where;
@@ -345,8 +348,11 @@ export function a11y(game = () => globalThis.galapagos, canvas = document.getEle
       }
       if (!dx && !dy) dy = -1;
     }
-    // Keep the whole marker inside the view, 8 px clear of its edge.
-    const mx = c.node.offsetWidth / 2 + 8, my = c.node.offsetHeight / 2 + 8;
+    // Keep the whole marker inside the view, 8 px clear of its edge. The
+    // size is measured only when the text changes: reading offsetWidth
+    // right after last frame's style writes forces a layout every frame.
+    c.size ??= [c.node.offsetWidth, c.node.offsetHeight];
+    const mx = c.size[0] / 2 + 8, my = c.size[1] / 2 + 8;
     const t = Math.min((b.width / 2 - mx) / Math.abs(dx || 1e-9), (b.height / 2 - my) / Math.abs(dy || 1e-9));
     c.node.style.left = `${cx + dx * t}px`;
     c.node.style.top = `${cy + dy * t}px`;
@@ -415,7 +421,10 @@ export function a11y(game = () => globalThis.galapagos, canvas = document.getEle
       }
     }
     // Colours and flashes need the view refreshed once; the rest per frame.
-    if ((keyboard.get() && focus) || shown.size || cues.get()) raf = requestAnimationFrame(tick);
+    // `cue()` above may already have scheduled the next frame (it calls
+    // run()): never schedule a second one, or every frame Mendel spends on
+    // a save pad doubles the number of loops until the tab freezes.
+    if (!raf && ((keyboard.get() && focus) || shown.size || cues.get())) raf = requestAnimationFrame(tick);
   }
   run();
 }
