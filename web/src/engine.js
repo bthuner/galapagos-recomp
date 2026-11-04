@@ -174,6 +174,8 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
       },
       // Right click: a ray against his mesh. Returns "left", "right" or null.
       touch: (o, d) => [null, "left", "right"][wasm.creature_touch_ray(o[0], o[1], o[2], d[0], d[1], d[2])],
+      // The side that ray would touch, without touching (keyboard play, #49).
+      side: (o, d) => [null, "left", "right"][wasm.creature_side_ray(o[0], o[1], o[2], d[0], d[1], d[2])],
       // His affliction (crates/engine/src/affliction.rs): { kind, ticksLeft },
       // kind 0 = none.
       affliction() {

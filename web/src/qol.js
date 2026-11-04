@@ -90,7 +90,11 @@ function valid(def, v) {
  *   shortcut     optional key code: flips a toggle, cycles a choice,
  *                presses a button
  *   inMenu       the shortcut also works while the pause menu is open
- *   action       for "button" and "key": what pressing it does
+ *   action       for "button" and "key": what pressing it does; a "key"
+ *                action receives the KeyboardEvent (to read e.shiftKey)
+ *   active       optional () => boolean: the shortcut is only taken while
+ *                it returns true (otherwise the key keeps its usual job,
+ *                e.g. Tab still moves focus outside the game view)
  */
 export function register(def) {
   if (settings.has(def.key)) throw new Error(`QoL setting "${def.key}" is registered twice`);
@@ -265,13 +269,13 @@ const typing = (t) =>
   (t.isContentEditable || t.tagName === "TEXTAREA" || t.tagName === "SELECT" ||
     (t.tagName === "INPUT" && !["checkbox", "radio", "range", "button", "submit"].includes(t.type)));
 
-function press(d) {
+function press(d, e) {
   if (d.type === "toggle") set(d.key, !get(d.key));
   else if (d.type === "choice") {
     const i = d.options.findIndex((o) => o.value === get(d.key));
     set(d.key, d.options[(i + 1) % d.options.length].value);
   } else if (d.type === "button") set(d.key);
-  else d.action?.(); // "key": the binding itself is the value
+  else d.action?.(e); // "key": the binding itself is the value
 }
 
 // Registered when this module is first imported, before menu.js adds its Esc
@@ -295,10 +299,10 @@ addEventListener("keydown", (e) => {
   const menuOpen = mounted?.menuOpen() ?? false;
   for (const d of settings.values()) {
     const code = d.type === "key" ? get(d.key) : d.shortcut;
-    if (code !== e.code || (menuOpen && !d.inMenu)) continue;
+    if (code !== e.code || (menuOpen && !d.inMenu) || (d.active && !d.active())) continue;
     e.preventDefault();
     e.stopImmediatePropagation();
-    press(d);
+    press(d, e);
     return;
   }
 }, true);

@@ -10,6 +10,7 @@ import { frameMeter } from "./qol/frame-meter.js";
 import { hover } from "./qol/hover.js";
 import { autosave } from "./qol/autosave.js";
 import { skipIntro } from "./qol/skip-intro.js";
+import { a11y } from "./qol/a11y.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -19,6 +20,7 @@ frameMeter();
 hover(); // highlight clickable objects (#41): reads globalThis.galapagos once a world is up
 autosave();
 const intro = skipIntro();
+a11y(); // accessibility options (#49): colour presets, keyboard play, sound cues, softer flashes
 const log = (msg) => ($("log").textContent += msg + "\n");
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
 

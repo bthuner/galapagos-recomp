@@ -390,3 +390,41 @@ kbd { font: 0.7rem ui-monospace, monospace; color: var(--mute); border: 1px soli
   color: var(--mute);
 }
 .start__replay:hover { color: var(--bone); }
+/* Accessibility (qol/a11y.js, #49). The game view, focusable for keyboard play. */
+.world:focus-visible { outline: 2px solid var(--lime); outline-offset: 3px; }
+/* The focused object's hint, in the view's bottom-left corner (placed by JS). */
+.a11y-hint {
+  position: fixed;
+  z-index: 12;
+  transform: translateY(-100%);
+  max-width: 60vw;
+  padding: 0.3rem 0.6rem;
+  border-radius: 4px;
+  background: #050b0dd9;
+  color: var(--bone);
+  font: 0.75rem ui-monospace, monospace;
+  pointer-events: none;
+}
+/* Sound cues: small markers on the view's edges, never in the middle. */
+.a11y-cues { position: fixed; inset: 0; z-index: 11; pointer-events: none; }
+.a11y-cue {
+  position: fixed;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  opacity: 1;
+  transition: opacity 0.5s;
+}
+.a11y-cue.is-fading { opacity: 0; }
+.a11y-cue__arrow { display: block; font-style: normal; color: var(--lime); font-size: 1rem; line-height: 1; text-shadow: 0 0 4px #000; }
+.a11y-cue__text {
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  background: #050b0dd9;
+  border: 1px solid var(--lime);
+  color: var(--bone);
+  font: 0.7rem ui-monospace, monospace;
+  white-space: nowrap;
+}
