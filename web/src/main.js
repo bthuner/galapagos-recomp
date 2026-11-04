@@ -7,12 +7,14 @@ import { createMenu } from "./menu.js";
 import { showTimeScreen } from "./time-screen.js";
 import { startTitleOverlay } from "./title.js";
 import { frameMeter } from "./qol/frame-meter.js";
+import { gallery } from "./qol/gallery.js";
 
 const $ = (id) => document.getElementById(id);
 
 // Quality of Life features (Pause ▸ Quality of Life, see qol.js): one call
 // each. They register their settings; the menu renders whatever is there.
 frameMeter();
+const extras = gallery(); // world select, jukebox, intro: hooked into boot() below
 const log = (msg) => ($("log").textContent += msg + "\n");
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
 
@@ -71,12 +73,12 @@ async function boot(files) {
   const hz = engine.sim.ticksPerSecond();
   let clock = 0, last = performance.now(), current = 0;
 
-  const music = (n) => {
+  const music = extras.music((n) => {
     dispatchEvent(new KeyboardEvent("keydown")); // stop the current track
     if (n > 0 && files[String(n)]) {
       bytesOf(files[String(n)]).then((b) => playMovie(engine, b, $("screen"), audio, { destination: volume }));
     }
-  };
+  });
 
   const sfx = createSfx(engine, audio, volume);
   let paused = false; // while the pause menu or the time screen is up
@@ -172,6 +174,7 @@ async function boot(files) {
   // show the one the engine already rebuilt.
   const show = (i, { built = false } = {}) => {
     current = i;
+    extras.reached(i);
     sfx.reset();
     const w = built ? worlds.current() : worlds.build(i);
     view.load({ ...w, takeDirty: engine.sim.takeDirty, creatureVertices: engine.creature.vertices, tint: engine.sim.tint });
@@ -227,6 +230,7 @@ async function boot(files) {
     load: (bytes = lastSave) => show(engine.game.load(bytes), { built: true }),
   };
   globalThis.galapagos = { engine, worlds, view, show, sfx, menu, game };
+  extras.attach({ engine, files, audio, out: volume, show, menu, status, scanlines, sections: worlds.sectionCount });
   jukebox(engine, files, audio);
 }
 

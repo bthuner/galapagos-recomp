@@ -154,6 +154,7 @@ export function createMenu(app) {
     },
     prefs: () => show("prefs"),
     qol: () => show("qol"),
+    gallery: () => show("gallery"),
     stats: () => show("stats"),
     sounds: () => {
       // Every non-empty sound of the current world (bank 0) and Mendel's
@@ -248,6 +249,13 @@ export function createMenu(app) {
     },
     // The Stats panel's body, for #50 to fill (it holds a placeholder until then).
     statsPanel: $(".menu__stats"),
+    // Open the menu on `panel` ("gallery", …), or close it: for features
+    // that live in a panel and act on the game.
+    show(panel) {
+      setOpen(true);
+      show(panel);
+    },
+    close: () => setOpen(false),
     // Call `fn` every time `panel` ("stats", "qol", …) is shown. Returns an unsubscribe.
     onShow(panel, fn) {
       if (!onShow.has(panel)) onShow.set(panel, new Set());

@@ -84,6 +84,7 @@
           <hr />
           <button data-action="prefs">Preferences…</button>
           <button data-action="qol">Quality of Life…</button>
+          <button data-action="gallery">Worlds, music &amp; movies…</button>
           <button data-action="stats">Stats…</button>
           <button data-action="sounds">Sound test…</button>
           <button data-action="about">About Galapagos…</button>
@@ -115,6 +116,14 @@
         <h2>Quality of Life</h2>
         <p class="menu__note">Optional extras for playing today. The 1997 game is the default: anything that changes how it plays starts off.</p>
         <div class="qol"></div>
+        <button class="link" data-action="back">← Back</button>
+      </section>
+
+      <!-- Not in the 1997 game: world select, jukebox and the intro (#47).
+           Drawn by src/qol/gallery.js each time it opens. -->
+      <section class="menu__panel" data-panel="gallery" hidden>
+        <h2>Worlds, music &amp; movies</h2>
+        <div class="extras"></div>
         <button class="link" data-action="back">← Back</button>
       </section>
 

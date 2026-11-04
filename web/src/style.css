@@ -350,3 +350,66 @@ kbd { font: 0.7rem ui-monospace, monospace; color: var(--mute); border: 1px soli
   font: 0.7rem ui-monospace, monospace;
   pointer-events: none;
 }
+
+/* ——— Worlds, music & movies (qol/gallery.js, #47) ——— */
+.extras { display: grid; gap: 0.6rem; margin: 0 0 1rem; }
+.extras__worlds { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; }
+.extras__world {
+  display: grid;
+  gap: 0.15rem;
+  justify-items: start;
+  padding: 0.35rem 0.35rem 0.5rem;
+  border: 1px solid #ffffff1c;
+  border-radius: 8px;
+  background: #ffffff06;
+  color: var(--bone);
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.2s, transform 0.3s var(--ease);
+}
+.extras__world canvas { width: 100%; height: auto; border-radius: 4px; image-rendering: auto; background: #000; }
+.extras__world small { color: var(--mute); font-size: 0.68rem; }
+.extras__world:hover:not(:disabled) { border-color: var(--lime); transform: translateY(-2px); }
+.extras__world:focus-visible, .extras__tracks button:focus-visible, .extras__movie:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
+.extras__world.is-current { border-color: #c6ff3d88; }
+.extras__world.is-current small { color: var(--lime); }
+.extras__world:disabled { cursor: not-allowed; opacity: 0.35; }
+.extras__world:disabled canvas { filter: grayscale(1) brightness(0.5); }
+.extras__tracks { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 0.25rem 0.5rem; }
+.extras__tracks button, .extras__movie {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.45rem 0.5rem;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--bone);
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+}
+.extras__tracks button:hover, .extras__movie:hover { background: #ffffff10; color: var(--lime); }
+.extras__tracks button.is-on { background: #c6ff3d14; color: var(--lime); }
+.extras__tracks small, .extras__movie small { margin-left: auto; color: var(--mute); font-size: 0.7rem; font-variant-numeric: tabular-nums; }
+.extras__state { width: 1.2em; font-size: 0.7rem; text-align: center; }
+.extras__movie { flex-wrap: wrap; }
+.extras__movie small { margin-left: 0; flex-basis: 100%; }
+/* The intro's own stage, above the pause menu. */
+.extras-movie {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 1rem;
+  background: #000;
+  z-index: 13;
+  cursor: pointer;
+}
+.extras-movie canvas { width: min(92vw, calc(80vh * 4 / 3)); height: auto; }
+.extras-movie p { margin: 0; font-size: 0.75rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--mute); }
