@@ -19,6 +19,7 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
   const { instance } = await WebAssembly.instantiateStreaming(fetch(url, { cache: "no-cache" }), {});
   const wasm = instance.exports;
   const u8 = (ptr, len) => new Uint8Array(wasm.memory.buffer, ptr, len);
+  let mindView = null; // creature.mind()'s cached view
 
   function upload(bytes) {
     const ptr = wasm.alloc(bytes.length);
@@ -174,11 +175,26 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
       },
       // Right click: a ray against his mesh. Returns "left", "right" or null.
       touch: (o, d) => [null, "left", "right"][wasm.creature_touch_ray(o[0], o[1], o[2], d[0], d[1], d[2])],
+      // The side that ray would touch, without touching (keyboard play, #49).
+      side: (o, d) => [null, "left", "right"][wasm.creature_side_ray(o[0], o[1], o[2], d[0], d[1], d[2])],
       // His affliction (crates/engine/src/affliction.rs): { kind, ticksLeft },
       // kind 0 = none.
       affliction() {
         const v = wasm.creature_affliction();
         return { kind: v & 0xff, ticksLeft: v >>> 8 };
+      },
+      // "Mendel's mind" (Quality of Life, #48): his senses, touch, brain
+      // and learning as one Float32Array, refilled by each call. The index
+      // table is in crates/engine/src/creature/mind.rs (and mirrored in
+      // qol/mind.js). The engine fills one static buffer, so the pointer
+      // never moves: we keep one view and only rebuild it after the
+      // memory grew (which detaches every old view).
+      mind() {
+        const p = wasm.creature_mind_ptr();
+        if (mindView?.buffer !== wasm.memory.buffer || mindView.byteOffset !== p) {
+          mindView = new Float32Array(wasm.memory.buffer, p, wasm.creature_mind_len());
+        }
+        return mindView;
       },
       // Teaching/debug, not in the original: afflict him with n (1..12).
       afflict: (n) => wasm.creature_afflict(n),
@@ -249,6 +265,25 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
           levelX: v[5], y: v[6], totalRight: v[7], glyphs,
         };
       },
+    },
+
+    // The player's statistics (Pause ▸ Stats, crates/engine/src/tally.rs):
+    // a fresh view of the engine's fixed 52-slot array, laid out as
+    // `Tally::snapshot` documents. Counters only grow; see qol/stats.js.
+    stats: () => new Uint32Array(wasm.memory.buffer, wasm.stats_snapshot(), 52),
+
+    // Quality of Life "Rewind after death" (#45, not in the original): a
+    // few in-memory rewind points (the world plus Mendel's body, never his
+    // brain), see web/src/qol/rewind.js and Sim::rewind_point.
+    rewind: {
+      // Into slot 0..15; false if Mendel is not alive and well.
+      take: (slot) => wasm.rewind_take(slot) === 1,
+      // Back to slot's point; false if empty or from another section build.
+      restore: (slot) => wasm.rewind_restore(slot) === 0,
+      forget: () => wasm.rewind_forget(),
+      // "absent" | "alive" | "dying" (towards a respawn) | "appearing" |
+      // "leaving" (a teleport or a level end).
+      status: () => ["absent", "alive", "dying", "appearing", "leaving"][wasm.rewind_status()],
     },
 
     // ——— Menus ———

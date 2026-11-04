@@ -43,6 +43,9 @@ use crate::world::{self, Light, WorldMesh, FLOATS_PER_VERTEX};
 use galapagos_formats::creature::{Brain, CreatureBody, Lcg};
 use galapagos_formats::worlds::Section;
 
+/// The read-only snapshot for the "Mendel's mind" panel (not in the original).
+pub mod mind;
+
 // Gravity: grounded, the mover adds −7 to the speed of his height above
 // the floor; airborne it adds `up · −0x700 >> 10` to a velocity kept in
 // 1/256 units: −7 units/tick² both ways (`CreatureMover_Integrate` @
@@ -261,6 +264,9 @@ pub struct Creature {
     prev_vertices: Vec<f32>,
     /// Teaching/debug counters.
     pub stats: Stats,
+    /// The player's statistics (tally.rs, not in the original): never
+    /// read by the simulation, not saved, carried across sections.
+    pub tally: crate::tally::Tally,
 
     /// Sound cue inputs gathered during the tick: flags of every polygon an
     /// eye ray hit, and whether he landed after a fall (event 4).
@@ -289,6 +295,9 @@ pub struct Creature {
     /// `creature+0x8ec`: the dematerialise/materialise effect
     /// (transition.rs), what modes 0 and 1 wait for.
     transition: Transition,
+    /// What this tick sensed and decided, kept for the "Mendel's mind"
+    /// panel (mind.rs). Not in the original; never read by the game.
+    trace: mind::Trace,
 }
 
 /// Mendel's five sound cues (`Creature_ReadSoundCues` @ 0x417ab0, played by
@@ -374,6 +383,7 @@ impl Creature {
             vertices: Vec::new(),
             prev_vertices: Vec::new(),
             stats: Stats::default(),
+            tally: Default::default(),
             seen_flags: 0,
             landed: false,
             cue_quiet: [0; 5],
@@ -385,6 +395,7 @@ impl Creature {
             noise: [0; 2],
             last_texture: mesh.texture_count as i16 - 1,
             transition: Transition::default(),
+            trace: mind::Trace::default(),
         };
         c.act[0] = Actuator::new(13, stance);
         c
@@ -644,6 +655,7 @@ impl Creature {
 
     fn live(&mut self, sim: &mut Sim) {
         self.stats.ticks_alive += 1;
+        self.tally.ticks_alive += 1;
         let near = Near::gather(&self.polys, sim, self.mover.pos, GATHER_RADIUS, SOLID | FLOOR | HAZARD);
         self.step_mover(&near, sim);
         self.sync(sim);
@@ -671,10 +683,17 @@ impl Creature {
         };
         let mut posted = Vec::new();
         let was = self.mover.pos;
+        let was_grounded = self.mover.grounded;
+        self.tally.feel(drive.injected & LETHAL != 0);
         let felt = self.mover.step(&self.polys, sim, near, &drive, &mut posted);
         if self.mover.grounded {
-            self.stats.walked += length(sub(self.mover.pos, was));
+            let d = length(sub(self.mover.pos, was));
+            self.stats.walked += d;
+            self.tally.walked += d as f64;
+        } else if was_grounded {
+            self.tally.leaps += 1;
         }
+        self.tally.touches += posted.len() as u32;
         // Event bit 1, "Mendel touches me", to each wall the hull pushed
         // against and to his polygon's object (`vtable[9]`, 0x4185e0 and
         // 0x418956 → `WorldObject_PostEvent` @ 0x4232f0).
@@ -685,6 +704,12 @@ impl Creature {
         self.left = if felt.left { 256 } else { 0 };
         self.right = if felt.right { 256 } else { 0 };
         self.surface = felt.surface;
+        self.trace.bump = [felt.left, felt.right];
+        self.trace.click = self.touch;
+        if let Some((left, TOUCH_TICKS)) = self.touch {
+            self.trace.clicks += 1;
+            self.trace.last_click = if left { 1 } else { 2 };
+        }
         // The right click (`MEnc`): felt exactly like a bump on that side.
         if let Some((left, n)) = self.touch {
             if left { self.left = 256 } else { self.right = 256 }
@@ -739,6 +764,16 @@ impl Creature {
         let posture = self.act[0].value;
         let a = 100 - posture * 50 / 256;
         let range = 1500 + posture * 500 / 256;
+        // The panel's record: touch (a bump or a click) wins over sight.
+        let t = &mut self.trace;
+        t.rays = Default::default();
+        t.winner = [None; 2];
+        let click = t.click;
+        t.source = [(self.left, true), (self.right, false)].map(|(v, left)| match v {
+            0 => mind::SIGHT,
+            _ if click.is_some_and(|(l, _)| l == left) => mind::CLICK,
+            _ => mind::BUMP,
+        });
         if self.left == 0 {
             self.left = self.eye(near, sim, a, range);
         }
@@ -750,6 +785,7 @@ impl Creature {
             5 => {
                 self.left = 0;
                 self.right = 0;
+                self.trace.source = [mind::BLIND; 2];
             }
             // Confused (0x418ff9): each eye holds 0 or 256, flipping on
             // `seed & 0xf0000 == 0` draws of the brain's LCG.
@@ -763,6 +799,7 @@ impl Creature {
                 }
                 self.left = self.noise[0];
                 self.right = self.noise[1];
+                self.trace.source = [mind::CONFUSED; 2];
             }
             _ => {}
         }
@@ -771,6 +808,7 @@ impl Creature {
         if self.fall_count != 0 && self.fall_limit != 130 {
             self.left = 256;
             self.right = 256;
+            self.trace.source = [mind::FALLING; 2];
         }
     }
 
@@ -785,6 +823,8 @@ impl Creature {
     /// raised 256 and 16 along his up, and lowered 32 (under the floor's
     /// surface: the ledge ray). The eye reports the nearest of the three.
     fn eye(&mut self, near: &Near, sim: &Sim, angle: i32, range: i32) -> i32 {
+        // `a` is always positive (50..100): + is the left eye.
+        let eye = (angle < 0) as usize;
         let f = self.mover.frame(&self.polys, sim);
         let a = turns(self.mover.heading + angle);
         let dir = normalize(f.dir([a.cos(), a.sin(), 0.0]));
@@ -803,23 +843,30 @@ impl Creature {
             // `Creature_CastIrRay` @ 0x4190f0: the nearest polygon of the
             // mask, which may hide what lies behind it.
             if let Some(h) = near.segment(o, e, Faces::Both, wanted) {
-                if is_seen(h.flags) {
+                let seen = is_seen(h.flags);
+                if seen {
                     let d = h.dist as i32 - EYE_NEAR;
                     rays[k] = (d, value(d));
                 }
                 self.notice(h.flags);
+                let class = mind::class_of(h.flags);
+                self.trace.rays[eye][k] = mind::RayTrace { dist: Some(h.dist), class, seen, value: rays[k].1 };
             }
         }
-        rays[2] = self.ledge_ray(near, ray(EYE_LOW), value);
+        let (low, traced) = self.ledge_ray(near, ray(EYE_LOW), value);
+        rays[2] = low;
+        self.trace.rays[eye][2] = traced;
         // The nearest wins (0x419070 compares the three distances).
         let [hi, mid, low] = rays;
-        if !(mid.0 < hi.0 || low.0 < hi.0) {
-            hi.1
+        let k = if !(mid.0 < hi.0 || low.0 < hi.0) {
+            0
         } else if !(hi.0 < mid.0 || low.0 < mid.0) {
-            mid.1
+            1
         } else {
-            low.1
-        }
+            2
+        };
+        self.trace.winner[eye] = (rays[k].0 < 10_000).then_some(k as u8);
+        rays[k].1
     }
 
     /// Sound-cue side effects of a polygon an eye ray met.
@@ -837,13 +884,18 @@ impl Creature {
     /// and is seen. Class 0x80 or a hazard: seen at once. Anything else
     /// (class 0xc0 or 0) ends the ray unseen. Under the shield
     /// (affliction 1), bit-22 polygons count as class 0xc0 (0x419290).
-    fn ledge_ray(&mut self, near: &Near, (o, e): (V3, V3), value: impl Fn(i32) -> i32) -> (i32, i32) {
+    ///
+    /// Also returns the panel's record of the ray (mind.rs): what it
+    /// reported, or the polygon that stopped it unseen.
+    fn ledge_ray(&mut self, near: &Near, (o, e): (V3, V3), value: impl Fn(i32) -> i32) -> ((i32, i32), mind::RayTrace) {
         let wanted = |t: &Tri| t.flags & (SOLID | HAZARD) != 0;
         let hits = near.segment_all(o, e, wanted);
         let dist: Vec<i32> = hits.iter().map(|h| h.dist as i32).collect();
         let report = |d: i32| (d - EYE_NEAR, value(d - EYE_NEAR));
         let mut out = (10_000, 0);
         let mut pending = false;
+        let mut traced = mind::RayTrace::default();
+        let trace = |j: usize, class: u8, seen: bool, v: i32| mind::RayTrace { dist: Some(hits[j].dist), class, seen, value: v };
         for (i, h) in hits.iter().enumerate() {
             let mut fl = h.flags;
             if self.afflictions.kind == 1 && fl & SHIELDED != 0 {
@@ -857,11 +909,13 @@ impl Creature {
                         false
                     } else {
                         out = report(dist[i - 1]);
+                        traced = trace(i - 1, mind::CLASS_DROP, true, out.1);
                         true
                     }
                 }
                 0x40 if i + 1 == hits.len() => {
                     out = report(dist[i]);
+                    traced = trace(i, mind::CLASS_DROP, true, out.1);
                     false
                 }
                 0x40 => {
@@ -870,15 +924,19 @@ impl Creature {
                 }
                 c if c == 0x80 || fl & HAZARD != 0 => {
                     out = report(if pending { dist[i - 1] } else { dist[i] });
+                    traced = if pending { trace(i - 1, mind::CLASS_DROP, true, out.1) } else { trace(i, mind::class_of(fl), true, out.1) };
                     true
                 }
-                _ => true,
+                _ => {
+                    traced = trace(i, mind::class_of(fl), false, 0);
+                    true
+                }
             };
             if stop {
                 break;
             }
         }
-        out
+        (out, traced)
     }
 
 
@@ -964,7 +1022,10 @@ impl Creature {
                 let n = &mut self.brain.nerms[k];
                 if n.individual as usize + 1 == galapagos_formats::creature::POPULATION {
                     self.stats.evolutions += 1;
+                    self.trace.generations[k] += 1;
+                    self.tally.generations += 1;
                 }
+                self.trace.trials[k] += 1;
                 n.report_fitness(c, &mut self.rng);
                 self.cost[k] = 0;
                 self.count[k] = 0;
@@ -986,6 +1047,7 @@ impl Creature {
         }
         // Falling for too long is lethal (0x4195cf..0x41962a); the limit
         // comes from the floor he left (`+0x134`, the mover's `+0xe4`).
+        let mut fell = false;
         if !self.mover.grounded {
             if self.fall_limit == 0 {
                 self.fall_limit = if self.mover.floor_flags & 0x10 != 0 { 130 } else { 65 };
@@ -995,6 +1057,7 @@ impl Creature {
                 if self.fall_limit < n {
                     self.fall_count = 0;
                     self.surface = (self.surface & 0xffd8_1fff) | FELL_TOO_LONG;
+                    fell = true;
                 } else if self.surface & 0x10 != 0 {
                     self.fall_count = 0;
                 }
@@ -1002,12 +1065,13 @@ impl Creature {
         } else {
             // Landing after more than 5 airborne ticks: event 4.
             self.landed = self.fall_count > 5;
+            self.tally.landings += self.landed as u32;
             self.fall_count = 0;
             self.fall_limit = 0;
         }
         let f = self.surface;
         if f & AFFLICTION_BITS != 0 {
-            self.afflictions.apply(((f >> 25) & 15) as u8, sim);
+            self.afflict(((f >> 25) & 15) as u8, sim);
         }
         if f & LETHAL == 0 {
             if self.mover.grounded {
@@ -1025,12 +1089,14 @@ impl Creature {
             for c in &mut self.cost {
                 *c += PAIN;
             }
+            self.trace.pains += 1;
         }
         // (f >> 19) & 7 picks what happens after the effect; on the CD the
         // lethal floors all say 3, "death". Teleport reasons (1, 2) need a
         // pending destination we don't have here, so they also respawn.
         self.fall_count = 0;
         self.stats.deaths += 1;
+        self.tally.died(f, fell);
         // The effect of the floor: kind (f >> 12) & 15, variant (f >> 16) & 7.
         self.dematerialise([((f >> 12) & 15) as u16, ((f >> 16) & 7) as u16], sim);
         self.mode = Mode::Vanishing(0, After::Respawn);
@@ -1053,6 +1119,15 @@ impl Creature {
     /// `creature+0xae8`; he feels them with his next touch.
     pub(crate) fn react(&mut self, flags: u32) {
         self.injected |= flags;
+    }
+
+    /// `Afflictions_Apply(n)`, counted in the player's tally when it starts.
+    pub(crate) fn afflict(&mut self, n: u8, sim: &mut Sim) {
+        let a = &self.afflictions;
+        let before = (a.kind, a.left());
+        self.afflictions.apply(n, sim);
+        let a = &self.afflictions;
+        self.tally.afflicted(n, before, (a.kind, a.left()));
     }
 
 
@@ -1402,6 +1477,33 @@ impl Creature {
             Some(on) => Place { on: Some(on), at: [m.u, m.v, 0.0], heading: m.heading },
             None => Place { on: None, at: m.pos, heading: m.heading },
         });
+    }
+
+    /// Quality of Life "Rewind after death" (#45), not in the original:
+    /// his *body* goes back to `s` (where he stood, his gait, actuators,
+    /// senses, hazard counters), his *mind* stays as it is now. The brain is
+    /// never touched (as on any death); the learning accumulators (`cost`,
+    /// `count`, which hold this death's pain until the next generation),
+    /// the counters (`stats`: the death still counts) and the respawn point
+    /// (the last save pad's, still the original's) are kept too. Then he
+    /// materialises, as after a respawn.
+    pub(crate) fn rewind_body(&mut self, s: SavedCreature, sim: &mut Sim) {
+        let mind = (self.cost, self.count, self.stats, self.respawn);
+        self.apply_saved(s, sim);
+        (self.cost, self.count, self.stats, self.respawn) = mind;
+        // Effect 2 variant 3 played backwards: the materialise a kind-6
+        // portal's respawn shows (0x1b2000).
+        let h = self.stance_height as i16;
+        self.effect(sim, |t, c| {
+            t.start_reversed(2, 3, h, c);
+            true
+        });
+        self.mode = Mode::Appearing(0);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cost_for_test(&self) -> ([i64; 3], [i64; 3]) {
+        (self.cost, self.count)
     }
 }
 

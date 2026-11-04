@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Galapagos — Mendel's Escape, in your browser</title>
   <meta name="description" content="A clean-room WebAssembly recomp of Anark's Galapagos (1997). Bring your own CD." />
   <link rel="stylesheet" href="./src/style.css" />
@@ -43,17 +43,18 @@
       <!-- The picture over the 3-D view: world 0's "GALAPAGOS" (title.js). -->
       <canvas id="title" class="title-overlay" aria-label="Galapagos" hidden></canvas>
     </div>
-    <nav id="sections" class="sections" aria-label="Worlds" hidden></nav>
-    <label id="wake" class="wake" hidden>
+    <!-- .dev-only: shown with Pause ▸ Quality of Life ▸ Developer mode (qol/fullscreen.js). -->
+    <nav id="sections" class="sections dev-only" aria-label="Worlds" hidden></nav>
+    <label id="wake" class="wake dev-only" hidden>
       <input type="checkbox" id="wake-all" />
       Wake every machine <small>(debug: ignores the folders that normally wait for Mendel)</small>
     </label>
-    <label id="follow" class="wake" hidden>
+    <label id="follow" class="wake dev-only" hidden>
       <input type="checkbox" id="follow-mendel" checked />
       Follow Mendel <small>(chase camera; drag to look around him, shift-drag to break away)</small>
     </label>
-    <pre id="log" class="log"></pre>
-    <nav id="jukebox" class="jukebox" aria-label="Soundtrack" hidden></nav>
+    <pre id="log" class="log dev-only"></pre>
+    <nav id="jukebox" class="jukebox dev-only" aria-label="Soundtrack" hidden></nav>
     <div class="stage__bar">
       <button id="scanlines" class="link">Scanlines: smooth</button>
       <button id="forget-stage" class="link">Forget my CD</button>
@@ -84,6 +85,7 @@
           <hr />
           <button data-action="prefs">Preferences…</button>
           <button data-action="qol">Quality of Life…</button>
+          <button data-action="gallery">Worlds, music &amp; movies…</button>
           <button data-action="stats">Stats…</button>
           <button data-action="sounds">Sound test…</button>
           <button data-action="about">About Galapagos…</button>
@@ -118,10 +120,18 @@
         <button class="link" data-action="back">← Back</button>
       </section>
 
+      <!-- Not in the 1997 game: world select, jukebox and the intro (#47).
+           Drawn by src/qol/gallery.js each time it opens. -->
+      <section class="menu__panel" data-panel="gallery" hidden>
+        <h2>Worlds, music &amp; movies</h2>
+        <div class="extras"></div>
+        <button class="link" data-action="back">← Back</button>
+      </section>
+
       <!-- Filled by the Stats feature (#50) through menu.statsPanel. -->
       <section class="menu__panel" data-panel="stats" hidden>
         <h2>Stats</h2>
-        <div class="menu__stats"><p class="menu__note">Statistics are coming (#50).</p></div>
+        <div class="menu__stats"></div>
         <button class="link" data-action="back">← Back</button>
       </section>
 

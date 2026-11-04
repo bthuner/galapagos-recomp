@@ -10,6 +10,16 @@ import { frameMeter } from "./qol/frame-meter.js";
 import { hover } from "./qol/hover.js";
 import { autosave } from "./qol/autosave.js";
 import { skipIntro } from "./qol/skip-intro.js";
+import { a11y } from "./qol/a11y.js";
+import { gameSpeed } from "./qol/speed.js";
+import { mendelsMind } from "./qol/mind.js";
+import { stats } from "./qol/stats.js";
+import { rewindAfterDeath } from "./qol/rewind.js";
+import { fullscreen } from "./qol/fullscreen.js";
+import { hints } from "./qol/hints.js";
+import { photoMode } from "./qol/photo.js";
+import { touchControls } from "./qol/touch.js";
+import { gallery } from "./qol/gallery.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -19,6 +29,13 @@ frameMeter();
 hover(); // highlight clickable objects (#41): reads globalThis.galapagos once a world is up
 autosave();
 const intro = skipIntro();
+a11y(); // accessibility options (#49): colour presets, keyboard play, sound cues, softer flashes
+const speed = gameSpeed(); // the loop below scales game time by speed.factor()
+mendelsMind(() => globalThis.galapagos?.engine); // the engine exists once the CD boots
+fullscreen();
+hints(); // reads globalThis.galapagos once boot() has published it
+const photo = photoMode(); // attached to the running world in boot()
+const extras = gallery(); // world select, jukebox, intro: hooked into boot() below
 const log = (msg) => ($("log").textContent += msg + "\n");
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
 
@@ -78,14 +95,15 @@ async function boot(files, { fromCache = false } = {}) {
   const hz = engine.sim.ticksPerSecond();
   let clock = 0, last = performance.now(), current = 0;
 
-  const music = (n) => {
+  const music = extras.music((n) => {
     dispatchEvent(new KeyboardEvent("keydown")); // stop the current track
     if (n > 0 && files[String(n)]) {
       bytesOf(files[String(n)]).then((b) => playMovie(engine, b, $("screen"), audio, { destination: volume }));
     }
-  };
+  });
 
   const sfx = createSfx(engine, audio, volume);
+  rewindAfterDeath(engine, $("world").parentElement); // QoL #45: needs the engine, so it starts here
   let paused = false; // while the pause menu or the time screen is up
   let timeScreenUp = false;
 
@@ -108,12 +126,12 @@ async function boot(files, { fromCache = false } = {}) {
       const ear = view.listener();
       if (ear) sfx.listen(ear.eye, ear.forward, ear.up);
       const now = performance.now();
-      clock = paused ? 0 : Math.min(clock + (now - last) / 1000, 5 / hz);
+      clock = paused ? 0 : Math.min(clock + ((now - last) / 1000) * speed.factor(engine), 5 / hz);
       last = now;
       const n = Math.floor(clock * hz);
       clock -= n / hz;
       if (!n) return clock * hz;
-      for (const ev of engine.sim.tick(n)) {
+      for (const ev of speed.thin(engine.sim.tick(n))) {
         if (ev.kind === 1) music(ev.a);
         if (ev.kind === 3) sfx.emitter(ev.a, ev.b, ev.c); // a world object made a sound
         if (ev.kind === 5) sfx.creature(ev.a); // one of Mendel's cues
@@ -144,6 +162,7 @@ async function boot(files, { fromCache = false } = {}) {
     onFollowChange: (on) => ($("follow-mendel").checked = on),
     camera: engine.camera.state,
   });
+  touchControls(view); // Quality of Life: taps, pinches, Menu and Skip buttons
   // The original camera is on by default, from the moment a section loads
   // (before Mendel exists it holds the section's default key), and again
   // whenever he appears, unless the player turned it off.
@@ -179,6 +198,7 @@ async function boot(files, { fromCache = false } = {}) {
   // show the one the engine already rebuilt.
   const show = (i, { built = false } = {}) => {
     current = i;
+    extras.reached(i);
     sfx.reset();
     const w = built ? worlds.current() : worlds.build(i);
     view.load({ ...w, takeDirty: engine.sim.takeDirty, creatureVertices: engine.creature.vertices, tint: engine.sim.tint });
@@ -226,6 +246,8 @@ async function boot(files, { fromCache = false } = {}) {
     },
   });
 
+  stats({ engine, menu }); // Pause ▸ Stats (qol/stats.js): watches, never steers
+
   // Poke the running game from DevTools: galapagos.engine.sim.object(85)…
   // galapagos.game.save() keeps the bytes; galapagos.game.load() reopens them.
   let lastSave = null;
@@ -234,6 +256,9 @@ async function boot(files, { fromCache = false } = {}) {
     load: (bytes = lastSave) => show(engine.game.load(bytes), { built: true }),
   };
   globalThis.galapagos = { engine, worlds, view, show, sfx, menu, game };
+  // Photo mode (qol/photo.js) pauses without the menu: it needs the flag.
+  photo.attach({ view, menu, pause: (v) => (paused = v), paused: () => paused, section: () => current, world: $("world"), title: $("title") });
+  extras.attach({ engine, files, audio, out: volume, show, menu, status, scanlines, sections: worlds.sectionCount });
   jukebox(engine, files, audio);
 }
 

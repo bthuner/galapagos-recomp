@@ -16,6 +16,7 @@ mod overlay;
 mod predator;
 mod sim;
 mod sound;
+mod tally;
 mod transition;
 mod walker;
 mod world;
@@ -239,6 +240,8 @@ fn build_section(worlds: &mut Worlds, i: usize) -> i32 {
     worlds.section = i;
     let mut sim = sim::Sim::build(&section, &mesh);
     sim.section = i;
+    // Rewind points belong to the build they were taken in (#45).
+    rewind_forget();
     let old = worlds.sim.take();
     // The `Save` variables and the game clock outlive the section; the
     // level clock restarts (`Game_LevelEnd` @ 0x41c8c0: start = total).
@@ -253,11 +256,14 @@ fn build_section(worlds: &mut Worlds, i: usize) -> i32 {
     sim.enter_initial_states(&mut mesh);
     // Mendel carries his brain from section to section; the first time,
     // it comes from the CD for the age preference (see `brain_for_age`).
-    let carried = old.and_then(|s| s.creature).map(|c| c.brain);
+    let (carried, tally) = old.and_then(|s| s.creature).map_or((None, None), |c| (Some(c.brain), Some(c.tally)));
     let brain = worlds.pending_brain.take().or(carried).or_else(|| brain_for_age(&archive, worlds.age));
     let body = CreatureBody::parse(&worlds.data, archive.header.creature as usize).ok();
     if let (Some(body), Some(brain)) = (body, brain) {
-        sim.creature = Some(creature::Creature::new(&section, &mesh, body, brain));
+        let mut c = creature::Creature::new(&section, &mesh, body, brain);
+        // The player's statistics go on with him (tally.rs): only New resets them.
+        c.tally = tally.unwrap_or_default();
+        sim.creature = Some(c);
     }
     // A level starts with a world snapshot: dying before any save brings
     // the level back to this instant (`0x41caf3` → `Game_TakeSnapshot`).
@@ -665,6 +671,92 @@ pub extern "C" fn creature_state() -> *const f32 {
     CREATURE_STATE.with(|c| c.as_ptr() as *const f32)
 }
 
+// ——— Mendel's mind (Quality of Life, #48; not in the original) ————————————
+//
+// A read-only snapshot of his senses, touch, brain and learning, for the
+// panel in web/src/qol/mind.js. The layout (109 f32) is documented, and
+// pinned by tests, in creature/mind.rs. One static buffer, refilled on
+// each call: nothing is allocated per frame, and a closed panel never
+// calls, so it costs nothing.
+
+thread_local! {
+    static MIND: std::cell::Cell<creature::mind::Mind> = std::cell::Cell::new(creature::mind::Mind::default());
+}
+
+/// Fill the snapshot from Mendel as he stands now (zeros while there is
+/// no Mendel: `version` 0) and return a pointer to its
+/// [`creature_mind_len`] floats.
+#[no_mangle]
+pub extern "C" fn creature_mind_ptr() -> *const f32 {
+    let m = with_creature(|c| c.mind(), creature::mind::Mind::default());
+    MIND.with(|slot| {
+        slot.set(m);
+        slot.as_ptr() as *const f32
+    })
+}
+
+/// Number of f32 at [`creature_mind_ptr`].
+#[no_mangle]
+pub extern "C" fn creature_mind_len() -> u32 {
+    creature::mind::Mind::LEN as u32
+}
+
+#[cfg(test)]
+mod mind_export_tests {
+    use super::*;
+
+    /// Through the real ABI, as JavaScript does it: open the CD's worlds,
+    /// build section 0, skip the intro, tick, and read the export as a
+    /// flat f32 array at the documented indices.
+    #[test]
+    fn creature_mind_export_matches_the_creature() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../originals/mounted/install/data/worlds");
+        let Ok(bytes) = std::fs::read(path) else { return };
+        let p = alloc(bytes.len());
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len()) };
+        assert!(worlds_open(p, bytes.len()) > 0);
+        assert!(world_build(0) > 0);
+        let read = || unsafe { core::slice::from_raw_parts(creature_mind_ptr(), creature_mind_len() as usize) }.to_vec();
+        for t in 0..60 * sim::TICKS_PER_SECOND {
+            sim_hold_skip((120..122).contains(&t) as u32);
+            sim_tick(1);
+            if t == 40 * sim::TICKS_PER_SECOND {
+                // A right click on his left side.
+                with_sim_mut(|s| s.creature.as_mut().unwrap().touch(true));
+            }
+            let m = read();
+            let alive = with_creature(
+                |c| {
+                    assert_eq!(m[1], match c.mode { creature::Mode::Absent => 0.0, creature::Mode::Appearing(_) => 1.0, creature::Mode::Alive => 2.0, creature::Mode::Vanishing(..) => 3.0 });
+                    assert_eq!(m[4], c.heading() as f32);
+                    assert_eq!(m[10], c.outputs()[0] as f32, "stance muscle");
+                    assert_eq!(m[13], c.ground().map_or(0.0, |g| g.0 as f32 + 1.0));
+                    assert_eq!((m[20], m[35]), (c.left as f32, c.right as f32), "eyes");
+                    assert_eq!(m[54], c.stats.touches_posted as f32);
+                    assert_eq!(m[56], c.stats.deaths as f32);
+                    assert_eq!(m[58], c.afflictions.kind as f32);
+                    assert_eq!(m[61], c.stats.evolutions as f32);
+                    for k in 0..3 {
+                        let (n, o) = (&c.brain.nerms[k], 62 + 15 * k);
+                        assert_eq!(m[o], n.state as f32, "chain state {k}");
+                        assert_eq!(m[o + 2], c.outputs()[k] as f32, "muscle {k}");
+                        assert_eq!(m[o + 4], n.individual as f32, "genome {k}");
+                    }
+                    c.mode == creature::Mode::Alive
+                },
+                false,
+            );
+            if t == 40 * sim::TICKS_PER_SECOND + 1 {
+                assert!(alive, "he walks by 40 s");
+                assert_eq!((m[52], m[53]), (1.0, 4.0), "the click, felt on the left for 4 ticks");
+                assert_eq!((m[20], m[21]), (256.0, 2.0), "left eye: full, from the click");
+                assert_eq!((m[107], m[108]), (1.0, 1.0), "one click counted, on the left");
+            }
+        }
+        assert_eq!(read()[0], creature::mind::VERSION);
+    }
+}
+
 /// Right click: ray against Mendel. Returns 1 if his left side was touched,
 /// 2 for the right, 0 for a miss. A touch is felt for 4 ticks.
 #[no_mangle]
@@ -681,6 +773,15 @@ pub extern "C" fn creature_touch_ray(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32
     out
 }
 
+/// Read-only twin of `creature_touch_ray`, for keyboard-only play (Quality
+/// of Life #49, not in the original): which side of Mendel the ray would
+/// touch (1 left, 2 right, 0 miss), without touching him. The keyboard's
+/// "touch" key uses it to aim at the side it wants, then right-clicks there.
+#[no_mangle]
+pub extern "C" fn creature_side_ray(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32, dz: f32) -> u32 {
+    with_creature(|c| c.pick([ox, oy, oz], [dx, dy, dz]).map_or(0, |left| if left { 1 } else { 2 }), 0)
+}
+
 /// Mendel's affliction (`creature+0x8fc`, affliction.rs): the number in
 /// the low byte (0 = none), the ticks it has left above it.
 #[no_mangle]
@@ -694,7 +795,7 @@ pub extern "C" fn creature_affliction() -> u32 {
 pub extern "C" fn creature_afflict(n: u32) {
     with_sim_mut(|sim| {
         if let Some(mut c) = sim.creature.take() {
-            c.afflictions.apply(n.min(255) as u8, sim);
+            c.afflict(n.min(255) as u8, sim);
             sim.creature = Some(c);
         }
     });
@@ -974,6 +1075,84 @@ pub extern "C" fn game_reset_progress() {
     });
 }
 
+// ——— Quality of Life: rewind after death (#45, not in the original) ———————
+//
+// A few rewind points (`Sim::rewind_point`: the world plus Mendel's body,
+// never his brain) held in memory slots. The host decides when to take
+// them and which to offer (web/src/qol/rewind.js); they never reach a
+// saved game, and a new build of a section forgets them.
+
+thread_local! {
+    static REWIND: RefCell<Vec<Option<sim::save::RewindPoint>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Slots a host may use: 0..REWIND_SLOTS.
+pub const REWIND_SLOTS: u32 = 16;
+
+/// Take a rewind point into `slot`. Returns 1, or 0 if Mendel is not alive
+/// and well (dying, materialising, absent) or `slot` is out of range.
+#[no_mangle]
+pub extern "C" fn rewind_take(slot: u32) -> u32 {
+    if slot >= REWIND_SLOTS {
+        return 0;
+    }
+    let p = WORLDS.with(|w| w.borrow().as_ref().and_then(|w| w.sim.as_ref()).and_then(|s| s.rewind_point()));
+    let Some(p) = p else { return 0 };
+    REWIND.with(|r| {
+        let mut r = r.borrow_mut();
+        if r.len() <= slot as usize {
+            r.resize(slot as usize + 1, None);
+        }
+        r[slot as usize] = Some(p);
+    });
+    1
+}
+
+/// Go back to the point in `slot` (see `Sim::rewind_to`). Returns 0 on
+/// success, -1 for an empty slot, -2 if no section runs, -3 if the point
+/// belongs to another build of a section. The camera starts afresh from
+/// where he stands, and the next `sim_tick` reports a camera cut.
+#[no_mangle]
+pub extern "C" fn rewind_restore(slot: u32) -> i32 {
+    let Some(p) = REWIND.with(|r| r.borrow().get(slot as usize).cloned().flatten()) else { return -1 };
+    WORLDS.with(|w| {
+        let mut guard = w.borrow_mut();
+        let Some(worlds) = guard.as_mut() else { return -2 };
+        let (Some(sim), Some(mesh)) = (worlds.sim.as_mut(), worlds.mesh.as_mut()) else { return -2 };
+        if !sim.rewind_to(&p, mesh) {
+            return -3;
+        }
+        if let Some(cam) = worlds.camera.as_mut() {
+            cam.start_loaded(sim);
+        }
+        0
+    })
+}
+
+/// Forget every rewind point.
+#[no_mangle]
+pub extern "C" fn rewind_forget() {
+    REWIND.with(|r| r.borrow_mut().clear());
+}
+
+/// Where Mendel is in his life, as the rewind cares: 0 absent, 1 alive,
+/// 2 dying (vanishing towards a respawn: a lethal floor, a bite, a kind-6
+/// portal), 3 materialising, 4 vanishing for a teleport or a level end.
+#[no_mangle]
+pub extern "C" fn rewind_status() -> u32 {
+    use creature::{After, Mode};
+    with_creature(
+        |c| match c.mode {
+            Mode::Absent => 0,
+            Mode::Alive => 1,
+            Mode::Vanishing(_, After::Respawn) => 2,
+            Mode::Appearing(_) => 3,
+            Mode::Vanishing(..) => 4,
+        },
+        0,
+    )
+}
+
 /// Layout of the time screen (`TimeScreen_Select` @ 0x41a2d0) for `level`
 /// (0..7 from the gate, 8 = game completed) in a view of `w`×`h` pixels.
 /// Thirty i32:
@@ -1168,4 +1347,23 @@ pub extern "C" fn world_visible_ptr() -> *const u8 {
 #[no_mangle]
 pub extern "C" fn world_cull_ptr() -> *const u8 {
     with_mesh(|m| m.cull.as_ptr(), core::ptr::null())
+}
+
+// ——— Stats (Pause ▸ Stats, #50; not in the original) ————————————————————
+
+thread_local! {
+    static STATS: std::cell::Cell<[u32; tally::SNAPSHOT_LEN]> = const { std::cell::Cell::new([0; tally::SNAPSHOT_LEN]) };
+}
+
+/// The player's statistics: `tally::SNAPSHOT_LEN` u32, laid out as
+/// `Tally::snapshot` documents (slot 0 is the layout version). All zero
+/// but the version while no Mendel exists. Counters only grow (File ▸ New
+/// restarts them), so the host keeps its totals by subtracting readings.
+/// Filled in place: no allocation, cheap enough to read every frame.
+#[no_mangle]
+pub extern "C" fn stats_snapshot() -> *const u32 {
+    let mut s = with_creature(|c| c.tally.snapshot(Some(&c.brain)), [0; tally::SNAPSHOT_LEN]);
+    s[0] = tally::SNAPSHOT_VERSION;
+    STATS.with(|c| c.set(s));
+    STATS.with(|c| c.as_ptr() as *const u32)
 }

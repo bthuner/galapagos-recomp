@@ -35,6 +35,7 @@ export function hover(game = () => globalThis.galapagos, canvas = document.getEl
     default: false,
     notOriginal: true,
     group: "Comfort",
+    order: 40,
   });
 
   let pointer = null; // last mouse position over the view, or null
@@ -53,7 +54,9 @@ export function hover(game = () => globalThis.galapagos, canvas = document.getEl
   const tick = () => {
     raf = requestAnimationFrame(tick);
     const g = game();
-    show(pointer && g ? hoverAt(g.engine, g.view, pointer.x, pointer.y) : -1);
+    // No cursor over the view: leave() already cleared ours, and the
+    // highlight may now belong to keyboard play (#49).
+    if (pointer && g) show(hoverAt(g.engine, g.view, pointer.x, pointer.y));
   };
 
   const move = (e) => {

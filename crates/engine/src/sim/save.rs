@@ -91,6 +91,16 @@ pub struct WorldState {
     pub predators: Vec<Predator>,
 }
 
+/// A Quality of Life rewind point (#45, not in the original): see
+/// [`Sim::rewind_point`]. Kept in memory as plain values, never serialised.
+#[derive(Clone, Debug)]
+pub struct RewindPoint {
+    section: usize,
+    tick: u64,
+    world: WorldState,
+    body: crate::creature::SavedCreature,
+}
+
 impl Sim {
     /// Copies the dynamic world state (not Mendel).
     pub fn capture(&self) -> WorldState {
@@ -215,6 +225,37 @@ impl Sim {
         let Some(s) = self.snapshot.take() else { return false };
         let ok = self.restore(&s, mesh);
         self.snapshot = Some(s);
+        ok
+    }
+
+    /// Quality of Life "Rewind after death" (#45), not in the original: a
+    /// rewind point, i.e. the world as [`Sim::capture`] sees it plus
+    /// Mendel's body. `None` unless he is alive and well (not dying, not
+    /// materialising): a point to come back to must be one he can live from.
+    /// The respawn snapshot, the clocks and the saved games are untouched:
+    /// this lives in memory only.
+    pub fn rewind_point(&self) -> Option<RewindPoint> {
+        let c = self.creature.as_ref().filter(|c| c.mode == crate::creature::Mode::Alive)?;
+        Some(RewindPoint { section: self.section, tick: self.tick, world: self.capture(), body: c.saved() })
+    }
+
+    /// Back to `p`: the world exactly as it was, Mendel's body as it was,
+    /// his mind as it is now (see `Creature::rewind_body`), then he
+    /// materialises and the camera cuts. The clocks keep running (time
+    /// spent dying is time spent), the respawn snapshot stays the last save
+    /// pad's. Returns false (and changes nothing) if `p` belongs to another
+    /// build of a section.
+    pub fn rewind_to(&mut self, p: &RewindPoint, mesh: &mut WorldMesh) -> bool {
+        if p.section != self.section || p.tick > self.tick || p.world.objs.len() != self.objs.len() {
+            return false;
+        }
+        let Some(mut c) = self.creature.take() else { return false };
+        let ok = self.restore(&p.world, mesh);
+        if ok {
+            c.rewind_body(p.body.clone(), self);
+            self.events.push(super::HostEvent { kind: super::EV_CAMERA_SNAP, a: 0, b: 0, c: 0 });
+        }
+        self.creature = Some(c);
         ok
     }
 
@@ -749,6 +790,71 @@ mod tests {
         println!("respawned {across:.1} units across, {along:.1} along his up from where he stood when saving");
         assert_eq!(c.surface(), anchor_on, "on the polygon where he saved");
         assert!(across < 1.0 && along.abs() < 100.0, "back on the spot where he saved");
+    }
+
+    /// Quality of Life "Rewind after death" (#45): after a death, rewinding
+    /// to a point taken earlier gives back that world exactly and his body
+    /// where it was, while his brain (and this death's pain, and the death
+    /// count) stay as they are now. The respawn snapshot is not touched.
+    #[test]
+    fn rewind_restores_world_and_body_but_keeps_the_mind_when_data_present() {
+        let Some(d) = data() else { return };
+        let (mut sim, mut mesh) = mendel_alive(&d);
+        run(&mut sim, &mut mesh, 5 * TICKS_PER_SECOND);
+        let t = std::time::Instant::now();
+        let point = sim.rewind_point().expect("he is alive");
+        let took = t.elapsed();
+        let (pos, on, heading) = {
+            let c = sim.creature.as_ref().unwrap();
+            (c.pos, c.surface(), c.mover.heading)
+        };
+        let respawn_world = sim.snapshot.clone();
+
+        run(&mut sim, &mut mesh, 20 * TICKS_PER_SECOND);
+        assert_ne!(sim.capture(), point.world, "the world moved on");
+        // A lethal floor's flags, as a bite hands them over: he dies.
+        sim.creature.as_mut().unwrap().react(0x0158_2380);
+        for _ in 0..5 * TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            if matches!(sim.creature.as_ref().unwrap().mode, Mode::Vanishing(..)) {
+                break;
+            }
+        }
+        let c = sim.creature.as_ref().unwrap();
+        assert!(matches!(c.mode, Mode::Vanishing(_, crate::creature::After::Respawn)), "he is dying: {:?}", c.mode);
+        assert!(sim.rewind_point().is_none(), "no rewind point while dying");
+        let (brain, cost, deaths) = (c.brain.clone(), c.cost_for_test(), c.stats.deaths);
+        assert!(deaths >= 1);
+
+        let t = std::time::Instant::now();
+        assert!(sim.rewind_to(&point, &mut mesh));
+        println!("rewind point: take {took:?}, restore {:?}", t.elapsed());
+        // The world is the point's; only the random generator has moved on,
+        // by the draws of his materialise effect (as after any respawn).
+        let now = sim.capture();
+        assert_ne!(now.rng, point.world.rng);
+        assert_eq!(WorldState { rng: point.world.rng, ..now }, point.world, "the world is the rewind point's");
+        assert_eq!(sim.snapshot, respawn_world, "the respawn snapshot is untouched");
+        let c = sim.creature.as_ref().unwrap();
+        assert_eq!(c.brain, brain, "the brain is not rewound");
+        assert_eq!(c.cost_for_test(), cost, "nor this death's pain");
+        assert_eq!(c.stats.deaths, deaths, "the death still counts");
+        assert_eq!((c.pos, c.surface(), c.mover.heading), (pos, on, heading), "his body is back where it was");
+        assert!(matches!(c.mode, Mode::Appearing(_)), "he materialises");
+        assert!(sim.events.iter().any(|e| e.kind == crate::sim::EV_CAMERA_SNAP), "the camera cuts");
+        for _ in 0..10 * TICKS_PER_SECOND {
+            sim.step(&mut mesh);
+            if sim.creature.as_ref().unwrap().mode == Mode::Alive {
+                break;
+            }
+        }
+        assert_eq!(sim.creature.as_ref().unwrap().mode, Mode::Alive, "and lives on");
+
+        // A point from another build of the section is refused.
+        let (mut other, mut other_mesh) = world(&d, 0, true);
+        let before = other.capture();
+        assert!(!other.rewind_to(&point, &mut other_mesh));
+        assert_eq!(other.capture(), before);
     }
 
     /// The persistent variables of the `Save` class: section 2's objects

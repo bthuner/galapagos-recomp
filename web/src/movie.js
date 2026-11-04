@@ -5,7 +5,7 @@
 // audio time t?" and decode forward until we reach it. If the tab stutters,
 // frames are skipped instead of the sound drifting out of sync.
 
-function toAudioBuffer(ctx, samples, rate, channels) {
+export function toAudioBuffer(ctx, samples, rate, channels) {
   const frames = samples.length / channels;
   const buf = ctx.createBuffer(channels, Math.max(1, frames), rate);
   for (let c = 0; c < channels; c++) {

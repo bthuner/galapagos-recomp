@@ -17,6 +17,7 @@
 // `onTouch` (touching Mendel). In follow mode we show the original game
 // camera, which the engine runs (crates/engine/src/camera.rs); dragging
 // orbits around Mendel for a while, then hands the view back.
+// Touch screens reach the same moves through `input` (qol/touch.js).
 
 // Lighting, as the 1997 Direct3D renderer did it (crates/engine/src/world.rs
 // has the Rust reference of every step, with the exe's addresses):
@@ -92,6 +93,9 @@ uniform int uGlass;
 // hover highlight on this draw, and its colour.
 uniform float uHighlight;
 uniform vec3 uHighlightColour;
+// Quality of Life #49 (not in the original): a colour-blind preset, applied
+// last, in linear light. Identity unless the player picks one.
+uniform mat3 uColourMatrix;
 in vec2 vUV; flat in float vLayer; flat in vec2 vColour; in float vFog;
 in float vRim;
 // A soft tint plus a glowing rim, on top of the faithful colour.
@@ -101,6 +105,9 @@ vec3 highlight(vec3 c) {
   return min(mix(c, uHighlightColour, 0.22 * uHighlight) + uHighlightColour * rim * 0.8 * uHighlight, 1.0);
 }
 out vec4 color;
+vec3 colourblind(vec3 c) {
+  return pow(clamp(uColourMatrix * pow(c, vec3(2.2)), 0.0, 1.0), vec3(1.0 / 2.2));
+}
 vec3 brighten(vec3 c) {
   if (uBright > 0.0) return c + (1.0 - c) * uBright * step(0.5 / 255.0, c);
   if (uBright < 0.0) return c + c * uBright * (1.0 - step(254.5 / 255.0, c));
@@ -115,7 +122,7 @@ void main() {
     if (vColour.x <= 0.0) discard; // level 0: the exe skips it
     vec3 g = mix(uFog, vec3(vColour.x), vFog);
     // Additive light takes only the flash's scale, not its offset.
-    color = vec4(highlight(clamp(g * (uTintHi - uTintLo), 0.0, 1.0)), 1.0);
+    color = vec4(colourblind(highlight(clamp(g * (uTintHi - uTintLo), 0.0, 1.0))), 1.0);
     return;
   }
   if (vLayer < -1.5) discard; // hidden in the current appearance state
@@ -127,7 +134,7 @@ void main() {
   // The 1997 game remapped its 8-bit palette for a flash; we remap the
   // final colour the same way.
   c = clamp(uTintLo + c * (uTintHi - uTintLo), 0.0, 1.0);
-  color = vec4(highlight(c), 1.0);
+  color = vec4(colourblind(highlight(c)), 1.0);
 }`;
 
 // Preferences ▸ Brightness, Darkest … Lightest: the palette shift the exe
@@ -204,6 +211,10 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   const uHighlight = gl.getUniformLocation(prog, "uHighlight");
   const uEye = gl.getUniformLocation(prog, "uEye");
   let highlighted = null;
+  // Accessibility (QoL #49, not in the original): a colour matrix (row
+  // major) and how much of a palette flash to show (1 = all of it).
+  const uColourMatrix = gl.getUniformLocation(prog, "uColourMatrix");
+  let colourMatrix = [1, 0, 0, 0, 1, 0, 0, 0, 1], flashStrength = 1;
   // Preferences: brightness shift (BRIGHTNESS) and render resolution.
   // `pixels` is the canvas height in device pixels to aim for (0 = native).
   let brightness = 0, pixels = 0;
@@ -236,6 +247,10 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   // (`look`: an orbit around Mendel that fades back to the original).
   const follow = { on: false, creature: null, look: null, cut: false };
   let lastTime = performance.now();
+  // Photo mode (qol/photo.js; not in the original): a free camera that
+  // takes over while set and leaves `cam` and `follow` untouched, so
+  // leaving it brings back exactly the view that was there before.
+  let free = null; // { eye, yaw, pitch, fov, near }
 
   function load(world) {
     gl.bindVertexArray(vao);
@@ -301,10 +316,10 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     lastTime = now;
     // Run the simulation first: the camera we draw is the one it produced.
     const alpha = onFrame() ?? 1;
-    const view = (follow.on && engineView(alpha, dt)) || orbitView();
+    const view = (free && freeView()) || (follow.on && engineView(alpha, dt)) || orbitView();
     // Close to Mendel the near plane must be close too.
-    const near = follow.on ? 40 : radius / 500;
-    const fov = follow.on ? ORIGINAL_FOV : ORBIT_FOV;
+    const near = free ? free.near : follow.on ? 40 : radius / 500;
+    const fov = free ? free.fov : follow.on ? ORIGINAL_FOV : ORBIT_FOV;
     const proj = perspective(fov, w / h, near, radius * 8);
     basis = { ...view, aspect: w / h, fov };
     gl.useProgram(prog);
@@ -312,10 +327,12 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     gl.uniformMatrix4fv(uViewProj, false, viewProj);
     gl.uniform1f(uBright, brightness);
     gl.uniform3f(uFog, fog, fog, fog);
-    const t = current.tint?.() ?? [0, 255, 0, 255, 0, 255];
+    // Reduce flashes (#49): move lo towards 0 and hi towards 255.
+    const t = (current.tint?.() ?? [0, 255, 0, 255, 0, 255]).map((v, k) => (k & 1 ? 255 : 0) + (v - (k & 1 ? 255 : 0)) * flashStrength);
     gl.uniform3f(uTintLo, t[0] / 255, t[2] / 255, t[4] / 255);
     gl.uniform3f(uTintHi, t[1] / 255, t[3] / 255, t[5] / 255);
     gl.uniform3fv(uEye, view.eye);
+    gl.uniformMatrix3fv(uColourMatrix, true, colourMatrix); // WebGL2 may transpose: we keep rows
     // A gentle pulse, about once a second, between 0.55 and 1.
     const glow = 0.775 + 0.225 * Math.sin(now / 1000 * 2 * Math.PI * 0.8);
     gl.uniform1f(uHighlight, 0);
@@ -344,6 +361,9 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     gl.enable(gl.CULL_FACE);
     gl.cullFace(gl.BACK);
     gl.frontFace(gl.CCW);
+    // No glow (hover #41, keyboard focus #49) in photo mode: it would be
+    // in the picture.
+    const lit = free ? null : highlighted;
     const drawWorld = (glass) => {
       for (let i = 0; i < draws.length / 2; i++) {
         if (visible && !visible[i]) continue; // hidden by a -5 appearance frame
@@ -352,9 +372,9 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
           else gl.enable(gl.CULL_FACE);
         }
         gl.uniformMatrix4fv(uModel, false, transforms.subarray(i * 16, i * 16 + 16));
-        if (i === highlighted) gl.uniform1f(uHighlight, glow);
+        if (i === lit) gl.uniform1f(uHighlight, glow);
         gl.drawArrays(gl.TRIANGLES, draws[i * 2], draws[i * 2 + 1]);
-        if (i === highlighted) gl.uniform1f(uHighlight, 0);
+        if (i === lit) gl.uniform1f(uHighlight, 0);
       }
     };
     gl.uniform1i(uGlass, 0);
@@ -398,6 +418,21 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   }
   const orbitView = () => orbitAt(cam.target, cam.yaw, cam.pitch, cam.dist);
 
+  // The free camera: an eye and a heading (yaw about +z, pitch towards +z).
+  // It has no roll, so the horizon stays level.
+  function freeView() {
+    const c = Math.cos(free.pitch);
+    const forward = [c * Math.sin(free.yaw), c * Math.cos(free.yaw), Math.sin(free.pitch)];
+    const right = v3.norm(v3.cross(forward, UP.map((u) => u * cam.flip)));
+    return { eye: free.eye, forward, up: v3.cross(right, forward), right };
+  }
+  // Move the free eye by world units along its own axes.
+  function fly(f, r, u) {
+    if (!free) return;
+    const v = freeView();
+    free.eye = free.eye.map((e, i) => e + v.forward[i] * f + v.right[i] * r + v.up[i] * u);
+  }
+
   // The original camera, from the engine: it moves at 24 Hz, so we draw
   // the previous tick's view blended towards the current one by `alpha`,
   // the fraction of the next tick already elapsed. not in the original:
@@ -418,7 +453,7 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       // not in the original: the user's look-around, an orbit around
       // Mendel that fades back into the original camera when left alone.
       const c = follow.creature?.();
-      if (!drag) look.idle += dt;
+      if (!drag && !held) look.idle += dt;
       if (look.idle > LOOK.idle) look.weight -= dt / LOOK.back;
       if (!c || look.weight <= 0) {
         follow.look = null;
@@ -453,8 +488,9 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     return follow.look;
   }
 
-  // Input: orbit / pan / zoom.
-  let drag = null;
+  // Input: orbit / pan / zoom. `held`: a finger is down (qol/touch.js),
+  // which keeps a look-around from fading back, like a mouse drag.
+  let drag = null, held = false;
   canvas.addEventListener("pointerdown", (e) => {
     drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, button: e.button, pan: e.button === 1 || e.shiftKey };
     if (e.button === 1) e.preventDefault(); // no auto-scroll
@@ -462,7 +498,7 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   });
   canvas.addEventListener("pointerup", (e) => {
     const moved = drag && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) > 4;
-    if (drag && !moved && !drag.pan && basis) {
+    if (drag && !moved && !drag.pan && basis && !free) { // no clicks into a paused world
       if (drag.button === 0) onPick(...rayThrough(e));
       if (drag.button === 2) onTouch(...rayThrough(e));
     }
@@ -483,18 +519,46 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     const dir = norm(fwd.map((f, i) => f + nx * k * basis.aspect * right[i] + ny * k * up[i]));
     return [basis.eye, dir];
   }
+  // A click at a page point, from the keyboard (#49) or a finger (#43).
+  function clickAt(clientX, clientY, button = 0) {
+    if (!basis || free) return; // no clicks into a world frozen in photo mode
+    (button === 2 ? onTouch : onPick)(...rayThrough({ clientX, clientY }));
+  }
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointermove", (e) => {
     if (!drag) return;
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     [drag.x, drag.y] = [e.clientX, e.clientY];
-    if (drag.pan) {
-      // Panning means "I want to look elsewhere": leave follow mode.
-      if (follow.on) setFollow(false);
-      const s = cam.dist / canvas.clientHeight;
-      cam.target[0] -= (Math.cos(cam.yaw) * dx) * s;
-      cam.target[1] += (Math.sin(cam.yaw) * dx) * s;
-      cam.target[2] += cam.flip * dy * s;
+    if (drag.pan) pan(dx, dy);
+    else orbit(dx, dy);
+  });
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    zoom(Math.exp(e.deltaY * 0.001));
+  }, { passive: false });
+
+  // The three camera moves, by screen pixels (and a distance factor for
+  // zoom), shared by the mouse above and the touch gestures (qol/touch.js).
+  // In photo mode they steer the free camera instead, so a finger flies it
+  // exactly as the mouse does.
+  function pan(dx, dy) {
+    if (free) {
+      // Photo mode: slide the eye sideways and up.
+      const s = (radius * 0.6) / canvas.clientHeight;
+      return fly(0, -dx * s, dy * s);
+    }
+    // Panning means "I want to look elsewhere": leave follow mode.
+    if (follow.on) setFollow(false);
+    const s = cam.dist / canvas.clientHeight;
+    cam.target[0] -= (Math.cos(cam.yaw) * dx) * s;
+    cam.target[1] += (Math.sin(cam.yaw) * dx) * s;
+    cam.target[2] += cam.flip * dy * s;
+  }
+  function orbit(dx, dy) {
+    if (free) {
+      // Photo mode: drag turns the head (mouse-look).
+      free.yaw += dx * 0.004;
+      free.pitch = Math.max(-1.55, Math.min(1.55, free.pitch - dy * 0.004));
     } else if (follow.on) {
       const look = lookAround();
       if (look) {
@@ -505,13 +569,14 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       cam.yaw -= dx * 0.005;
       cam.pitch = Math.max(-1.5, Math.min(1.5, cam.pitch + dy * 0.005));
     }
-  });
-  canvas.addEventListener("wheel", (e) => {
-    e.preventDefault();
+  }
+  function zoom(factor) {
+    // Photo mode: dolly along the view (the old wheel step, -deltaY·r·0.0004).
+    if (free) return fly(-Math.log(factor) * radius * 0.4, 0, 0);
     const look = follow.on && lookAround();
-    if (look) look.dist = Math.max(600, Math.min(40000, look.dist * Math.exp(e.deltaY * 0.001)));
-    else if (!follow.on) cam.dist *= Math.exp(e.deltaY * 0.001);
-  }, { passive: false });
+    if (look) look.dist = Math.max(600, Math.min(40000, look.dist * factor));
+    else if (!follow.on) cam.dist *= factor;
+  }
 
   function setFollow(on) {
     if (follow.on === on) return;
@@ -578,6 +643,23 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     // Quality of Life #41 (not in the original): glow draw `i` (an index
     // into the section's draws, see engine `sim_object_draw`), or null.
     setHighlight(i) { highlighted = i ?? null; },
+    // Quality of Life #49: a 3×3 colour matrix (row major, linear RGB),
+    // and the share of each palette flash to show (0..1).
+    setColourMatrix(m) { colourMatrix = m ? [...m] : [1, 0, 0, 0, 1, 0, 0, 0, 1]; },
+    setFlashStrength(k) { flashStrength = k; },
+    // A click at a page point, exactly as the mouse delivers it (button 0:
+    // onPick, 2: onTouch), for keyboard-only play (#49) and touch (#43).
+    // Like the mouse, it never reaches a world frozen in photo mode.
+    click: clickAt,
+    // The camera moves and clicks, for other input devices (qol/touch.js):
+    // orbit/pan by screen pixels, zoom by a distance factor, click at a page
+    // point (button 0 picks an object, 2 touches Mendel), hold while a
+    // finger rests on the view.
+    input: {
+      orbit, pan, zoom,
+      click: clickAt,
+      hold(on) { held = on; },
+    },
     // Flip the up axis, for exploring the geometry upside down.
     flipUp() { cam.flip = -cam.flip; },
     // Show the original camera; `creature` returns engine.creature.state()
@@ -591,5 +673,33 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     // and drop any look-around.
     snap() { follow.cut = true; follow.look = null; },
     stop() { running = false; },
+    // ——— Photo mode (qol/photo.js) ———
+    // Start a free camera exactly where the current one is, or drop it
+    // (the orbit or follow camera underneath was never touched).
+    freeCamera(on) {
+      if (!on) return void (free = null);
+      if (free || !basis) return;
+      const f = v3.norm(basis.forward);
+      free = {
+        eye: [...basis.eye],
+        yaw: Math.atan2(f[0], f[1]),
+        pitch: Math.asin(Math.max(-1, Math.min(1, f[2]))),
+        fov: basis.fov,
+        near: follow.on ? 40 : radius / 500,
+      };
+    },
+    fly,
+    // The section's half-diagonal in world units: a sense of scale for speeds.
+    get size() { return radius; },
+    // The picture as it is now, in a 2-D canvas. The WebGL canvas keeps no
+    // drawing buffer once a frame is shown (preserveDrawingBuffer is off: it
+    // would cost a copy every frame), so we draw one more frame and copy it
+    // out in the same task, before the browser may clear it.
+    snapshot() {
+      draw();
+      const out = Object.assign(document.createElement("canvas"), { width: canvas.width, height: canvas.height });
+      out.getContext("2d").drawImage(canvas, 0, 0);
+      return out;
+    },
   };
 }

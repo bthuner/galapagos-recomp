@@ -33,6 +33,17 @@
 // 4. Label honestly: `notOriginal: true` for anything the 1997 game did not
 //    have. `false` is for faithful options that merely live here.
 // 5. Add a line to the making-of journal.
+// 6. Pick an `order` of your own. Rows sort by `order` alone, and a tie
+//    falls back to registration order, which depends on when main.js calls
+//    each feature. So two features that both say 10 interleave their rows
+//    (Autosave, Fullscreen, Autosave interval…). Give each feature its own
+//    decade and number its rows inside it. Taken so far:
+//      Comfort        0 fullscreen · 10–11 autosave · 20–21 skip intro ·
+//                     30–31 hints · 40 hover highlight · 50 touch ·
+//                     90 developer mode · 100 frame meter
+//      Pacing         0 speed · 10 rewind
+//      Explore        0–1 worlds, music & movies · 10 Mendel's mind · 20 photo
+//      Accessibility  0–3 options · 10–12 keyboard-play keys
 //
 // Shortcuts are `KeyboardEvent.code` strings ("KeyF", "Backquote", "F2"):
 // physical keys, so they sit in the same place on AZERTY and QWERTY. They are
@@ -42,6 +53,11 @@
 // (those belong to the browser), and while the pause menu is open unless the
 // setting says `inMenu: true`. Escape and Space are the game's own and
 // cannot be taken.
+//
+// A mode that owns the keyboard (photo mode, #46) can narrow the shortcuts
+// with `onlyShortcuts(["photo", "fullscreen"])`: the others are then not
+// dispatched (nor stopped), so they reach the mode's own listener, which
+// decides; `onlyShortcuts(null)` restores them all.
 
 const STORE = "galapagos.qol";
 const RESERVED = new Set(["Escape", "Space"]);
@@ -50,6 +66,7 @@ const RESERVED = new Set(["Escape", "Space"]);
 const GROUPS = ["Comfort", "Pacing", "Explore", "Accessibility"];
 
 const settings = new Map(); // key → normalised definition, in registration order
+let allowed = null; // Set of setting keys whose shortcuts still work, or null: all
 const listeners = new Map(); // key → Set of functions
 let values = {};
 try {
@@ -86,11 +103,16 @@ function valid(def, v) {
  *   default      initial value (ignored for buttons)
  *   notOriginal  true if the 1997 game had no such thing (required)
  *   group        panel heading, default "Comfort"
- *   order        sort order inside the group (default 0; then registration)
+ *   order        sort order inside the group (default 0; ties fall back to
+ *                registration order, so use your own decade: see step 6)
  *   shortcut     optional key code: flips a toggle, cycles a choice,
  *                presses a button
  *   inMenu       the shortcut also works while the pause menu is open
- *   action       for "button" and "key": what pressing it does
+ *   action       for "button" and "key": what pressing it does; a "key"
+ *                action receives the KeyboardEvent (to read e.shiftKey)
+ *   active       optional () => boolean: the shortcut is only taken while
+ *                it returns true (otherwise the key keeps its usual job,
+ *                e.g. Tab still moves focus outside the game view)
  */
 export function register(def) {
   if (settings.has(def.key)) throw new Error(`QoL setting "${def.key}" is registered twice`);
@@ -265,13 +287,21 @@ const typing = (t) =>
   (t.isContentEditable || t.tagName === "TEXTAREA" || t.tagName === "SELECT" ||
     (t.tagName === "INPUT" && !["checkbox", "radio", "range", "button", "submit"].includes(t.type)));
 
-function press(d) {
+function press(d, e) {
   if (d.type === "toggle") set(d.key, !get(d.key));
   else if (d.type === "choice") {
     const i = d.options.findIndex((o) => o.value === get(d.key));
     set(d.key, d.options[(i + 1) % d.options.length].value);
   } else if (d.type === "button") set(d.key);
-  else d.action?.(); // "key": the binding itself is the value
+  else d.action?.(e); // "key": the binding itself is the value
+}
+
+/**
+ * Restrict shortcut dispatch to the settings `keys` (an array), or lift the
+ * restriction with null. For modes that take the keyboard over (photo mode).
+ */
+export function onlyShortcuts(keys) {
+  allowed = keys ? new Set(keys) : null;
 }
 
 // Registered when this module is first imported, before menu.js adds its Esc
@@ -295,10 +325,10 @@ addEventListener("keydown", (e) => {
   const menuOpen = mounted?.menuOpen() ?? false;
   for (const d of settings.values()) {
     const code = d.type === "key" ? get(d.key) : d.shortcut;
-    if (code !== e.code || (menuOpen && !d.inMenu)) continue;
+    if (code !== e.code || (menuOpen && !d.inMenu) || (allowed && !allowed.has(d.key)) || (d.active && !d.active())) continue;
     e.preventDefault();
     e.stopImmediatePropagation();
-    press(d);
+    press(d, e);
     return;
   }
 }, true);
