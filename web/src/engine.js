@@ -217,6 +217,12 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
         const n = wasm.game_save();
         return new Uint8Array(wasm.memory.buffer, wasm.game_save_ptr(), n).slice();
       },
+      // The same bytes without taking a snapshot: the respawn point stays
+      // where the original left it (the autosave, web/src/qol/autosave.js).
+      autosave() {
+        const n = wasm.game_autosave();
+        return new Uint8Array(wasm.memory.buffer, wasm.game_save_ptr(), n).slice();
+      },
       // Rebuilds the saved section and restores everything (brain included).
       // Returns the section index; then re-read worlds.current().
       load(bytes) {

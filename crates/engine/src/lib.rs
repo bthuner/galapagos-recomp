@@ -860,10 +860,27 @@ thread_local! {
 /// [`game_save_ptr`] before the next engine call.
 #[no_mangle]
 pub extern "C" fn game_save() -> u32 {
+    save_into_buffer(true)
+}
+
+/// The same bytes as [`game_save`], **without** taking a snapshot: the
+/// respawn point stays the last save pad (or level start), exactly as the
+/// original left it. This is what the web autosave uses (not in the 1997
+/// game): it must only survive closing the tab, never change what dying
+/// does. The file still carries the current snapshot, so opening it brings
+/// the old respawn point back too.
+#[no_mangle]
+pub extern "C" fn game_autosave() -> u32 {
+    save_into_buffer(false)
+}
+
+fn save_into_buffer(snapshot: bool) -> u32 {
     let bytes = WORLDS.with(|w| {
         let mut guard = w.borrow_mut();
         let sim = guard.as_mut().and_then(|w| w.sim.as_mut())?;
-        sim.take_snapshot();
+        if snapshot {
+            sim.take_snapshot();
+        }
         Some(sim.save_game())
     });
     let bytes = bytes.unwrap_or_default();

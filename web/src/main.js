@@ -8,6 +8,8 @@ import { showTimeScreen } from "./time-screen.js";
 import { startTitleOverlay } from "./title.js";
 import { frameMeter } from "./qol/frame-meter.js";
 import { hover } from "./qol/hover.js";
+import { autosave } from "./qol/autosave.js";
+import { skipIntro } from "./qol/skip-intro.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -15,6 +17,8 @@ const $ = (id) => document.getElementById(id);
 // each. They register their settings; the menu renders whatever is there.
 frameMeter();
 hover(); // highlight clickable objects (#41): reads globalThis.galapagos once a world is up
+autosave();
+const intro = skipIntro();
 const log = (msg) => ($("log").textContent += msg + "\n");
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
 
@@ -36,9 +40,10 @@ function waitForClick(el) {
   return new Promise((resolve) => el.addEventListener("click", resolve, { once: true }));
 }
 
-async function boot(files) {
+async function boot(files, { fromCache = false } = {}) {
   $("boot").hidden = true;
   $("stage").hidden = false;
+  intro.offer(fromCache); // later visits: Continue or New game, no movie (qol/skip-intro.js)
   const engine = await loadEngine();
   const audio = new AudioContext();
   // One volume knob for music and effects (Preferences ▸ Volume).
@@ -61,7 +66,7 @@ async function boot(files) {
 
   // File 0 is the Anark studio intro (640x240, line-interlaced to 640x480).
   scanlineToggle();
-  await playMovie(engine, await bytesOf(files["0"]), $("screen"), audio, { scanlines });
+  await intro.run(async () => playMovie(engine, await bytesOf(files["0"]), $("screen"), audio, { scanlines }));
 
   // The worlds, alive: the 24 Hz object simulation runs; clicks reach the
   // state machines; Mendel is spawned by the section's start portal and
@@ -282,4 +287,4 @@ drop.addEventListener("drop", (e) => {
 $("forget-stage").addEventListener("click", async () => (await forget(), location.reload()));
 
 const cached = await loadCached();
-if (cached) boot(cached);
+if (cached) boot(cached, { fromCache: true });
