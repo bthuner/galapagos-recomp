@@ -19,6 +19,7 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
   const { instance } = await WebAssembly.instantiateStreaming(fetch(url, { cache: "no-cache" }), {});
   const wasm = instance.exports;
   const u8 = (ptr, len) => new Uint8Array(wasm.memory.buffer, ptr, len);
+  let mindView = null; // creature.mind()'s cached view
 
   function upload(bytes) {
     const ptr = wasm.alloc(bytes.length);
@@ -181,6 +182,19 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
       affliction() {
         const v = wasm.creature_affliction();
         return { kind: v & 0xff, ticksLeft: v >>> 8 };
+      },
+      // "Mendel's mind" (Quality of Life, #48): his senses, touch, brain
+      // and learning as one Float32Array, refilled by each call. The index
+      // table is in crates/engine/src/creature/mind.rs (and mirrored in
+      // qol/mind.js). The engine fills one static buffer, so the pointer
+      // never moves: we keep one view and only rebuild it after the
+      // memory grew (which detaches every old view).
+      mind() {
+        const p = wasm.creature_mind_ptr();
+        if (mindView?.buffer !== wasm.memory.buffer || mindView.byteOffset !== p) {
+          mindView = new Float32Array(wasm.memory.buffer, p, wasm.creature_mind_len());
+        }
+        return mindView;
       },
       // Teaching/debug, not in the original: afflict him with n (1..12).
       afflict: (n) => wasm.creature_afflict(n),

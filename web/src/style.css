@@ -447,3 +447,56 @@ kbd { font: 0.7rem ui-monospace, monospace; color: var(--mute); border: 1px soli
 }
 /* Held at ×1 while the title is on screen. */
 .speed-badge.is-held { opacity: 0.4; }
+
+/* "Mendel's mind" (qol/mind.js): docked beside the 3-D view on wide
+   screens, a floating overlay otherwise. The canvas is drawn 320 CSS px
+   wide and scales down with the panel. */
+.mind {
+  position: fixed;
+  z-index: 9; /* under the pause menu (10) and the frame meter (12) */
+  right: 0.75rem;
+  bottom: 0.75rem;
+  width: min(20rem, calc(100vw - 1.5rem));
+  max-height: 72vh;
+  overflow: auto;
+  padding: 0.9rem 1rem 0.8rem;
+  border: 1px solid #ffffff1f;
+  border-radius: 14px;
+  background: #0b1a1ee6;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 20px 60px #0008;
+  display: grid;
+  align-content: start;
+  gap: 0.7rem;
+  animation: mind-in 0.5s var(--ease);
+}
+@keyframes mind-in { from { opacity: 0; transform: translateY(12px); } }
+.mind__head { display: flex; justify-content: space-between; align-items: start; gap: 1rem; }
+.mind__head h2 { margin: 0.15rem 0 0; font-weight: 300; font-size: 1.35rem; letter-spacing: -0.02em; }
+.mind__kicker { margin: 0; font-size: 0.6rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--mute); }
+.mind__close {
+  width: 1.8rem;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 1px solid #ffffff33;
+  background: none;
+  color: var(--bone);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.mind__close:hover, .mind__close:focus-visible { border-color: var(--lime); color: var(--lime); outline: none; }
+.mind__canvas { display: block; width: 100%; height: auto; }
+.mind__moodbox { border-left: 2px solid var(--lime); padding: 0.1rem 0 0.1rem 0.7rem; display: grid; gap: 0.2rem; }
+.mind__tag { font-size: 0.6rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--mute); }
+.mind__mood { margin: 0; font-weight: 300; font-size: 1rem; line-height: 1.35; min-height: 2.7em; }
+.mind__foot { display: flex; flex-wrap: wrap; gap: 0.4rem 1.2rem; font-size: 0.75rem; }
+.mind__foot a { color: var(--bone); text-decoration: none; border-bottom: 1px solid #ffffff33; }
+.mind__foot a:hover { border-color: var(--lime); }
+@media (min-width: 75rem) {
+  /* Docked: a column on the right; the stage, and the 3-D view, make room. */
+  .mind { top: 2.2rem; bottom: 1rem; right: 1rem; width: 22rem; max-height: none; background: var(--deep); backdrop-filter: none; box-shadow: none; }
+  body.has-mind .stage { padding-right: 24rem; }
+  body.has-mind .world { width: calc(var(--view-size, 1) * min(94vw - 24rem, calc(78vh * 16 / 9))); }
+}
+@media (prefers-reduced-motion: reduce) { .mind { animation: none; } }

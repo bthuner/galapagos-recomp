@@ -12,6 +12,7 @@ import { autosave } from "./qol/autosave.js";
 import { skipIntro } from "./qol/skip-intro.js";
 import { a11y } from "./qol/a11y.js";
 import { gameSpeed } from "./qol/speed.js";
+import { mendelsMind } from "./qol/mind.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -23,6 +24,7 @@ autosave();
 const intro = skipIntro();
 a11y(); // accessibility options (#49): colour presets, keyboard play, sound cues, softer flashes
 const speed = gameSpeed(); // the loop below scales game time by speed.factor()
+mendelsMind(() => globalThis.galapagos?.engine); // the engine exists once the CD boots
 const log = (msg) => ($("log").textContent += msg + "\n");
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
 

@@ -289,8 +289,9 @@ pos = first_stream_with_valid_crc(overlay)
           The brain is three controllers: posture, speed and turn. Each is a 10-state Markov chain whose transition
           probabilities depend on the input, through a genome interpolated over nine knots. The controller's output
           is the average state over 200 random steps. Thirty genomes compete per controller. While Mendel moves,
-          a cost accumulates (getting too close to things, turning toward light, and above all pain). Every 65,536
-          ticks the best 15 genomes are kept and the worst 15 are rebuilt from them with mutations. It's a
+          a cost accumulates (getting too close to things, turning toward light, and above all pain). Each genome
+          drives for 65,536 "cost-ticks", then hands over to the next one. When all 30 have had their turn, the best 15
+          genomes are kept and the worst 15 are rebuilt from them with mutations. It's a
           (15+15) genetic algorithm running live inside a 1997 game.
         </p>
         <p>
@@ -312,8 +313,29 @@ pos = first_stream_with_valid_crc(overlay)
         </ul>
         <p>
           The brain is the real one: the age-3 genome from the CD reads his two infrared eyes, three 200-step Markov
-          chains drive slew-limited "muscles", and the genetic algorithm evolves about twice a minute while you watch.
+          chains drive slew-limited "muscles", and the genetic algorithm evolves while you watch: a new genome takes over
+          every ten seconds or so, and every thirty turns the population breeds.
           His brain survives death and gates. Right-click his left or right side and he feels a bump there.
+        </p>
+        <h3 id="mind-panel">Watch him think: the live panel</h3>
+        <p>
+          You don't have to take our word for any of this. In <a href="../">the game</a>, open <em>Pause ▸ Quality of Life ▸ Show
+          Mendel's mind</em>, or press <kbd>M</kbd>. A panel docks beside the 3-D view (on a narrow screen it floats
+          over it). It is not in the 1997 game, and it never changes what Mendel does: it only reads him.
+        </p>
+        <ul class="strings">
+          <li><b>Senses</b><span>his two eyes seen from above, three rays each: high, middle, and the dashed ledge ray that runs under the floor. A ray is coloured by what it hit (floor, wall, hazard, or a drop at a floor's edge). The bold one is the ray the eye believed, the nearest. A cross marks a polygon the eye doesn't count, which only hides what lies behind it. The arcs show his reach: when he stands tall he looks further and narrower.</span></li>
+          <li><b>Touch</b><span>the two dots at his front corners are the touch points. They turn lime when he bumps into something and blue when you right-click him. A click lasts four ticks, so the engine counts clicks and the panel keeps the dot lit long enough to see.</span></li>
+          <li><b>Muscles</b><span>for each controller, ten dots are the Markov chain, and the lit one is where this tick's walk ended. The hollow marker is the chain's output, the muscle's <em>target</em>. The bar is the muscle itself, which chases the target at a limited speed. That smoothing is why a twitchy brain still walks smoothly.</span></li>
+          <li><b>Learning</b><span>thirty squares per controller are the population; the lit one is the genome on trial. The bar shows how far its trial has got, the number is its running cost (lower is fitter), and the panel says when the next one takes over. The speed controller's trial is exactly 257 ticks. Posture and turn share one cost and count faster when he sees more, so they take 128 to 683 ticks. When the population breeds, the whole panel flashes and the cost graph gets a lime line.</span></li>
+          <li><b>State</b><span>mode, affliction with its countdown, the seconds left on a delayed lethal floor, pain and deaths, and the polygon he stands on.</span></li>
+          <li><b>Mood</b><span>one line in plain words ("cautious: turning away from the wall on his left"). This is <em>our interpretation</em> of the numbers above, and the panel labels it that way: the game has no mood variable, only the costs.</span></li>
+        </ul>
+        <p>
+          Under the hood, the engine fills a 109-number snapshot (<code>creature/mind.rs</code>) only when the panel
+          asks for it, so a closed panel costs nothing. The senses record what each ray met as they cast it, which
+          the original threw away at the end of every tick. Two tests check the snapshot against Mendel's own fields,
+          one of them through the same WebAssembly export the page calls.
         </p>
         <p>
           Some parts are honest stand-ins, each marked <code>// inferred:</code> or <code>// not in the original:</code>
@@ -1005,6 +1027,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑04</time> Remember the CD, skip straight to play (Quality of Life, off by default). Browsers still want one click before sound, so with the setting on that click becomes the real choice: once the CD is cached, the start screen offers <em>Continue</em> or <em>New game</em> and goes straight to the world, with no movie. The visit that reads the ISO, and any visit before the intro has been seen once, still plays it as in 1997. A quiet "Replay intro" link on the start screen brings it back, and so does a button in the panel, which plays it over the paused game. The menu stays logically open, so nothing ticks behind the movie, and a key listener registered before the menu's keeps Esc from closing it halfway.</li>
           <li><time>2026‑11‑04</time> Quality of Life: four <em>Accessibility</em> options, all off by default. Colour-blind presets (a daltonisation matrix, <code>I + M·(I − S)</code>, applied last in the world shader in linear light, and as an SVG filter on the title); keyboard-only play (Tab walks the objects a click would set in motion, confirmed by the click's own pick, Enter clicks, T touches Mendel on alternate sides through a read-only side test); screen-edge markers for Mendel's cries, predators and save pads; and palette flashes at 35%.</li>
           <li><time>2026‑11‑04</time> Game speed ×1, ×2, ×4 (Pause ▸ Quality of Life, or <code>G</code>). The simulation has a fixed 24 Hz timestep, so fast-forward is one multiplier on the real time fed to its clock: 48 or 96 ticks a second, the same deterministic ticks, with between-tick blending untouched. The five-ticks-a-frame cap still holds, so a slow frame makes the game slower rather than starting a spiral. Pause still pauses, music keeps its tempo, sounds keep their pitch (a sound repeated within one frame plays once), and the GALAPAGOS title plays at ×1. Off by default, like every change of pacing.</li>
+          <li><time>2026‑11‑04</time> <a href="#mind-panel">Mendel's mind</a>, live (<kbd>M</kbd>): a panel shows his eye rays coloured by what they hit, his touch points (your right-click included), his chains and muscles, which genome is on trial, and the genetic algorithm breeding. It corrected our own chapter too: a genome drives for about ten seconds, and the population breeds every thirty genomes, not "twice a minute".</li>
           <li><time>2026‑11‑03</time> World 0's GALAPAGOS title, which turned out to be an <code>Over</code> world object: up after 40 ticks under a white flash, down 150 ticks later.</li>
           <li><time>2026‑11‑03</time> The original camera is on by default from the moment a section loads, as in 1997, instead of waiting for Mendel to appear.</li>
           <li><time>2026‑11‑02</time> <code>PMan</code>, the unused fourth predator, ported and tested on a re-classed fork; the shared chase now holds its heading between re-aims, and predators face their prey.</li>
