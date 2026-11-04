@@ -499,6 +499,50 @@ pub extern "C" fn sim_click(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32, dz: f32
     })
 }
 
+// ——— Hover: would a click matter? (Quality of Life #41, sim/hover.rs) ———
+// Read-only questions: nothing here clicks, draws a random number or
+// changes what the next tick sees.
+
+/// The object a left click along this ray would reach, if that click would
+/// currently do something (same pick as `sim_click`); -1 otherwise.
+#[no_mangle]
+pub extern "C" fn sim_hover(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32, dz: f32) -> i32 {
+    peek_sim(|sim| sim.hover([ox, oy, oz], [dx, dy, dz]).map_or(-1, i32::from), -1)
+}
+
+/// The renderer's draw index of object `id` (1-based), or -1 if it has no mesh.
+#[no_mangle]
+pub extern "C" fn sim_object_draw(id: u32) -> i32 {
+    peek_sim(|sim| sim.draw_of(id as u16).map_or(-1, |d| d as i32), -1)
+}
+
+thread_local! {
+    static CLICKABLE: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Every awake object a click would currently matter for, ignoring line
+/// of sight (for keyboard-only play, #49). Returns the count; the 1-based
+/// ids (u32 each) are at `sim_clickable_ptr()` until the next call.
+#[no_mangle]
+pub extern "C" fn sim_clickable() -> u32 {
+    let ids = peek_sim(|sim| sim.clickable_ids(), Vec::new());
+    CLICKABLE.with(|c| {
+        let mut c = c.borrow_mut();
+        c.clear();
+        c.extend(ids.into_iter().map(u32::from));
+        c.len() as u32
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn sim_clickable_ptr() -> *const u32 {
+    CLICKABLE.with(|c| c.borrow().as_ptr())
+}
+
+fn peek_sim<T>(f: impl FnOnce(&sim::Sim) -> T, default: T) -> T {
+    WORLDS.with(|w| w.borrow().as_ref().and_then(|w| w.sim.as_ref()).map_or(default, f))
+}
+
 /// The simulation rate. 24 Hz is inferred: the time screen divides the
 /// tick counters by 24 (docs/re/objects.md §7).
 #[no_mangle]

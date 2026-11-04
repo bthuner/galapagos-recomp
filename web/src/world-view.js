@@ -44,7 +44,9 @@ uniform mat4 uModel;
 // The section's materials: m0 + m2·ambient, m1, m3·intensity, m5.
 uniform vec4 uMat[64];
 uniform vec3 uLightDir; // unit vector, the direction light travels
+uniform vec3 uEye; // camera position, for the hover rim (QoL #41)
 out vec2 vUV; flat out float vLayer; flat out vec2 vColour; out float vFog;
+out float vRim;
 void main() {
   vUV = aUV; vLayer = aLayer;
   float level, m5;
@@ -63,7 +65,10 @@ void main() {
   else specular = min(floor((level - 16.0) / 16.0 * 255.0), 255.0);
   if (aLayer > -4.5 && aLayer < -3.5) { diffuse = floor(diffuse / 2.0); specular = 0.0; }
   vColour = vec2(diffuse, specular) / 255.0;
-  gl_Position = uViewProj * uModel * vec4(aPos, 1.0);
+  vec4 world = uModel * vec4(aPos, 1.0);
+  gl_Position = uViewProj * world;
+  // Rim term for the hover highlight: 1 where the surface is seen edge-on.
+  vRim = 1.0 - abs(dot(normalize(mat3(uModel) * aNormal), normalize(uEye - world.xyz)));
   // Direct3D's 1/rhw is the view depth, which is our clip w.
   float z = min(floor(max(gl_Position.w, 0.0)), 24000.0);
   vFog = floor(255.0 - z / 24000.0 * m5 * 255.0) / 255.0;
@@ -83,7 +88,18 @@ uniform vec3 uTintLo;
 uniform vec3 uTintHi;
 // 0: the opaque pass (glass skipped); 1: the glass pass (only glass).
 uniform int uGlass;
+// Quality of Life #41 (not in the original): strength (0 = off) of the
+// hover highlight on this draw, and its colour.
+uniform float uHighlight;
+uniform vec3 uHighlightColour;
 in vec2 vUV; flat in float vLayer; flat in vec2 vColour; in float vFog;
+in float vRim;
+// A soft tint plus a glowing rim, on top of the faithful colour.
+vec3 highlight(vec3 c) {
+  if (uHighlight <= 0.0) return c;
+  float rim = vRim * vRim;
+  return min(mix(c, uHighlightColour, 0.22 * uHighlight) + uHighlightColour * rim * 0.8 * uHighlight, 1.0);
+}
 out vec4 color;
 vec3 brighten(vec3 c) {
   if (uBright > 0.0) return c + (1.0 - c) * uBright * step(0.5 / 255.0, c);
@@ -99,7 +115,7 @@ void main() {
     if (vColour.x <= 0.0) discard; // level 0: the exe skips it
     vec3 g = mix(uFog, vec3(vColour.x), vFog);
     // Additive light takes only the flash's scale, not its offset.
-    color = vec4(clamp(g * (uTintHi - uTintLo), 0.0, 1.0), 1.0);
+    color = vec4(highlight(clamp(g * (uTintHi - uTintLo), 0.0, 1.0)), 1.0);
     return;
   }
   if (vLayer < -1.5) discard; // hidden in the current appearance state
@@ -111,7 +127,7 @@ void main() {
   // The 1997 game remapped its 8-bit palette for a flash; we remap the
   // final colour the same way.
   c = clamp(uTintLo + c * (uTintHi - uTintLo), 0.0, 1.0);
-  color = vec4(c, 1.0);
+  color = vec4(highlight(c), 1.0);
 }`;
 
 // Preferences ▸ Brightness, Darkest … Lightest: the palette shift the exe
@@ -184,6 +200,10 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   const uTintLo = gl.getUniformLocation(prog, "uTintLo");
   const uTintHi = gl.getUniformLocation(prog, "uTintHi");
   const uGlass = gl.getUniformLocation(prog, "uGlass");
+  // Hover highlight (QoL #41): one draw index, or null. Not in the original.
+  const uHighlight = gl.getUniformLocation(prog, "uHighlight");
+  const uEye = gl.getUniformLocation(prog, "uEye");
+  let highlighted = null;
   // Preferences: brightness shift (BRIGHTNESS) and render resolution.
   // `pixels` is the canvas height in device pixels to aim for (0 = native).
   let brightness = 0, pixels = 0;
@@ -229,6 +249,8 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     current = world;
     gl.useProgram(prog);
     gl.uniform4fv(uMat, world.materials.subarray(0, 64 * 4));
+    gl.uniform3f(gl.getUniformLocation(prog, "uHighlightColour"), 1.0, 0.82, 0.38); // warm gold
+    highlighted = null; // draw indices belong to the old section
     gl.uniform3fv(uLightDir, world.lightDir);
     fog = world.fogColour;
 
@@ -293,6 +315,10 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     const t = current.tint?.() ?? [0, 255, 0, 255, 0, 255];
     gl.uniform3f(uTintLo, t[0] / 255, t[2] / 255, t[4] / 255);
     gl.uniform3f(uTintHi, t[1] / 255, t[3] / 255, t[5] / 255);
+    gl.uniform3fv(uEye, view.eye);
+    // A gentle pulse, about once a second, between 0.55 and 1.
+    const glow = 0.775 + 0.225 * Math.sin(now / 1000 * 2 * Math.PI * 0.8);
+    gl.uniform1f(uHighlight, 0);
     gl.bindVertexArray(vao);
     // Upload only what the simulation patched (appearance changes).
     const dirty = current.takeDirty?.();
@@ -326,7 +352,9 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
           else gl.enable(gl.CULL_FACE);
         }
         gl.uniformMatrix4fv(uModel, false, transforms.subarray(i * 16, i * 16 + 16));
+        if (i === highlighted) gl.uniform1f(uHighlight, glow);
         gl.drawArrays(gl.TRIANGLES, draws[i * 2], draws[i * 2 + 1]);
+        if (i === highlighted) gl.uniform1f(uHighlight, 0);
       }
     };
     gl.uniform1i(uGlass, 0);
@@ -547,6 +575,9 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
       cam.yaw = Math.atan2(d[0], d[1]);
       cam.pitch = Math.asin(Math.max(-1, Math.min(1, d[2] / (cam.flip * cam.dist))));
     },
+    // Quality of Life #41 (not in the original): glow draw `i` (an index
+    // into the section's draws, see engine `sim_object_draw`), or null.
+    setHighlight(i) { highlighted = i ?? null; },
     // Flip the up axis, for exploring the geometry upside down.
     flipUp() { cam.flip = -cam.flip; },
     // Show the original camera; `creature` returns engine.creature.state()
