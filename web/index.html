@@ -83,6 +83,8 @@
           <button data-action="export">Export Mendel NERM…</button>
           <hr />
           <button data-action="prefs">Preferences…</button>
+          <button data-action="qol">Quality of Life…</button>
+          <button data-action="stats">Stats…</button>
           <button data-action="sounds">Sound test…</button>
           <button data-action="about">About Galapagos…</button>
           <button data-action="quit">Quit</button>
@@ -104,6 +106,22 @@
           <output></output>
           <small>The age of Mendel when he appears in a new game. This will not affect the current game.</small>
         </label>
+        <button class="link" data-action="back">← Back</button>
+      </section>
+
+      <!-- Not in the 1997 game: optional comfort features (#37). The rows are
+           rendered by src/qol.js from its registry; nothing to add here. -->
+      <section class="menu__panel" data-panel="qol" hidden>
+        <h2>Quality of Life</h2>
+        <p class="menu__note">Optional extras for playing today. The 1997 game is the default: anything that changes how it plays starts off.</p>
+        <div class="qol"></div>
+        <button class="link" data-action="back">← Back</button>
+      </section>
+
+      <!-- Filled by the Stats feature (#50) through menu.statsPanel. -->
+      <section class="menu__panel" data-panel="stats" hidden>
+        <h2>Stats</h2>
+        <div class="menu__stats"><p class="menu__note">Statistics are coming (#50).</p></div>
         <button class="link" data-action="back">← Back</button>
       </section>
 
