@@ -381,6 +381,7 @@ the width of every glyph.) That is just under the LEVEL / TOTAL labels.
 | `EV_SAVE_PAD = 6` (event, `a` = object id) | from `sim_click` when a `0x20` polygon is clicked while Mendel is on a pad: open the Save dialog |
 | `EV_GAME_COMPLETE = 7` (`a` = 8, `b` = 9) | portal kind 5: show picture 9 with the times |
 | `game_save() -> u32` / `game_save_ptr()` | take a snapshot (new respawn point) and serialise `GLPS` v4 |
+| `game_autosave() -> u32` (bytes at `game_save_ptr()`) | not in the original: the same bytes **without** taking a snapshot, so the respawn point is untouched (the web autosave, #39) |
 | `game_load(ptr, len) -> i32` | adopt an `alloc`ed buffer, rebuild its section, restore; 0 ok, -1 not a save, -2 bad section, -3 does not fit |
 | `game_section() -> i32`, `world_vertex_count() -> u32` | re-read the buffers after a load |
 | `game_times() -> *const u32` | level ticks, total ticks, level s, total s |
