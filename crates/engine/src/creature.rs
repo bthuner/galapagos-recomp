@@ -1403,6 +1403,33 @@ impl Creature {
             None => Place { on: None, at: m.pos, heading: m.heading },
         });
     }
+
+    /// Quality of Life "Rewind after death" (#45), not in the original:
+    /// his *body* goes back to `s` (where he stood, his gait, actuators,
+    /// senses, hazard counters), his *mind* stays as it is now. The brain is
+    /// never touched (as on any death); the learning accumulators (`cost`,
+    /// `count`, which hold this death's pain until the next generation),
+    /// the counters (`stats`: the death still counts) and the respawn point
+    /// (the last save pad's, still the original's) are kept too. Then he
+    /// materialises, as after a respawn.
+    pub(crate) fn rewind_body(&mut self, s: SavedCreature, sim: &mut Sim) {
+        let mind = (self.cost, self.count, self.stats, self.respawn);
+        self.apply_saved(s, sim);
+        (self.cost, self.count, self.stats, self.respawn) = mind;
+        // Effect 2 variant 3 played backwards: the materialise a kind-6
+        // portal's respawn shows (0x1b2000).
+        let h = self.stance_height as i16;
+        self.effect(sim, |t, c| {
+            t.start_reversed(2, 3, h, c);
+            true
+        });
+        self.mode = Mode::Appearing(0);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cost_for_test(&self) -> ([i64; 3], [i64; 3]) {
+        (self.cost, self.count)
+    }
 }
 
 fn write_v3(w: &mut Writer, v: V3) {

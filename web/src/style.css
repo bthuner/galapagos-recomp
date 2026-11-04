@@ -350,3 +350,51 @@ kbd { font: 0.7rem ui-monospace, monospace; color: var(--mute); border: 1px soli
   font: 0.7rem ui-monospace, monospace;
   pointer-events: none;
 }
+
+/* Rewind after death (qol/rewind.js): a small, non-blocking offer at the
+   bottom of the view while Mendel dissolves and comes back. */
+.rewind {
+  position: absolute;
+  left: 50%;
+  bottom: 1.2rem;
+  z-index: 5;
+  transform: translateX(-50%);
+  display: grid;
+  justify-items: center;
+  gap: 0.45rem;
+  padding: 0.7rem 1rem 0.8rem;
+  border-radius: 10px;
+  border: 1px solid #ffffff22;
+  background: #050b0dd9;
+  backdrop-filter: blur(6px);
+  color: var(--bone);
+  font-size: 0.8rem;
+  overflow: hidden;
+  animation: rewind-in 0.35s var(--ease);
+}
+.rewind[hidden] { display: none; }
+@keyframes rewind-in { from { opacity: 0; transform: translate(-50%, 0.6rem); } }
+.rewind__title, .rewind__note { margin: 0; }
+.rewind__note { font-size: 0.7rem; color: var(--mute); }
+.rewind__choices { display: flex; gap: 0.4rem; }
+.rewind__choice {
+  font: inherit;
+  padding: 0.3rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid #c6ff3d66;
+  background: none;
+  color: var(--lime);
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+.rewind__choice:hover, .rewind__choice:focus-visible { background: var(--lime); color: var(--abyss); outline: none; }
+/* The fuse: full while he dies and rematerialises, then it burns down. */
+.rewind__fuse {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--lime);
+  transform-origin: left;
+}

@@ -388,6 +388,20 @@ the width of every glyph.) That is just under the LEVEL / TOTAL labels.
 | `game_reset_progress()` | new game: zero the variables and clocks before `world_build(0)` |
 | `time_screen_layout(level, w, h) -> *const i32` | 30 i32: picture, size, glyph strip, positions, 11 (x, w) glyphs |
 
+Not in the original, Quality of Life "Rewind after death" (#45, `web/src/qol/rewind.js`):
+in-memory rewind points, the snapshot's idea taken further. A point is
+`Sim::capture` plus Mendel's body (`SavedCreature`); restoring one keeps his
+brain, his learning accumulators (`cost`, `count`), his counters and the
+respawn point, so the 1997 respawn snapshot and every saved game are left
+alone. A new `world_build` (section, new game, load) forgets them.
+
+| Export | Meaning |
+|---|---|
+| `rewind_take(slot) -> u32` | slot 0..15; 1 taken, 0 if Mendel is not alive (dying, materialising, absent) |
+| `rewind_restore(slot) -> i32` | 0 ok (world back, body back, he materialises, camera cut); -1 empty, -2 no section, -3 another build |
+| `rewind_forget()` | drop every point |
+| `rewind_status() -> u32` | 0 absent, 1 alive, 2 dying (towards a respawn), 3 materialising, 4 teleport / level end |
+
 ## Open questions
 
 * Why no save-pad polygon on the CD is solid (`0x22` only), when the exe

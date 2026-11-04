@@ -7,6 +7,7 @@ import { createMenu } from "./menu.js";
 import { showTimeScreen } from "./time-screen.js";
 import { startTitleOverlay } from "./title.js";
 import { frameMeter } from "./qol/frame-meter.js";
+import { rewindAfterDeath } from "./qol/rewind.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -79,6 +80,7 @@ async function boot(files) {
   };
 
   const sfx = createSfx(engine, audio, volume);
+  rewindAfterDeath(engine, $("world").parentElement); // QoL #45: needs the engine, so it starts here
   let paused = false; // while the pause menu or the time screen is up
   let timeScreenUp = false;
 
