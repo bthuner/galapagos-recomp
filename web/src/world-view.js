@@ -361,6 +361,9 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     gl.enable(gl.CULL_FACE);
     gl.cullFace(gl.BACK);
     gl.frontFace(gl.CCW);
+    // No glow (hover #41, keyboard focus #49) in photo mode: it would be
+    // in the picture.
+    const lit = free ? null : highlighted;
     const drawWorld = (glass) => {
       for (let i = 0; i < draws.length / 2; i++) {
         if (visible && !visible[i]) continue; // hidden by a -5 appearance frame
@@ -369,9 +372,9 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
           else gl.enable(gl.CULL_FACE);
         }
         gl.uniformMatrix4fv(uModel, false, transforms.subarray(i * 16, i * 16 + 16));
-        if (i === highlighted) gl.uniform1f(uHighlight, glow);
+        if (i === lit) gl.uniform1f(uHighlight, glow);
         gl.drawArrays(gl.TRIANGLES, draws[i * 2], draws[i * 2 + 1]);
-        if (i === highlighted) gl.uniform1f(uHighlight, 0);
+        if (i === lit) gl.uniform1f(uHighlight, 0);
       }
     };
     gl.uniform1i(uGlass, 0);
