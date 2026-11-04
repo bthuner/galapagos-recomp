@@ -245,6 +245,11 @@ export async function loadEngine(url = "./pkg/galapagos_engine.wasm") {
       },
     },
 
+    // The player's statistics (Pause ▸ Stats, crates/engine/src/tally.rs):
+    // a fresh view of the engine's fixed 52-slot array, laid out as
+    // `Tally::snapshot` documents. Counters only grow; see qol/stats.js.
+    stats: () => new Uint32Array(wasm.memory.buffer, wasm.stats_snapshot(), 52),
+
     // ——— Menus ———
     // File ▸ New with the Preferences age (0..255); then build section 0.
     newGame: (age) => wasm.game_new(age),

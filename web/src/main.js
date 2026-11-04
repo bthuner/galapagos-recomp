@@ -7,6 +7,7 @@ import { createMenu } from "./menu.js";
 import { showTimeScreen } from "./time-screen.js";
 import { startTitleOverlay } from "./title.js";
 import { frameMeter } from "./qol/frame-meter.js";
+import { stats } from "./qol/stats.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -218,6 +219,8 @@ async function boot(files) {
       sfx.flush();
     },
   });
+
+  stats({ engine, menu }); // Pause ▸ Stats (qol/stats.js): watches, never steers
 
   // Poke the running game from DevTools: galapagos.engine.sim.object(85)…
   // galapagos.game.save() keeps the bytes; galapagos.game.load() reopens them.
