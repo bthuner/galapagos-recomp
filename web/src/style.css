@@ -698,7 +698,7 @@ body:not(.dev-mode) .dev-only { display: none !important; }
    Generic on purpose: any overlay added later is hidden too. */
 body.is-photo > :not(#stage, .photo-hud, .photo-flash),
 body.is-photo .stage > :not(.world-frame),
-body.is-photo .world-frame > :not(#world) { display: none !important; }
+body.is-photo .world-frame > :not(#world, .photo-hud, .photo-flash) { display: none !important; } /* the bar and shutter: adopted here in fullscreen */
 body.is-photo.is-photo-title .world-frame > #title:not([hidden]) { display: block !important; }
 body.is-photo #world { outline: 1px solid #c6ff3d33; outline-offset: 4px; }
 .photo-hud {
@@ -879,3 +879,28 @@ body.is-photo #world { outline: 1px solid #c6ff3d33; outline-offset: 4px; }
 }
 .extras-movie canvas { width: min(92vw, calc(80vh * 4 / 3)); height: auto; }
 .extras-movie p { margin: 0; font-size: 0.75rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--mute); }
+
+/* ——— QoL overlays together (the integration of #37's features) ———
+   Each feature placed its overlay on its own; with all of them on, a few
+   corners are shared. Who sits where:
+     top-left      speed badge (×2/×4)
+     top-right     frame meter (page corner); touch: the fullscreen button
+     bottom-left   first-time hint, keyboard-play label; touch: ☰
+     bottom-centre toasts (page), the rewind offer (view), the photo bar
+     bottom-right  fullscreen button; touch: Skip; Mendel's mind (overlay)
+     edges         sound cues */
+/* The keyboard-play label (a11y.js) and a first-time hint share the
+   bottom-left corner: the hint steps up while the label is shown. */
+body:has(.a11y-hint:not([hidden])) .hint { bottom: 2.8rem; }
+/* Touch: the ☰ button owns the bottom-left corner, Skip the bottom-right. */
+.touch-ui .hint { bottom: calc(1.2rem + 44px); }
+.touch-ui .fullscreen-button { bottom: auto; top: 0.6rem; opacity: 0.7; }
+/* While the rewind offer is up it owns the bottom of the view: toasts go
+   to the top of the page and a first-time hint waits. */
+body:has(.rewind:not([hidden])) .toast { bottom: auto; top: 2rem; }
+.world-frame:has(.rewind:not([hidden])) .hint { opacity: 0; pointer-events: none; }
+/* Mendel's mind docked, in fullscreen: the letterboxed view makes room. */
+@media (min-width: 75rem) {
+  body.has-mind .world-frame:fullscreen { padding-right: 24rem; }
+  body.has-mind .world-frame:fullscreen .world { width: calc(var(--view-size, 1) * min(100vw - 24rem, 100vh * 16 / 9)); }
+}

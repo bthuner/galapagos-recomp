@@ -122,7 +122,9 @@ export function fullscreen() {
       navigator.keyboard?.lock?.(["Escape"]).catch(() => {}); // Chromium: Esc stays the game's
     } else {
       late.disconnect();
-      document.body.append(...moved.splice(0)); // same order as before
+      // Same order as before, minus anything its owner removed meanwhile
+      // (the extras' movie overlay, a closed panel…): no ghosts come back.
+      document.body.append(...moved.splice(0).filter((el) => el.parentNode === frame));
       navigator.keyboard?.unlock?.();
     }
   });
