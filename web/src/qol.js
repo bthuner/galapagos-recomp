@@ -42,6 +42,11 @@
 // (those belong to the browser), and while the pause menu is open unless the
 // setting says `inMenu: true`. Escape and Space are the game's own and
 // cannot be taken.
+//
+// A mode that owns the keyboard (photo mode, #46) can narrow the shortcuts
+// with `onlyShortcuts(["photo", "fullscreen"])`: the others are then not
+// dispatched (nor stopped), so they reach the mode's own listener, which
+// decides; `onlyShortcuts(null)` restores them all.
 
 const STORE = "galapagos.qol";
 const RESERVED = new Set(["Escape", "Space"]);
@@ -50,6 +55,7 @@ const RESERVED = new Set(["Escape", "Space"]);
 const GROUPS = ["Comfort", "Pacing", "Explore", "Accessibility"];
 
 const settings = new Map(); // key → normalised definition, in registration order
+let allowed = null; // Set of setting keys whose shortcuts still work, or null: all
 const listeners = new Map(); // key → Set of functions
 let values = {};
 try {
@@ -278,6 +284,14 @@ function press(d, e) {
   else d.action?.(e); // "key": the binding itself is the value
 }
 
+/**
+ * Restrict shortcut dispatch to the settings `keys` (an array), or lift the
+ * restriction with null. For modes that take the keyboard over (photo mode).
+ */
+export function onlyShortcuts(keys) {
+  allowed = keys ? new Set(keys) : null;
+}
+
 // Registered when this module is first imported, before menu.js adds its Esc
 // listener: a handled key is stopped here, so it neither opens the menu nor
 // reaches movie.js (where any keydown ends the music).
@@ -299,7 +313,7 @@ addEventListener("keydown", (e) => {
   const menuOpen = mounted?.menuOpen() ?? false;
   for (const d of settings.values()) {
     const code = d.type === "key" ? get(d.key) : d.shortcut;
-    if (code !== e.code || (menuOpen && !d.inMenu) || (d.active && !d.active())) continue;
+    if (code !== e.code || (menuOpen && !d.inMenu) || (allowed && !allowed.has(d.key)) || (d.active && !d.active())) continue;
     e.preventDefault();
     e.stopImmediatePropagation();
     press(d, e);

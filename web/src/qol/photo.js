@@ -24,9 +24,11 @@
 //    main.js its Space listener, so while photo mode is on, it sees every
 //    key first and stops it. Esc leaves photo mode instead of opening the
 //    menu, and no key reaches movie.js, where any keydown ends the music.
-//    (P itself still goes through qol.js's dispatcher, which runs earlier.)
+//    (P itself still goes through qol.js's dispatcher, which runs earlier;
+//    so does F, for fullscreen. Every other QoL shortcut is switched off
+//    with `onlyShortcuts` while photo mode is on, so it lands here.)
 
-import { register } from "../qol.js";
+import { register, onlyShortcuts } from "../qol.js";
 
 const FLY = { KeyW: [1, 0, 0], KeyS: [-1, 0, 0], KeyD: [0, 1, 0], KeyA: [0, -1, 0], KeyE: [0, 0, 1], KeyQ: [0, 0, -1] };
 
@@ -91,6 +93,10 @@ export function photoMode() {
     game.pause(true);
     game.view.freeCamera(true);
     on = true;
+    // Only P (leave) and F (fullscreen, for bigger pictures) stay QoL
+    // shortcuts; the rest (`, G, M, and keyboard play's Tab, Enter, T) fall
+    // through to the listener below, where Enter takes the photo.
+    onlyShortcuts(["photo", "fullscreen"]);
     document.body.classList.add("is-photo");
     setKeep(keep);
     hud.hidden = false;
@@ -104,6 +110,7 @@ export function photoMode() {
     on = false;
     cancelAnimationFrame(raf);
     held.clear();
+    onlyShortcuts(null);
     game.view.freeCamera(false);
     game.pause(wasPaused);
     document.body.classList.remove("is-photo", "is-photo-title");
