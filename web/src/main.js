@@ -7,6 +7,7 @@ import { createMenu } from "./menu.js";
 import { showTimeScreen } from "./time-screen.js";
 import { startTitleOverlay } from "./title.js";
 import { frameMeter } from "./qol/frame-meter.js";
+import { hover } from "./qol/hover.js";
 import { autosave } from "./qol/autosave.js";
 import { skipIntro } from "./qol/skip-intro.js";
 
@@ -15,6 +16,7 @@ const $ = (id) => document.getElementById(id);
 // Quality of Life features (Pause ▸ Quality of Life, see qol.js): one call
 // each. They register their settings; the menu renders whatever is there.
 frameMeter();
+hover(); // highlight clickable objects (#41): reads globalThis.galapagos once a world is up
 autosave();
 const intro = skipIntro();
 const log = (msg) => ($("log").textContent += msg + "\n");

@@ -29,6 +29,7 @@ use galapagos_formats::worlds::{Object, Section, WorldObject};
 use std::cell::Cell;
 
 pub mod save;
+mod hover;
 
 pub const TICKS_PER_SECOND: u32 = 24;
 
