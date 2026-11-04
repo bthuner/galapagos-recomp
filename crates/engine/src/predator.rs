@@ -427,6 +427,7 @@ impl Predator {
             if prey.is_some_and(|p| p.menc == Some(hit.obj)) {
                 if let Some(c) = sim.creature.as_mut() {
                     c.react(t.flags);
+                    c.tally.bitten_by(self.class); // the player's stats (tally.rs)
                 }
             }
             // The bounce (`0x408c50` + the stored normal >> shift): only

@@ -13,6 +13,7 @@ import { skipIntro } from "./qol/skip-intro.js";
 import { a11y } from "./qol/a11y.js";
 import { gameSpeed } from "./qol/speed.js";
 import { mendelsMind } from "./qol/mind.js";
+import { stats } from "./qol/stats.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -231,6 +232,8 @@ async function boot(files, { fromCache = false } = {}) {
       sfx.flush();
     },
   });
+
+  stats({ engine, menu }); // Pause ▸ Stats (qol/stats.js): watches, never steers
 
   // Poke the running game from DevTools: galapagos.engine.sim.object(85)…
   // galapagos.game.save() keeps the bytes; galapagos.game.load() reopens them.

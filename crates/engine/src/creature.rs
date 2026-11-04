@@ -264,6 +264,9 @@ pub struct Creature {
     prev_vertices: Vec<f32>,
     /// Teaching/debug counters.
     pub stats: Stats,
+    /// The player's statistics (tally.rs, not in the original): never
+    /// read by the simulation, not saved, carried across sections.
+    pub tally: crate::tally::Tally,
 
     /// Sound cue inputs gathered during the tick: flags of every polygon an
     /// eye ray hit, and whether he landed after a fall (event 4).
@@ -380,6 +383,7 @@ impl Creature {
             vertices: Vec::new(),
             prev_vertices: Vec::new(),
             stats: Stats::default(),
+            tally: Default::default(),
             seen_flags: 0,
             landed: false,
             cue_quiet: [0; 5],
@@ -651,6 +655,7 @@ impl Creature {
 
     fn live(&mut self, sim: &mut Sim) {
         self.stats.ticks_alive += 1;
+        self.tally.ticks_alive += 1;
         let near = Near::gather(&self.polys, sim, self.mover.pos, GATHER_RADIUS, SOLID | FLOOR | HAZARD);
         self.step_mover(&near, sim);
         self.sync(sim);
@@ -678,10 +683,17 @@ impl Creature {
         };
         let mut posted = Vec::new();
         let was = self.mover.pos;
+        let was_grounded = self.mover.grounded;
+        self.tally.feel(drive.injected & LETHAL != 0);
         let felt = self.mover.step(&self.polys, sim, near, &drive, &mut posted);
         if self.mover.grounded {
-            self.stats.walked += length(sub(self.mover.pos, was));
+            let d = length(sub(self.mover.pos, was));
+            self.stats.walked += d;
+            self.tally.walked += d as f64;
+        } else if was_grounded {
+            self.tally.leaps += 1;
         }
+        self.tally.touches += posted.len() as u32;
         // Event bit 1, "Mendel touches me", to each wall the hull pushed
         // against and to his polygon's object (`vtable[9]`, 0x4185e0 and
         // 0x418956 → `WorldObject_PostEvent` @ 0x4232f0).
@@ -1011,6 +1023,7 @@ impl Creature {
                 if n.individual as usize + 1 == galapagos_formats::creature::POPULATION {
                     self.stats.evolutions += 1;
                     self.trace.generations[k] += 1;
+                    self.tally.generations += 1;
                 }
                 self.trace.trials[k] += 1;
                 n.report_fitness(c, &mut self.rng);
@@ -1034,6 +1047,7 @@ impl Creature {
         }
         // Falling for too long is lethal (0x4195cf..0x41962a); the limit
         // comes from the floor he left (`+0x134`, the mover's `+0xe4`).
+        let mut fell = false;
         if !self.mover.grounded {
             if self.fall_limit == 0 {
                 self.fall_limit = if self.mover.floor_flags & 0x10 != 0 { 130 } else { 65 };
@@ -1043,6 +1057,7 @@ impl Creature {
                 if self.fall_limit < n {
                     self.fall_count = 0;
                     self.surface = (self.surface & 0xffd8_1fff) | FELL_TOO_LONG;
+                    fell = true;
                 } else if self.surface & 0x10 != 0 {
                     self.fall_count = 0;
                 }
@@ -1050,12 +1065,13 @@ impl Creature {
         } else {
             // Landing after more than 5 airborne ticks: event 4.
             self.landed = self.fall_count > 5;
+            self.tally.landings += self.landed as u32;
             self.fall_count = 0;
             self.fall_limit = 0;
         }
         let f = self.surface;
         if f & AFFLICTION_BITS != 0 {
-            self.afflictions.apply(((f >> 25) & 15) as u8, sim);
+            self.afflict(((f >> 25) & 15) as u8, sim);
         }
         if f & LETHAL == 0 {
             if self.mover.grounded {
@@ -1080,6 +1096,7 @@ impl Creature {
         // pending destination we don't have here, so they also respawn.
         self.fall_count = 0;
         self.stats.deaths += 1;
+        self.tally.died(f, fell);
         // The effect of the floor: kind (f >> 12) & 15, variant (f >> 16) & 7.
         self.dematerialise([((f >> 12) & 15) as u16, ((f >> 16) & 7) as u16], sim);
         self.mode = Mode::Vanishing(0, After::Respawn);
@@ -1102,6 +1119,15 @@ impl Creature {
     /// `creature+0xae8`; he feels them with his next touch.
     pub(crate) fn react(&mut self, flags: u32) {
         self.injected |= flags;
+    }
+
+    /// `Afflictions_Apply(n)`, counted in the player's tally when it starts.
+    pub(crate) fn afflict(&mut self, n: u8, sim: &mut Sim) {
+        let a = &self.afflictions;
+        let before = (a.kind, a.left());
+        self.afflictions.apply(n, sim);
+        let a = &self.afflictions;
+        self.tally.afflicted(n, before, (a.kind, a.left()));
     }
 
 

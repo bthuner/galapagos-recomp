@@ -16,6 +16,7 @@ mod overlay;
 mod predator;
 mod sim;
 mod sound;
+mod tally;
 mod transition;
 mod walker;
 mod world;
@@ -253,11 +254,14 @@ fn build_section(worlds: &mut Worlds, i: usize) -> i32 {
     sim.enter_initial_states(&mut mesh);
     // Mendel carries his brain from section to section; the first time,
     // it comes from the CD for the age preference (see `brain_for_age`).
-    let carried = old.and_then(|s| s.creature).map(|c| c.brain);
+    let (carried, tally) = old.and_then(|s| s.creature).map_or((None, None), |c| (Some(c.brain), Some(c.tally)));
     let brain = worlds.pending_brain.take().or(carried).or_else(|| brain_for_age(&archive, worlds.age));
     let body = CreatureBody::parse(&worlds.data, archive.header.creature as usize).ok();
     if let (Some(body), Some(brain)) = (body, brain) {
-        sim.creature = Some(creature::Creature::new(&section, &mesh, body, brain));
+        let mut c = creature::Creature::new(&section, &mesh, body, brain);
+        // The player's statistics go on with him (tally.rs): only New resets them.
+        c.tally = tally.unwrap_or_default();
+        sim.creature = Some(c);
     }
     // A level starts with a world snapshot: dying before any save brings
     // the level back to this instant (`0x41caf3` → `Game_TakeSnapshot`).
@@ -789,7 +793,7 @@ pub extern "C" fn creature_affliction() -> u32 {
 pub extern "C" fn creature_afflict(n: u32) {
     with_sim_mut(|sim| {
         if let Some(mut c) = sim.creature.take() {
-            c.afflictions.apply(n.min(255) as u8, sim);
+            c.afflict(n.min(255) as u8, sim);
             sim.creature = Some(c);
         }
     });
@@ -1263,4 +1267,23 @@ pub extern "C" fn world_visible_ptr() -> *const u8 {
 #[no_mangle]
 pub extern "C" fn world_cull_ptr() -> *const u8 {
     with_mesh(|m| m.cull.as_ptr(), core::ptr::null())
+}
+
+// ——— Stats (Pause ▸ Stats, #50; not in the original) ————————————————————
+
+thread_local! {
+    static STATS: std::cell::Cell<[u32; tally::SNAPSHOT_LEN]> = const { std::cell::Cell::new([0; tally::SNAPSHOT_LEN]) };
+}
+
+/// The player's statistics: `tally::SNAPSHOT_LEN` u32, laid out as
+/// `Tally::snapshot` documents (slot 0 is the layout version). All zero
+/// but the version while no Mendel exists. Counters only grow (File ▸ New
+/// restarts them), so the host keeps its totals by subtracting readings.
+/// Filled in place: no allocation, cheap enough to read every frame.
+#[no_mangle]
+pub extern "C" fn stats_snapshot() -> *const u32 {
+    let mut s = with_creature(|c| c.tally.snapshot(Some(&c.brain)), [0; tally::SNAPSHOT_LEN]);
+    s[0] = tally::SNAPSHOT_VERSION;
+    STATS.with(|c| c.set(s));
+    STATS.with(|c| c.as_ptr() as *const u32)
 }
