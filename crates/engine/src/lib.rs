@@ -621,6 +621,92 @@ pub extern "C" fn creature_state() -> *const f32 {
     CREATURE_STATE.with(|c| c.as_ptr() as *const f32)
 }
 
+// ——— Mendel's mind (Quality of Life, #48; not in the original) ————————————
+//
+// A read-only snapshot of his senses, touch, brain and learning, for the
+// panel in web/src/qol/mind.js. The layout (109 f32) is documented, and
+// pinned by tests, in creature/mind.rs. One static buffer, refilled on
+// each call: nothing is allocated per frame, and a closed panel never
+// calls, so it costs nothing.
+
+thread_local! {
+    static MIND: std::cell::Cell<creature::mind::Mind> = std::cell::Cell::new(creature::mind::Mind::default());
+}
+
+/// Fill the snapshot from Mendel as he stands now (zeros while there is
+/// no Mendel: `version` 0) and return a pointer to its
+/// [`creature_mind_len`] floats.
+#[no_mangle]
+pub extern "C" fn creature_mind_ptr() -> *const f32 {
+    let m = with_creature(|c| c.mind(), creature::mind::Mind::default());
+    MIND.with(|slot| {
+        slot.set(m);
+        slot.as_ptr() as *const f32
+    })
+}
+
+/// Number of f32 at [`creature_mind_ptr`].
+#[no_mangle]
+pub extern "C" fn creature_mind_len() -> u32 {
+    creature::mind::Mind::LEN as u32
+}
+
+#[cfg(test)]
+mod mind_export_tests {
+    use super::*;
+
+    /// Through the real ABI, as JavaScript does it: open the CD's worlds,
+    /// build section 0, skip the intro, tick, and read the export as a
+    /// flat f32 array at the documented indices.
+    #[test]
+    fn creature_mind_export_matches_the_creature() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../originals/mounted/install/data/worlds");
+        let Ok(bytes) = std::fs::read(path) else { return };
+        let p = alloc(bytes.len());
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len()) };
+        assert!(worlds_open(p, bytes.len()) > 0);
+        assert!(world_build(0) > 0);
+        let read = || unsafe { core::slice::from_raw_parts(creature_mind_ptr(), creature_mind_len() as usize) }.to_vec();
+        for t in 0..60 * sim::TICKS_PER_SECOND {
+            sim_hold_skip((120..122).contains(&t) as u32);
+            sim_tick(1);
+            if t == 40 * sim::TICKS_PER_SECOND {
+                // A right click on his left side.
+                with_sim_mut(|s| s.creature.as_mut().unwrap().touch(true));
+            }
+            let m = read();
+            let alive = with_creature(
+                |c| {
+                    assert_eq!(m[1], match c.mode { creature::Mode::Absent => 0.0, creature::Mode::Appearing(_) => 1.0, creature::Mode::Alive => 2.0, creature::Mode::Vanishing(..) => 3.0 });
+                    assert_eq!(m[4], c.heading() as f32);
+                    assert_eq!(m[10], c.outputs()[0] as f32, "stance muscle");
+                    assert_eq!(m[13], c.ground().map_or(0.0, |g| g.0 as f32 + 1.0));
+                    assert_eq!((m[20], m[35]), (c.left as f32, c.right as f32), "eyes");
+                    assert_eq!(m[54], c.stats.touches_posted as f32);
+                    assert_eq!(m[56], c.stats.deaths as f32);
+                    assert_eq!(m[58], c.afflictions.kind as f32);
+                    assert_eq!(m[61], c.stats.evolutions as f32);
+                    for k in 0..3 {
+                        let (n, o) = (&c.brain.nerms[k], 62 + 15 * k);
+                        assert_eq!(m[o], n.state as f32, "chain state {k}");
+                        assert_eq!(m[o + 2], c.outputs()[k] as f32, "muscle {k}");
+                        assert_eq!(m[o + 4], n.individual as f32, "genome {k}");
+                    }
+                    c.mode == creature::Mode::Alive
+                },
+                false,
+            );
+            if t == 40 * sim::TICKS_PER_SECOND + 1 {
+                assert!(alive, "he walks by 40 s");
+                assert_eq!((m[52], m[53]), (1.0, 4.0), "the click, felt on the left for 4 ticks");
+                assert_eq!((m[20], m[21]), (256.0, 2.0), "left eye: full, from the click");
+                assert_eq!((m[107], m[108]), (1.0, 1.0), "one click counted, on the left");
+            }
+        }
+        assert_eq!(read()[0], creature::mind::VERSION);
+    }
+}
+
 /// Right click: ray against Mendel. Returns 1 if his left side was touched,
 /// 2 for the right, 0 for a miss. A touch is felt for 4 ticks.
 #[no_mangle]

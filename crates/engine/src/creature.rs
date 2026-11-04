@@ -43,6 +43,9 @@ use crate::world::{self, Light, WorldMesh, FLOATS_PER_VERTEX};
 use galapagos_formats::creature::{Brain, CreatureBody, Lcg};
 use galapagos_formats::worlds::Section;
 
+/// The read-only snapshot for the "Mendel's mind" panel (not in the original).
+pub mod mind;
+
 // Gravity: grounded, the mover adds −7 to the speed of his height above
 // the floor; airborne it adds `up · −0x700 >> 10` to a velocity kept in
 // 1/256 units: −7 units/tick² both ways (`CreatureMover_Integrate` @
@@ -289,6 +292,9 @@ pub struct Creature {
     /// `creature+0x8ec`: the dematerialise/materialise effect
     /// (transition.rs), what modes 0 and 1 wait for.
     transition: Transition,
+    /// What this tick sensed and decided, kept for the "Mendel's mind"
+    /// panel (mind.rs). Not in the original; never read by the game.
+    trace: mind::Trace,
 }
 
 /// Mendel's five sound cues (`Creature_ReadSoundCues` @ 0x417ab0, played by
@@ -385,6 +391,7 @@ impl Creature {
             noise: [0; 2],
             last_texture: mesh.texture_count as i16 - 1,
             transition: Transition::default(),
+            trace: mind::Trace::default(),
         };
         c.act[0] = Actuator::new(13, stance);
         c
@@ -685,6 +692,12 @@ impl Creature {
         self.left = if felt.left { 256 } else { 0 };
         self.right = if felt.right { 256 } else { 0 };
         self.surface = felt.surface;
+        self.trace.bump = [felt.left, felt.right];
+        self.trace.click = self.touch;
+        if let Some((left, TOUCH_TICKS)) = self.touch {
+            self.trace.clicks += 1;
+            self.trace.last_click = if left { 1 } else { 2 };
+        }
         // The right click (`MEnc`): felt exactly like a bump on that side.
         if let Some((left, n)) = self.touch {
             if left { self.left = 256 } else { self.right = 256 }
@@ -739,6 +752,16 @@ impl Creature {
         let posture = self.act[0].value;
         let a = 100 - posture * 50 / 256;
         let range = 1500 + posture * 500 / 256;
+        // The panel's record: touch (a bump or a click) wins over sight.
+        let t = &mut self.trace;
+        t.rays = Default::default();
+        t.winner = [None; 2];
+        let click = t.click;
+        t.source = [(self.left, true), (self.right, false)].map(|(v, left)| match v {
+            0 => mind::SIGHT,
+            _ if click.is_some_and(|(l, _)| l == left) => mind::CLICK,
+            _ => mind::BUMP,
+        });
         if self.left == 0 {
             self.left = self.eye(near, sim, a, range);
         }
@@ -750,6 +773,7 @@ impl Creature {
             5 => {
                 self.left = 0;
                 self.right = 0;
+                self.trace.source = [mind::BLIND; 2];
             }
             // Confused (0x418ff9): each eye holds 0 or 256, flipping on
             // `seed & 0xf0000 == 0` draws of the brain's LCG.
@@ -763,6 +787,7 @@ impl Creature {
                 }
                 self.left = self.noise[0];
                 self.right = self.noise[1];
+                self.trace.source = [mind::CONFUSED; 2];
             }
             _ => {}
         }
@@ -771,6 +796,7 @@ impl Creature {
         if self.fall_count != 0 && self.fall_limit != 130 {
             self.left = 256;
             self.right = 256;
+            self.trace.source = [mind::FALLING; 2];
         }
     }
 
@@ -785,6 +811,8 @@ impl Creature {
     /// raised 256 and 16 along his up, and lowered 32 (under the floor's
     /// surface: the ledge ray). The eye reports the nearest of the three.
     fn eye(&mut self, near: &Near, sim: &Sim, angle: i32, range: i32) -> i32 {
+        // `a` is always positive (50..100): + is the left eye.
+        let eye = (angle < 0) as usize;
         let f = self.mover.frame(&self.polys, sim);
         let a = turns(self.mover.heading + angle);
         let dir = normalize(f.dir([a.cos(), a.sin(), 0.0]));
@@ -803,23 +831,30 @@ impl Creature {
             // `Creature_CastIrRay` @ 0x4190f0: the nearest polygon of the
             // mask, which may hide what lies behind it.
             if let Some(h) = near.segment(o, e, Faces::Both, wanted) {
-                if is_seen(h.flags) {
+                let seen = is_seen(h.flags);
+                if seen {
                     let d = h.dist as i32 - EYE_NEAR;
                     rays[k] = (d, value(d));
                 }
                 self.notice(h.flags);
+                let class = mind::class_of(h.flags);
+                self.trace.rays[eye][k] = mind::RayTrace { dist: Some(h.dist), class, seen, value: rays[k].1 };
             }
         }
-        rays[2] = self.ledge_ray(near, ray(EYE_LOW), value);
+        let (low, traced) = self.ledge_ray(near, ray(EYE_LOW), value);
+        rays[2] = low;
+        self.trace.rays[eye][2] = traced;
         // The nearest wins (0x419070 compares the three distances).
         let [hi, mid, low] = rays;
-        if !(mid.0 < hi.0 || low.0 < hi.0) {
-            hi.1
+        let k = if !(mid.0 < hi.0 || low.0 < hi.0) {
+            0
         } else if !(hi.0 < mid.0 || low.0 < mid.0) {
-            mid.1
+            1
         } else {
-            low.1
-        }
+            2
+        };
+        self.trace.winner[eye] = (rays[k].0 < 10_000).then_some(k as u8);
+        rays[k].1
     }
 
     /// Sound-cue side effects of a polygon an eye ray met.
@@ -837,13 +872,18 @@ impl Creature {
     /// and is seen. Class 0x80 or a hazard: seen at once. Anything else
     /// (class 0xc0 or 0) ends the ray unseen. Under the shield
     /// (affliction 1), bit-22 polygons count as class 0xc0 (0x419290).
-    fn ledge_ray(&mut self, near: &Near, (o, e): (V3, V3), value: impl Fn(i32) -> i32) -> (i32, i32) {
+    ///
+    /// Also returns the panel's record of the ray (mind.rs): what it
+    /// reported, or the polygon that stopped it unseen.
+    fn ledge_ray(&mut self, near: &Near, (o, e): (V3, V3), value: impl Fn(i32) -> i32) -> ((i32, i32), mind::RayTrace) {
         let wanted = |t: &Tri| t.flags & (SOLID | HAZARD) != 0;
         let hits = near.segment_all(o, e, wanted);
         let dist: Vec<i32> = hits.iter().map(|h| h.dist as i32).collect();
         let report = |d: i32| (d - EYE_NEAR, value(d - EYE_NEAR));
         let mut out = (10_000, 0);
         let mut pending = false;
+        let mut traced = mind::RayTrace::default();
+        let trace = |j: usize, class: u8, seen: bool, v: i32| mind::RayTrace { dist: Some(hits[j].dist), class, seen, value: v };
         for (i, h) in hits.iter().enumerate() {
             let mut fl = h.flags;
             if self.afflictions.kind == 1 && fl & SHIELDED != 0 {
@@ -857,11 +897,13 @@ impl Creature {
                         false
                     } else {
                         out = report(dist[i - 1]);
+                        traced = trace(i - 1, mind::CLASS_DROP, true, out.1);
                         true
                     }
                 }
                 0x40 if i + 1 == hits.len() => {
                     out = report(dist[i]);
+                    traced = trace(i, mind::CLASS_DROP, true, out.1);
                     false
                 }
                 0x40 => {
@@ -870,15 +912,19 @@ impl Creature {
                 }
                 c if c == 0x80 || fl & HAZARD != 0 => {
                     out = report(if pending { dist[i - 1] } else { dist[i] });
+                    traced = if pending { trace(i - 1, mind::CLASS_DROP, true, out.1) } else { trace(i, mind::class_of(fl), true, out.1) };
                     true
                 }
-                _ => true,
+                _ => {
+                    traced = trace(i, mind::class_of(fl), false, 0);
+                    true
+                }
             };
             if stop {
                 break;
             }
         }
-        out
+        (out, traced)
     }
 
 
@@ -964,7 +1010,9 @@ impl Creature {
                 let n = &mut self.brain.nerms[k];
                 if n.individual as usize + 1 == galapagos_formats::creature::POPULATION {
                     self.stats.evolutions += 1;
+                    self.trace.generations[k] += 1;
                 }
+                self.trace.trials[k] += 1;
                 n.report_fitness(c, &mut self.rng);
                 self.cost[k] = 0;
                 self.count[k] = 0;
@@ -1025,6 +1073,7 @@ impl Creature {
             for c in &mut self.cost {
                 *c += PAIN;
             }
+            self.trace.pains += 1;
         }
         // (f >> 19) & 7 picks what happens after the effect; on the CD the
         // lethal floors all say 3, "death". Teleport reasons (1, 2) need a
