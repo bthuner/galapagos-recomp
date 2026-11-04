@@ -9,6 +9,11 @@
 //
 // Saved games live in the browser's private file system (OPFS), next to the
 // cached CD data, as `<name>.gal` files.
+//
+// Two panels are not from 1997, and say so: Quality of Life (rendered by
+// qol.js from its registry) and Stats (filled by #50 through `statsPanel`).
+
+import { mount as mountQol } from "./qol.js";
 
 // ——— Preferences (dialog 129), with the original labels ———
 export const PREFS = {
@@ -94,8 +99,11 @@ export function createMenu(app) {
     c.getContext("2d").putImageData(strip, 0, 0);
   }
 
+  // Features that draw into a panel (Stats) refresh it each time it opens.
+  const onShow = new Map(); // panel name → Set of functions
   function show(panel) {
     root.querySelectorAll(".menu__panel").forEach((p) => (p.hidden = p.dataset.panel !== panel));
+    for (const fn of onShow.get(panel) || []) fn();
   }
   function setOpen(v) {
     open = v;
@@ -145,6 +153,8 @@ export function createMenu(app) {
       app.status("Mendel's NERM exported as mendel.mnd.");
     },
     prefs: () => show("prefs"),
+    qol: () => show("qol"),
+    stats: () => show("stats"),
     sounds: () => {
       // Every non-empty sound of the current world (bank 0) and Mendel's
       // (bank 1), playable one by one: a listening test for human ears.
@@ -198,6 +208,9 @@ export function createMenu(app) {
     savePrefs(prefs);
   };
 
+  // ——— Quality of Life panel: rows come from qol.js's registry ———
+  mountQol($(".qol"), { menuOpen: () => open });
+
   // ——— The save-pad dialog (engine event 6) ———
   const saveForm = $(".menu__save-form");
   saveForm.onsubmit = async (e) => {
@@ -232,6 +245,14 @@ export function createMenu(app) {
     },
     get open() {
       return open;
+    },
+    // The Stats panel's body, for #50 to fill (it holds a placeholder until then).
+    statsPanel: $(".menu__stats"),
+    // Call `fn` every time `panel` ("stats", "qol", …) is shown. Returns an unsubscribe.
+    onShow(panel, fn) {
+      if (!onShow.has(panel)) onShow.set(panel, new Set());
+      onShow.get(panel).add(fn);
+      return () => onShow.get(panel).delete(fn);
     },
   };
 }
