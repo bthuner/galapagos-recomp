@@ -11,6 +11,7 @@ import { hover } from "./qol/hover.js";
 import { autosave } from "./qol/autosave.js";
 import { skipIntro } from "./qol/skip-intro.js";
 import { a11y } from "./qol/a11y.js";
+import { gameSpeed } from "./qol/speed.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -21,6 +22,7 @@ hover(); // highlight clickable objects (#41): reads globalThis.galapagos once a
 autosave();
 const intro = skipIntro();
 a11y(); // accessibility options (#49): colour presets, keyboard play, sound cues, softer flashes
+const speed = gameSpeed(); // the loop below scales game time by speed.factor()
 const log = (msg) => ($("log").textContent += msg + "\n");
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
 
@@ -110,12 +112,12 @@ async function boot(files, { fromCache = false } = {}) {
       const ear = view.listener();
       if (ear) sfx.listen(ear.eye, ear.forward, ear.up);
       const now = performance.now();
-      clock = paused ? 0 : Math.min(clock + (now - last) / 1000, 5 / hz);
+      clock = paused ? 0 : Math.min(clock + ((now - last) / 1000) * speed.factor(engine), 5 / hz);
       last = now;
       const n = Math.floor(clock * hz);
       clock -= n / hz;
       if (!n) return clock * hz;
-      for (const ev of engine.sim.tick(n)) {
+      for (const ev of speed.thin(engine.sim.tick(n))) {
         if (ev.kind === 1) music(ev.a);
         if (ev.kind === 3) sfx.emitter(ev.a, ev.b, ev.c); // a world object made a sound
         if (ev.kind === 5) sfx.creature(ev.a); // one of Mendel's cues
