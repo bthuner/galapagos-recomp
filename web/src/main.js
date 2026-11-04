@@ -19,6 +19,7 @@ import { fullscreen } from "./qol/fullscreen.js";
 import { hints } from "./qol/hints.js";
 import { photoMode } from "./qol/photo.js";
 import { touchControls } from "./qol/touch.js";
+import { gallery } from "./qol/gallery.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -34,6 +35,7 @@ mendelsMind(() => globalThis.galapagos?.engine); // the engine exists once the C
 fullscreen();
 hints(); // reads globalThis.galapagos once boot() has published it
 const photo = photoMode(); // attached to the running world in boot()
+const extras = gallery(); // world select, jukebox, intro: hooked into boot() below
 const log = (msg) => ($("log").textContent += msg + "\n");
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
 
@@ -93,12 +95,12 @@ async function boot(files, { fromCache = false } = {}) {
   const hz = engine.sim.ticksPerSecond();
   let clock = 0, last = performance.now(), current = 0;
 
-  const music = (n) => {
+  const music = extras.music((n) => {
     dispatchEvent(new KeyboardEvent("keydown")); // stop the current track
     if (n > 0 && files[String(n)]) {
       bytesOf(files[String(n)]).then((b) => playMovie(engine, b, $("screen"), audio, { destination: volume }));
     }
-  };
+  });
 
   const sfx = createSfx(engine, audio, volume);
   rewindAfterDeath(engine, $("world").parentElement); // QoL #45: needs the engine, so it starts here
@@ -196,6 +198,7 @@ async function boot(files, { fromCache = false } = {}) {
   // show the one the engine already rebuilt.
   const show = (i, { built = false } = {}) => {
     current = i;
+    extras.reached(i);
     sfx.reset();
     const w = built ? worlds.current() : worlds.build(i);
     view.load({ ...w, takeDirty: engine.sim.takeDirty, creatureVertices: engine.creature.vertices, tint: engine.sim.tint });
@@ -255,6 +258,7 @@ async function boot(files, { fromCache = false } = {}) {
   globalThis.galapagos = { engine, worlds, view, show, sfx, menu, game };
   // Photo mode (qol/photo.js) pauses without the menu: it needs the flag.
   photo.attach({ view, menu, pause: (v) => (paused = v), paused: () => paused, section: () => current, world: $("world"), title: $("title") });
+  extras.attach({ engine, files, audio, out: volume, show, menu, status, scanlines, sections: worlds.sectionCount });
   jukebox(engine, files, audio);
 }
 
