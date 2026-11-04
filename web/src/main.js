@@ -7,12 +7,14 @@ import { createMenu } from "./menu.js";
 import { showTimeScreen } from "./time-screen.js";
 import { startTitleOverlay } from "./title.js";
 import { frameMeter } from "./qol/frame-meter.js";
+import { photoMode } from "./qol/photo.js";
 
 const $ = (id) => document.getElementById(id);
 
 // Quality of Life features (Pause ▸ Quality of Life, see qol.js): one call
 // each. They register their settings; the menu renders whatever is there.
 frameMeter();
+const photo = photoMode(); // attached to the running world in boot()
 const log = (msg) => ($("log").textContent += msg + "\n");
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
 
@@ -227,6 +229,8 @@ async function boot(files) {
     load: (bytes = lastSave) => show(engine.game.load(bytes), { built: true }),
   };
   globalThis.galapagos = { engine, worlds, view, show, sfx, menu, game };
+  // Photo mode (qol/photo.js) pauses without the menu: it needs the flag.
+  photo.attach({ view, menu, pause: (v) => (paused = v), paused: () => paused, section: () => current, world: $("world"), title: $("title") });
   jukebox(engine, files, audio);
 }
 
