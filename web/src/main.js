@@ -15,6 +15,7 @@ import { gameSpeed } from "./qol/speed.js";
 import { mendelsMind } from "./qol/mind.js";
 import { stats } from "./qol/stats.js";
 import { rewindAfterDeath } from "./qol/rewind.js";
+import { fullscreen } from "./qol/fullscreen.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -27,6 +28,7 @@ const intro = skipIntro();
 a11y(); // accessibility options (#49): colour presets, keyboard play, sound cues, softer flashes
 const speed = gameSpeed(); // the loop below scales game time by speed.factor()
 mendelsMind(() => globalThis.galapagos?.engine); // the engine exists once the CD boots
+fullscreen();
 const log = (msg) => ($("log").textContent += msg + "\n");
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
 

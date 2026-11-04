@@ -43,17 +43,18 @@
       <!-- The picture over the 3-D view: world 0's "GALAPAGOS" (title.js). -->
       <canvas id="title" class="title-overlay" aria-label="Galapagos" hidden></canvas>
     </div>
-    <nav id="sections" class="sections" aria-label="Worlds" hidden></nav>
-    <label id="wake" class="wake" hidden>
+    <!-- .dev-only: shown with Pause ▸ Quality of Life ▸ Developer mode (qol/fullscreen.js). -->
+    <nav id="sections" class="sections dev-only" aria-label="Worlds" hidden></nav>
+    <label id="wake" class="wake dev-only" hidden>
       <input type="checkbox" id="wake-all" />
       Wake every machine <small>(debug: ignores the folders that normally wait for Mendel)</small>
     </label>
-    <label id="follow" class="wake" hidden>
+    <label id="follow" class="wake dev-only" hidden>
       <input type="checkbox" id="follow-mendel" checked />
       Follow Mendel <small>(chase camera; drag to look around him, shift-drag to break away)</small>
     </label>
-    <pre id="log" class="log"></pre>
-    <nav id="jukebox" class="jukebox" aria-label="Soundtrack" hidden></nav>
+    <pre id="log" class="log dev-only"></pre>
+    <nav id="jukebox" class="jukebox dev-only" aria-label="Soundtrack" hidden></nav>
     <div class="stage__bar">
       <button id="scanlines" class="link">Scanlines: smooth</button>
       <button id="forget-stage" class="link">Forget my CD</button>

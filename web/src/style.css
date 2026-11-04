@@ -581,3 +581,63 @@ kbd { font: 0.7rem ui-monospace, monospace; color: var(--mute); border: 1px soli
   background: var(--lime);
   transform-origin: left;
 }
+
+/* ——— Fullscreen and Developer mode (qol/fullscreen.js) ——— */
+/* Developer mode off (the default): the page is the game, nothing else. */
+body:not(.dev-mode) .dev-only { display: none !important; }
+/* Fullscreen is the world frame: letterboxed at 16:9 on black. The View Size
+   preference still shrinks it; how many pixels the canvas has stays
+   world-view.js's business (the Resolution preference). */
+.world-frame:fullscreen { display: grid; place-items: center; background: #000; }
+.world-frame:fullscreen .world { width: calc(var(--view-size, 1) * min(100vw, 100vh * 16 / 9)); }
+.fullscreen-button {
+  position: absolute;
+  right: 0.6rem;
+  bottom: 0.6rem;
+  width: 2.2rem;
+  aspect-ratio: 1;
+  border: 1px solid #ffffff33;
+  border-radius: 50%;
+  background: #050b0d99;
+  cursor: pointer;
+  opacity: 0.25; /* there, but quiet until the pointer comes near */
+  transition: opacity 0.3s var(--ease), border-color 0.2s;
+}
+.world-frame:hover .fullscreen-button, .fullscreen-button:focus-visible { opacity: 1; }
+.fullscreen-button:hover { border-color: var(--lime); }
+.fullscreen-button:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
+/* Four corner ticks, drawn with gradients: no icon file. Tighter when on. */
+.fullscreen-button::before {
+  content: "";
+  position: absolute;
+  inset: 30%;
+  --t: linear-gradient(var(--bone), var(--bone));
+  background:
+    var(--t) top left / 35% 1.5px, var(--t) top left / 1.5px 35%,
+    var(--t) top right / 35% 1.5px, var(--t) top right / 1.5px 35%,
+    var(--t) bottom left / 35% 1.5px, var(--t) bottom left / 1.5px 35%,
+    var(--t) bottom right / 35% 1.5px, var(--t) bottom right / 1.5px 35%;
+  background-repeat: no-repeat;
+  transition: inset 0.3s var(--ease);
+}
+.fullscreen-button.is-on::before { inset: 36%; }
+.world[hidden] ~ .fullscreen-button { display: none; } /* only once the world is up */
+/* The status messages a player needs, while the log is hidden. */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 2rem;
+  z-index: 12;
+  transform: translateX(-50%);
+  padding: 0.55rem 1.1rem;
+  border: 1px solid #ffffff22;
+  border-radius: 999px;
+  background: #0b1a1ee6;
+  color: var(--bone);
+  font-size: 0.85rem;
+  pointer-events: none;
+  animation: toast-in 0.4s var(--ease);
+  transition: opacity 0.4s var(--ease);
+}
+.toast.is-out { opacity: 0; }
+@keyframes toast-in { from { opacity: 0; transform: translate(-50%, 0.6rem); } }
