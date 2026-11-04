@@ -681,6 +681,15 @@ pub extern "C" fn creature_touch_ray(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32
     out
 }
 
+/// Read-only twin of `creature_touch_ray`, for keyboard-only play (Quality
+/// of Life #49, not in the original): which side of Mendel the ray would
+/// touch (1 left, 2 right, 0 miss), without touching him. The keyboard's
+/// "touch" key uses it to aim at the side it wants, then right-clicks there.
+#[no_mangle]
+pub extern "C" fn creature_side_ray(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32, dz: f32) -> u32 {
+    with_creature(|c| c.pick([ox, oy, oz], [dx, dy, dz]).map_or(0, |left| if left { 1 } else { 2 }), 0)
+}
+
 /// Mendel's affliction (`creature+0x8fc`, affliction.rs): the number in
 /// the low byte (0 = none), the ticks it has left above it.
 #[no_mangle]

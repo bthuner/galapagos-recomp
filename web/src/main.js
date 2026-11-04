@@ -8,6 +8,7 @@ import { showTimeScreen } from "./time-screen.js";
 import { startTitleOverlay } from "./title.js";
 import { frameMeter } from "./qol/frame-meter.js";
 import { hover } from "./qol/hover.js";
+import { a11y } from "./qol/a11y.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -15,6 +16,7 @@ const $ = (id) => document.getElementById(id);
 // each. They register their settings; the menu renders whatever is there.
 frameMeter();
 hover(); // highlight clickable objects (#41): reads globalThis.galapagos once a world is up
+a11y(); // accessibility options (#49): colour presets, keyboard play, sound cues, softer flashes
 const log = (msg) => ($("log").textContent += msg + "\n");
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
 

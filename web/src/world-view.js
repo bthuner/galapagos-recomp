@@ -92,6 +92,9 @@ uniform int uGlass;
 // hover highlight on this draw, and its colour.
 uniform float uHighlight;
 uniform vec3 uHighlightColour;
+// Quality of Life #49 (not in the original): a colour-blind preset, applied
+// last, in linear light. Identity unless the player picks one.
+uniform mat3 uColourMatrix;
 in vec2 vUV; flat in float vLayer; flat in vec2 vColour; in float vFog;
 in float vRim;
 // A soft tint plus a glowing rim, on top of the faithful colour.
@@ -101,6 +104,9 @@ vec3 highlight(vec3 c) {
   return min(mix(c, uHighlightColour, 0.22 * uHighlight) + uHighlightColour * rim * 0.8 * uHighlight, 1.0);
 }
 out vec4 color;
+vec3 colourblind(vec3 c) {
+  return pow(clamp(uColourMatrix * pow(c, vec3(2.2)), 0.0, 1.0), vec3(1.0 / 2.2));
+}
 vec3 brighten(vec3 c) {
   if (uBright > 0.0) return c + (1.0 - c) * uBright * step(0.5 / 255.0, c);
   if (uBright < 0.0) return c + c * uBright * (1.0 - step(254.5 / 255.0, c));
@@ -115,7 +121,7 @@ void main() {
     if (vColour.x <= 0.0) discard; // level 0: the exe skips it
     vec3 g = mix(uFog, vec3(vColour.x), vFog);
     // Additive light takes only the flash's scale, not its offset.
-    color = vec4(highlight(clamp(g * (uTintHi - uTintLo), 0.0, 1.0)), 1.0);
+    color = vec4(colourblind(highlight(clamp(g * (uTintHi - uTintLo), 0.0, 1.0))), 1.0);
     return;
   }
   if (vLayer < -1.5) discard; // hidden in the current appearance state
@@ -127,7 +133,7 @@ void main() {
   // The 1997 game remapped its 8-bit palette for a flash; we remap the
   // final colour the same way.
   c = clamp(uTintLo + c * (uTintHi - uTintLo), 0.0, 1.0);
-  color = vec4(highlight(c), 1.0);
+  color = vec4(colourblind(highlight(c)), 1.0);
 }`;
 
 // Preferences ▸ Brightness, Darkest … Lightest: the palette shift the exe
@@ -204,6 +210,10 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
   const uHighlight = gl.getUniformLocation(prog, "uHighlight");
   const uEye = gl.getUniformLocation(prog, "uEye");
   let highlighted = null;
+  // Accessibility (QoL #49, not in the original): a colour matrix (row
+  // major) and how much of a palette flash to show (1 = all of it).
+  const uColourMatrix = gl.getUniformLocation(prog, "uColourMatrix");
+  let colourMatrix = [1, 0, 0, 0, 1, 0, 0, 0, 1], flashStrength = 1;
   // Preferences: brightness shift (BRIGHTNESS) and render resolution.
   // `pixels` is the canvas height in device pixels to aim for (0 = native).
   let brightness = 0, pixels = 0;
@@ -312,10 +322,12 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     gl.uniformMatrix4fv(uViewProj, false, viewProj);
     gl.uniform1f(uBright, brightness);
     gl.uniform3f(uFog, fog, fog, fog);
-    const t = current.tint?.() ?? [0, 255, 0, 255, 0, 255];
+    // Reduce flashes (#49): move lo towards 0 and hi towards 255.
+    const t = (current.tint?.() ?? [0, 255, 0, 255, 0, 255]).map((v, k) => (k & 1 ? 255 : 0) + (v - (k & 1 ? 255 : 0)) * flashStrength);
     gl.uniform3f(uTintLo, t[0] / 255, t[2] / 255, t[4] / 255);
     gl.uniform3f(uTintHi, t[1] / 255, t[3] / 255, t[5] / 255);
     gl.uniform3fv(uEye, view.eye);
+    gl.uniformMatrix3fv(uColourMatrix, true, colourMatrix); // WebGL2 may transpose: we keep rows
     // A gentle pulse, about once a second, between 0.55 and 1.
     const glow = 0.775 + 0.225 * Math.sin(now / 1000 * 2 * Math.PI * 0.8);
     gl.uniform1f(uHighlight, 0);
@@ -578,6 +590,16 @@ export function createWorldView(canvas, { onFrame = () => {}, onPick = () => {},
     // Quality of Life #41 (not in the original): glow draw `i` (an index
     // into the section's draws, see engine `sim_object_draw`), or null.
     setHighlight(i) { highlighted = i ?? null; },
+    // Quality of Life #49: a 3×3 colour matrix (row major, linear RGB),
+    // and the share of each palette flash to show (0..1).
+    setColourMatrix(m) { colourMatrix = m ? [...m] : [1, 0, 0, 0, 1, 0, 0, 0, 1]; },
+    setFlashStrength(k) { flashStrength = k; },
+    // A click at a page point, exactly as the mouse delivers it (button 0:
+    // onPick, 2: onTouch), for keyboard-only play (#49).
+    click(clientX, clientY, button = 0) {
+      if (!basis) return;
+      (button === 2 ? onTouch : onPick)(...rayThrough({ clientX, clientY }));
+    },
     // Flip the up axis, for exploring the geometry upside down.
     flipUp() { cam.flip = -cam.flip; },
     // Show the original camera; `creature` returns engine.creature.state()
