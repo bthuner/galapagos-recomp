@@ -7,12 +7,14 @@ import { createMenu } from "./menu.js";
 import { showTimeScreen } from "./time-screen.js";
 import { startTitleOverlay } from "./title.js";
 import { frameMeter } from "./qol/frame-meter.js";
+import { gameSpeed } from "./qol/speed.js";
 
 const $ = (id) => document.getElementById(id);
 
 // Quality of Life features (Pause ▸ Quality of Life, see qol.js): one call
 // each. They register their settings; the menu renders whatever is there.
 frameMeter();
+const speed = gameSpeed(); // the loop below scales game time by speed.factor()
 const log = (msg) => ($("log").textContent += msg + "\n");
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
 
@@ -101,12 +103,12 @@ async function boot(files) {
       const ear = view.listener();
       if (ear) sfx.listen(ear.eye, ear.forward, ear.up);
       const now = performance.now();
-      clock = paused ? 0 : Math.min(clock + (now - last) / 1000, 5 / hz);
+      clock = paused ? 0 : Math.min(clock + ((now - last) / 1000) * speed.factor(engine), 5 / hz);
       last = now;
       const n = Math.floor(clock * hz);
       clock -= n / hz;
       if (!n) return clock * hz;
-      for (const ev of engine.sim.tick(n)) {
+      for (const ev of speed.thin(engine.sim.tick(n))) {
         if (ev.kind === 1) music(ev.a);
         if (ev.kind === 3) sfx.emitter(ev.a, ev.b, ev.c); // a world object made a sound
         if (ev.kind === 5) sfx.creature(ev.a); // one of Mendel's cues

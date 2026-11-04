@@ -350,3 +350,21 @@ kbd { font: 0.7rem ui-monospace, monospace; color: var(--mute); border: 1px soli
   font: 0.7rem ui-monospace, monospace;
   pointer-events: none;
 }
+
+/* Game speed badge (qol/speed.js): top-left of the 3-D view while fast. */
+.speed-badge {
+  position: absolute;
+  top: 0.6rem;
+  left: 0.8rem;
+  z-index: 3;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  background: #050b0dcc;
+  color: var(--lime);
+  font: 600 0.8rem ui-monospace, monospace;
+  letter-spacing: 0.05em;
+  pointer-events: none;
+  transition: opacity 0.3s var(--ease);
+}
+/* Held at ×1 while the title is on screen. */
+.speed-badge.is-held { opacity: 0.4; }
