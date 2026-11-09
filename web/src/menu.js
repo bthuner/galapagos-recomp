@@ -14,6 +14,7 @@
 // qol.js from its registry) and Stats (filled by #50 through `statsPanel`).
 
 import { mount as mountQol } from "./qol.js";
+import { root as storageRoot } from "./storage.js";
 
 // ——— Preferences (dialog 129), with the original labels ———
 export const PREFS = {
@@ -42,10 +43,9 @@ export function loadPrefs() {
 }
 const savePrefs = (p) => localStorage.setItem(KEY, JSON.stringify(p));
 
-// ——— Saved games in OPFS ———
+// ——— Saved games in OPFS (or IndexedDB, see storage.js) ———
 async function savesDir() {
-  const root = await navigator.storage.getDirectory();
-  return root.getDirectoryHandle("galapagos-saves", { create: true });
+  return (await storageRoot()).getDirectoryHandle("galapagos-saves", { create: true });
 }
 async function listSaves() {
   const out = [];

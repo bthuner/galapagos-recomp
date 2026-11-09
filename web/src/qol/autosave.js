@@ -46,14 +46,14 @@
 // next visit the newer of the two wins and is moved into OPFS.
 
 import { register } from "../qol.js";
+import { root } from "../storage.js";
 
 const DIR = "galapagos-saves";
 const FILE = "autosave.glps"; // never `.gal`: see above
 const EXIT = "galapagos.autosave.exit"; // { at, b64 }: the save made on the way out
 
 async function handle(create) {
-  const root = await navigator.storage.getDirectory();
-  const dir = await root.getDirectoryHandle(DIR, { create });
+  const dir = await (await root()).getDirectoryHandle(DIR, { create });
   return dir.getFileHandle(FILE, { create });
 }
 

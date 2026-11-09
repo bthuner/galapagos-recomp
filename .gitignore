@@ -2,6 +2,7 @@
 /originals
 *.iso
 *.smk
+/web/disc
 /target/
 /web/pkg/
 /out/
