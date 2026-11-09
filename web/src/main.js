@@ -1,4 +1,4 @@
-import { loadCached, importIso, forget } from "./disc.js";
+import { loadCached, loadServed, importIso, forget } from "./disc.js";
 import { loadEngine } from "./engine.js";
 import { playMovie } from "./movie.js";
 import { createWorldView } from "./world-view.js";
@@ -311,5 +311,8 @@ drop.addEventListener("drop", (e) => {
 });
 $("forget-stage").addEventListener("click", async () => (await forget(), location.reload()));
 
+// A disc copied into this browser earlier, else one served next to the page.
 const cached = await loadCached();
-if (cached) boot(cached, { fromCache: true });
+const served = cached ? null : await loadServed();
+if (cached || served) boot(cached || served, { fromCache: true });
+if (served) $("forget-stage").hidden = true; // the server's disc is not ours to forget

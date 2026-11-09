@@ -18,6 +18,22 @@ No original game data is in this repository, and none ever will be. You drop
 your own `Galapagos PC.iso` onto the page; it is read locally with ISO 9660
 parsing in JavaScript and cached in your browser's private storage (OPFS).
 
+### Play on your phone (or anywhere) without the ISO
+
+Your computer can serve your disc to the page, so a phone plays without ever
+seeing the ISO:
+
+```sh
+python3 tools/serve.py 8000 --disc "/path/to/Galapagos PC.iso"   # or the CD's install/data folder
+```
+
+It prints the addresses to open on the phone (same Wi-Fi). The files are read
+straight out of the ISO and fetched by the page as the game needs them; saves
+stay on the phone (IndexedDB there, since a plain `http://` LAN address gets
+no OPFS). Anyone on your network can reach the server while it runs. On a
+static host you control, putting `worlds` and `0`…`10` in `web/disc/`
+(gitignored) does the same.
+
 ## Layout
 
 | Path | What |

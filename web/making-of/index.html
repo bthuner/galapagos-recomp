@@ -625,6 +625,27 @@ pos = first_stream_with_valid_crc(overlay)
 <span class="k">const</span> ptr = wasm.alloc(bytes.length);
 <span class="k">new</span> Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
 wasm.worlds_section_count(ptr, bytes.length); <span class="c">// → 8</span></code></pre>
+        <h3 id="served-disc">Playing on a phone, without the ISO</h3>
+        <p>
+          A 383 MB CD image doesn't belong on a phone. So the page has a second way in: it asks its own server for
+          <code>disc/worlds</code>, and if that answers, it boots from there. The server is yours:
+          <code>python3 tools/serve.py --disc "Galapagos PC.iso"</code> on your computer reads the twelve files
+          straight out of the ISO (the same ISO 9660 walk as the browser, in about thirty lines of Python) and prints the
+          address to open on the phone. Nothing is extracted to disk and nothing is copied into the phone: each file
+          only <em>looks</em> like a <code>File</code>, an object with an <code>arrayBuffer()</code> that fetches on
+          demand. The world archive comes when the game starts, a piece of music when it plays.
+        </p>
+        <p>
+          The catch was the address. <code>http://192.168.1.20:8000</code> is not a <em>secure context</em> (only
+          https and localhost are), and the browser simply removes the private file system there:
+          <code>navigator.storage.getDirectory</code> is undefined. The disc no longer needs it, but saved games did.
+          They now go through a small stand-in built on IndexedDB, which has no such rule, offering the five
+          OPFS calls the menu and the autosave make. We checked both in headless Chromium: on the LAN address saves
+          land in IndexedDB, on localhost in OPFS, and the game boots from the served disc in both.
+        </p>
+        <pre class="code"><code><span class="c">// web/src/storage.js</span>
+opened ??= navigator.storage?.getDirectory?.().catch(() =&gt; idbRoot())
+        ?? Promise.resolve(idbRoot()); <span class="c">// no OPFS on http://192.168.…</span></code></pre>
         <h3>First light: walking around a world</h3>
         <p>
           Before any game logic, we can already look at the levels. <code>world.rs</code> flattens a section's
@@ -1037,6 +1058,7 @@ galapagos.view.focus(galapagos.engine.sim.object(<span class="n">85</span>).posi
           <li><time>2026‑11‑04</time> Worlds, music &amp; movies: the developer World and soundtrack buttons, reshaped as an extras screen in the pause menu. Worlds unlock as Mendel reaches them (remembered per browser), each card showing that level's own time-screen picture; "Unlock all worlds" opens the rest. The jukebox decodes a track once and plays it as a plain audio buffer, which is what makes pause and resume possible. The engine has one Smacker decoder, and the game's music is itself a movie, so the jukebox and the intro replay take the speakers and hand the game's track back when they finish.</li>
           <li><time>2026‑11‑05</time> Playtest with every Quality of Life feature on: "Show important sounds" froze the tab when Mendel stood on a save pad. Its loop rescheduled itself twice per frame, so the number of loops doubled every frame. Fixed, with the marker measured only when its text changes.</li>
           <li><time>2026‑11‑05</time> The Quality of Life panel widens on tablets and desktops and flows into two or three columns.</li>
+          <li><time>2026‑11‑09</time> Play without the ISO: <code>tools/serve.py --disc</code> serves your disc next to the page, straight out of the ISO, and the page boots from it, fetching each file when the game needs it. Saves fall back to IndexedDB where there is no private file system, on a phone at a plain http:// LAN address.</li>
           <li><time>2026‑11‑03</time> World 0's GALAPAGOS title, which turned out to be an <code>Over</code> world object: up after 40 ticks under a white flash, down 150 ticks later.</li>
           <li><time>2026‑11‑03</time> The original camera is on by default from the moment a section loads, as in 1997, instead of waiting for Mendel to appear.</li>
           <li><time>2026‑11‑02</time> <code>PMan</code>, the unused fourth predator, ported and tested on a re-classed fork; the shared chase now holds its heading between re-aims, and predators face their prey.</li>
